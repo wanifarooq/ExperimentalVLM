@@ -133,7 +133,9 @@ def build_adv_pixels(
     std: torch.Tensor,
     opt_dtype: torch.dtype,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # base_pixels is flattened patch tokens; reshape to [T*H*W, merge_size=2, C=3, P, P] and cast to opt_dtype for stable grads.
     patches = base_pixels.to(dtype=opt_dtype).reshape(-1, 2, 3, patch_size, patch_size)
+    # epsilon is in raw pixel space; divide by std to express the L_inf bound in normalized space (mean is fixed at 0.5).
     bound = torch.tensor(epsilon, device=patches.device, dtype=opt_dtype).view(1, 1, 1, 1, 1)
     bound = bound / std.view(1, 1, 3, 1, 1)
     perturb = torch.zeros_like(patches, requires_grad=True)
