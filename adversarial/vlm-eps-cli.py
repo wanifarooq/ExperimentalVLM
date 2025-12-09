@@ -11,55 +11,18 @@ from transformers import AutoModelForVision2Seq, AutoProcessor
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Learn a small adversarial perturbation for Qwen3-VL that flips the label."
-    )
+    parser = argparse.ArgumentParser(description="Learn a small adversarial perturbation for Qwen3-VL that flips the label.")
     parser.add_argument("--image", type=Path, required=True, help="Path to an RGB image.")
-    parser.add_argument(
-        "--prompt",
-        type=str,
-        default="Answer with a single-word label for the main object in the photo.",
-        help="User instruction for the model.",
-    )
-    parser.add_argument(
-        "--target-text",
-        type=str,
-        required=True,
-        help="Text we want the model to emit after perturbation.",
-    )
-    parser.add_argument(
-        "--model-id",
-        type=str,
-        default="Qwen/Qwen3-VL-2B-Instruct",
-        help="HF model id.",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        help="auto|cuda|mps|cpu (auto prefers cuda, then mps).",
-    )
+    parser.add_argument("--prompt", type=str, default="Answer with a single-word label for the main object in the photo.", help="User instruction for the model.")
+    parser.add_argument("--target-text", type=str, required=True, help="Text we want the model to emit after perturbation.")
+    parser.add_argument("--model-id", type=str, default="Qwen/Qwen3-VL-2B-Instruct", help="HF model id.")
+    parser.add_argument("--device", type=str, default="auto", help="auto|cuda|mps|cpu (auto prefers cuda, then mps).")
     parser.add_argument("--steps", type=int, default=60, help="Gradient steps.")
     parser.add_argument("--lr", type=float, default=0.05, help="Optimizer learning rate.")
-    parser.add_argument(
-        "--epsilon",
-        type=float,
-        default=4.0 / 255.0,
-        help="Max L_inf perturbation in raw pixel space.",
-    )
+    parser.add_argument("--epsilon", type=float, default=4.0 / 255.0, help="Max L_inf perturbation in raw pixel space.")
     parser.add_argument("--log-every", type=int, default=5, help="Log frequency.")
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=32,
-        help="Max tokens to sample when decoding answers.",
-    )
-    parser.add_argument(
-        "--save",
-        type=Path,
-        default=None,
-        help="Optional path to save the perturbed image reconstruction.",
-    )
+    parser.add_argument("--max-new-tokens", type=int, default=32, help="Max tokens to sample when decoding answers.")
+    parser.add_argument("--save", type=Path, default=None, help="Optional path to save the perturbed image reconstruction.")
     parser.add_argument("--seed", type=int, default=0, help="Optional RNG seed.")
     return parser.parse_args()
 
@@ -115,13 +78,7 @@ def make_conversation_inputs(
         },
         {"role": "assistant", "content": [{"type": "text", "text": target_text}]},
     ]
-    full = processor.apply_chat_template(
-        messages_full,
-        tokenize=True,
-        add_generation_prompt=False,
-        return_tensors="pt",
-        return_dict=True,
-    )
+    full = processor.apply_chat_template(messages_full, tokenize=True, add_generation_prompt=False, return_tensors="pt", return_dict=True)
     full = move_to_device(full, device=device, float_dtype=float_dtype)
 
     messages_user = [
@@ -133,13 +90,7 @@ def make_conversation_inputs(
             ],
         }
     ]
-    gen = processor.apply_chat_template(
-        messages_user,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-        return_dict=True,
-    )
+    gen = processor.apply_chat_template(messages_user, tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True)
     gen = move_to_device(gen, device=device, float_dtype=float_dtype)
     context_len = int(gen["input_ids"].shape[1])
     return full, gen, context_len
@@ -234,14 +185,7 @@ def main() -> None:
     model.eval()
     model.requires_grad_(False)
 
-    full_inputs, gen_inputs, context_len = make_conversation_inputs(
-        processor,
-        image=image,
-        prompt=args.prompt,
-        target_text=args.target_text,
-        device=device,
-        float_dtype=float_dtype,
-    )
+    full_inputs, gen_inputs, context_len = make_conversation_inputs(processor, image=image, prompt=args.prompt, target_text=args.target_text, device=device, float_dtype=float_dtype)
     input_ids = full_inputs["input_ids"]
     attention_mask = full_inputs.get("attention_mask")
     grid = full_inputs["image_grid_thw"]
@@ -251,25 +195,13 @@ def main() -> None:
     patch_size = int(processor.image_processor.patch_size)
     opt_dtype = torch.float32 if float_dtype == torch.float16 else float_dtype
     std = torch.tensor(processor.image_processor.image_std, device=device, dtype=opt_dtype)
-    patches, bound, perturb = build_adv_pixels(
-        base_pixels,
-        patch_size=patch_size,
-        epsilon=args.epsilon,
-        std=std,
-        opt_dtype=opt_dtype,
-    )
+    patches, bound, perturb = build_adv_pixels(base_pixels, patch_size=patch_size, epsilon=args.epsilon, std=std, opt_dtype=opt_dtype)
 
     text_inputs = {k: v for k, v in full_inputs.items() if k != "pixel_values"}
     optimizer = torch.optim.Adam([perturb], lr=args.lr)
 
     with torch.no_grad():
-        base_out = generate_answer(
-            model=model,
-            processor=processor,
-            gen_inputs=gen_inputs,
-            pixel_values=base_pixels,
-            max_new_tokens=args.max_new_tokens,
-        )
+        base_out = generate_answer(model=model, processor=processor, gen_inputs=gen_inputs, pixel_values=base_pixels, max_new_tokens=args.max_new_tokens)
     print(f"[info] Baseline answer: {base_out}")
 
     for step in range(args.steps):
@@ -287,24 +219,13 @@ def main() -> None:
             perturb.data.clamp_(min=-bound, max=bound)
         if step % args.log_every == 0 or step == args.steps - 1:
             with torch.no_grad():
-                lp = sequence_logprob(
-                    logits=outputs.logits,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    context_len=context_len,
-                )
+                lp = sequence_logprob(logits=outputs.logits, input_ids=input_ids, attention_mask=attention_mask, context_len=context_len)
                 print(f"[step {step:03d}] loss={loss.item():.4f} target_logprob={lp.item():.4f}")
 
     with torch.no_grad():
         adv_patches = torch.clamp(patches + perturb, min=patches - bound, max=patches + bound)
         adv_flat = adv_patches.reshape_as(base_pixels).to(dtype=float_dtype)
-        adv_out = generate_answer(
-            model=model,
-            processor=processor,
-            gen_inputs=gen_inputs,
-            pixel_values=adv_flat,
-            max_new_tokens=args.max_new_tokens,
-        )
+        adv_out = generate_answer(model=model, processor=processor, gen_inputs=gen_inputs, pixel_values=adv_flat, max_new_tokens=args.max_new_tokens)
         delta = (adv_patches - patches) * std.view(1, 1, 3, 1, 1)
         l_inf = float(delta.abs().max().item())
         print(f"[info] Final answer: {adv_out}")
