@@ -230,6 +230,7 @@ def main() -> None:
         adv_patches = torch.clamp(patches + perturb, min=patches - bound, max=patches + bound)
         adv_flat = adv_patches.reshape_as(base_pixels).to(dtype=float_dtype)
         adv_out = generate_answer(model=model, processor=processor, gen_inputs=gen_inputs, pixel_values=adv_flat, max_new_tokens=args.max_new_tokens)
+        # Convert normalized perturbation back to raw pixel scale (undo std; mean is fixed at 0.5 so only std matters).
         delta = (adv_patches - patches) * std.view(1, 1, 3, 1, 1)
         l_inf = float(delta.abs().max().item())
         print(f"[info] Final answer: {adv_out}")
