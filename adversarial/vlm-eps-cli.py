@@ -146,6 +146,10 @@ def stitch_image(
     patch_size: int,
     std: torch.Tensor,
 ) -> Image.Image:
+    # patches is [T*H*W, 2, 3, P, P] where dim1=merge_size=2 contains overlapping views for each spatial patch.
+    # grid encodes [T, H, W]; we reshape back to video dimension (T) and 2D grid (H, W).
+    # We average the merge_size dimension to undo Qwen's patch merging, then permute/reshape back to CHW.
+    # Finally, we unnormalize using image_std (mean fixed at 0.5) and convert to a PIL image for saving.
     t, h, w = [int(x) for x in grid[0].tolist()]
     merged = patches.view(t, h, w, 2, 3, patch_size, patch_size).mean(dim=3)
     merged = merged.permute(0, 3, 1, 4, 2, 5).reshape(t, 3, h * patch_size, w * patch_size)
