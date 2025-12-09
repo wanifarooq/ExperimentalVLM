@@ -1,0 +1,14 @@
+[info] Using cached data at /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/seedbench/SEEDBench_IMG.tsv / /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/seedbench/images
+[warn] Embedding drift analysis is single-device only; skipping in multi-worker mode.
+[worker 0] Using model from /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct on cuda:0
+[setup] Loading model /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct on cuda:0 with dtype=torch.float16 (local_only=False)
+[worker 1] Using model from /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct on cuda:1
+[setup] Loading model /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct on cuda:1 with dtype=torch.float16 (local_only=False)
+[worker 2] Using model from /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct on cuda:2
+[setup] Loading model /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct on cuda:2 with dtype=torch.float16 (local_only=False)
+[worker 3] Using model from /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct on cuda:3
+[setup] Loading model /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct on cuda:3 with dtype=torch.float16 (local_only=False)
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.

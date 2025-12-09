@@ -1,0 +1,39 @@
+
+========== SUMMARY ==========
+Total samples in TSV: 3500
+Samples used (with valid base representation): 3500
+Samples with ground truth: 3489
+Base accuracy vs ground truth: 0.613 (2140/3489)
+Type               AVg        Ve  (#img_affected / #img_used, #changed / #total)
+--------------------------------------------------------------------------------
+Translation      0.060     0.159  (555/3500, 1675/28000)
+Pad/Crop         0.066     0.169  (591/3500, 1835/28000)
+Scale            0.073     0.073  (257/3500, 257/3500)
+Scale+Pad        0.071     0.096  (335/3500, 496/7000)
+TextOverlay      0.186     0.233  (816/3500, 1943/10443)
+Rotation         0.116     0.161  (564/3500, 811/7000)
+Any              0.084     0.375  (1311/3500, 7017/83943)
+
+Confusion vs ground truth (perturbation instances)
+Type             R->W     W->R     R->R     W->W   GT inst.
+-----------------------------------------------------------
+Translation       610      643    16510    10149      27912
+Pad/Crop          681      701    16439    10091      27912
+Scale              94       99     2046     1250       3489
+Scale+Pad         190      187     4090     2511       6978
+TextOverlay       544      958     5839     3080      10421
+Rotation          314      303     3966     2395       6978
+Any              2433     2891    48890    29476      83690
+[worker 2] completed label invariance on 3500/3500 samples
+[worker 2] start embedding invariance on 3500 samples
+
+====== EMBEDDING INVARIANCE (similarity to base) ======
+Per-perturbation mean cosine / L2 (context and pooled answers: open, MCQ argmax, MCQ free).
+Translation   ctx-open cos= 0.989 l2=224.066 n=28000 | ctx-mcq cos= 0.995 l2=104.377 n=28000 | ans-open cos= 0.981 l2=137.910 n=28000 | ans-mcq cos= 0.994 l2=82.489 n=28000 | ans-mcq-free cos= 0.992 l2=63.469 n=28000
+Pad/Crop      ctx-open cos= 0.988 l2=242.798 n=28000 | ctx-mcq cos= 0.995 l2=113.631 n=28000 | ans-open cos= 0.979 l2=151.824 n=28000 | ans-mcq cos= 0.992 l2=90.779 n=28000 | ans-mcq-free cos= 0.991 l2=68.963 n=28000
+Scale         ctx-open cos= 0.984 l2=280.876 n=3500 | ctx-mcq cos= 0.993 l2=133.150 n=3500 | ans-open cos= 0.975 l2=178.640 n=3500 | ans-mcq cos= 0.991 l2=103.824 n=3500 | ans-mcq-free cos= 0.990 l2=79.492 n=3500
+Scale+Pad     ctx-open cos= 0.981 l2=300.050 n=7000 | ctx-mcq cos= 0.992 l2=147.205 n=7000 | ans-open cos= 0.973 l2=189.731 n=7000 | ans-mcq cos= 0.991 l2=111.317 n=7000 | ans-mcq-free cos= 0.989 l2=86.609 n=7000
+TextOverlay   ctx-open cos= 0.861 l2=1041.258 n=10443 | ctx-mcq cos= 0.916 l2=556.304 n=10443 | ans-open cos= 0.922 l2=466.047 n=10443 | ans-mcq cos= 0.963 l2=309.877 n=10443 | ans-mcq-free cos= 0.811 l2=497.124 n=10443
+Rotation      ctx-open cos= 0.963 l2=455.261 n=7000 | ctx-mcq cos= 0.976 l2=267.583 n=7000 | ans-open cos= 0.959 l2=275.840 n=7000 | ans-mcq cos= 0.983 l2=181.763 n=7000 | ans-mcq-free cos= 0.981 l2=141.243 n=7000
+Any           ctx-open cos= 0.970 l2=359.962 n=83943 | ctx-mcq cos= 0.983 l2=182.067 n=83943 | ans-open cos= 0.970 l2=200.895 n=83943 | ans-mcq cos= 0.988 l2=125.115 n=83943 | ans-mcq-free cos= 0.968 l2=128.334 n=83943
+[worker 2] completed embedding invariance on 3500 samples

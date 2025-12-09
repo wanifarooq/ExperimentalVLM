@@ -1,0 +1,98 @@
+===== ENV CHECK =====
+Host: dgx008
+Python: /mnt/beegfs/home/fwani/conda/myenv/bin/python
+Python: /mnt/beegfs/home/fwani/conda/myenv/bin/python
+Torch: /mnt/beegfs/home/fwani/conda/myenv/lib/python3.10/site-packages/torch/__init__.py
+=====================
+>>> Starting Qwen3-VL SEEDBench invariance run...
+[info] HF cache dir=/mnt/beegfs/home/fwani/vlm-robustness/.hf_cache
+[info] Loaded 600 samples from SEEDBench_IMG.tsv (rows available: 14000)
+[info] Selected devices for execution: ['cuda:0']
+[info] Using model from /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct
+[drift] Selected 100 samples (limit=100)
+====== EMBEDDING DRIFT ANALYSIS ======
+Samples analyzed: 100 (requested 100), control_k=25
+Metrics are mean cosine distance (1 - cos) and L2.
+
+Channel: ctx_open
+Type          pert_mean_cos   pert_std  ctrl_mean_cos   ctrl_std    cohen_d
+--------------------------------------------------------------------------
+Translation          0.0110     0.0144         0.6195     0.0467   -17.6024
+Translation (L2)       216.5545   126.1087      1846.5151   231.2158    -8.7523
+Pad/Crop             0.0125     0.0157         0.6195     0.0467   -17.4231
+Pad/Crop (L2)       235.8365   134.7535      1846.5151   231.2158    -8.5116
+Scale                0.0166     0.0185         0.6195     0.0467   -16.9641
+Scale (L2)         289.8106   182.6165      1846.5151   231.2158    -7.4720
+Scale+Pad            0.0174     0.0282         0.6195     0.0467   -15.6045
+Scale+Pad (L2)       280.8809   182.2145      1846.5151   231.2158    -7.5212
+TextOverlay          0.1408     0.0982         0.6195     0.0467    -6.2235
+TextOverlay (L2)      1038.2010   484.5868      1846.5151   231.2158    -2.1290
+Rotation             0.0367     0.0348         0.6195     0.0467   -14.1538
+Rotation (L2)       443.7275   217.9079      1846.5151   231.2158    -6.2440
+
+Channel: ctx_mcq
+Type          pert_mean_cos   pert_std  ctrl_mean_cos   ctrl_std    cohen_d
+--------------------------------------------------------------------------
+Translation          0.0046     0.0070         0.1876     0.0378    -6.7376
+Translation (L2)       101.9268    54.9646       752.4721   112.0444    -7.3719
+Pad/Crop             0.0051     0.0056         0.1876     0.0378    -6.7613
+Pad/Crop (L2)       111.4442    55.5509       752.4721   112.0444    -7.2490
+Scale                0.0074     0.0102         0.1876     0.0378    -6.5132
+Scale (L2)         137.7681    87.4119       752.4721   112.0444    -6.1173
+Scale+Pad            0.0082     0.0115         0.1876     0.0378    -6.4281
+Scale+Pad (L2)       143.7653    85.1324       752.4721   112.0444    -6.1175
+TextOverlay          0.0896     0.0467         0.1876     0.0378    -2.3079
+TextOverlay (L2)       573.1292   152.2180       752.4721   112.0444    -1.3419
+Rotation             0.0209     0.0186         0.1876     0.0378    -5.5985
+Rotation (L2)       245.8503   111.1636       752.4721   112.0444    -4.5394
+
+Channel: ans_open
+Type          pert_mean_cos   pert_std  ctrl_mean_cos   ctrl_std    cohen_d
+--------------------------------------------------------------------------
+Translation          0.0172     0.0409         0.2291     0.1079    -2.5969
+Translation (L2)       126.7673   129.6981       732.2191   179.5357    -3.8659
+Pad/Crop             0.0185     0.0353         0.2291     0.1079    -2.6233
+Pad/Crop (L2)       141.9465   121.3468       732.2191   179.5357    -3.8522
+Scale                0.0224     0.0550         0.2291     0.1079    -2.4139
+Scale (L2)         170.7575   181.3209       732.2191   179.5357    -3.1118
+Scale+Pad            0.0217     0.0480         0.2291     0.1079    -2.4837
+Scale+Pad (L2)       172.9534   162.8211       732.2191   179.5357    -3.2633
+TextOverlay          0.0917     0.1113         0.2291     0.1079    -1.2532
+TextOverlay (L2)       499.9546   321.4774       732.2191   179.5357    -0.8921
+Rotation             0.0458     0.0685         0.2291     0.1079    -2.0277
+Rotation (L2)       283.7884   198.1720       732.2191   179.5357    -2.3716
+
+Channel: ans_mcq
+Type          pert_mean_cos   pert_std  ctrl_mean_cos   ctrl_std    cohen_d
+--------------------------------------------------------------------------
+Translation          0.0046     0.0121         0.2277     0.0757    -4.1145
+Translation (L2)        72.7224    56.5684       802.2810   134.4319    -7.0741
+Pad/Crop             0.0050     0.0132         0.2277     0.0757    -4.0975
+Pad/Crop (L2)        79.2287    61.7548       802.2810   134.4319    -6.9120
+Scale                0.0106     0.0565         0.2277     0.0757    -3.2498
+Scale (L2)          97.1036   138.1551       802.2810   134.4319    -5.1735
+Scale+Pad            0.0075     0.0223         0.2277     0.0757    -3.9470
+Scale+Pad (L2)       104.2693   116.5548       802.2810   134.4319    -5.5481
+TextOverlay          0.0392     0.0544         0.2277     0.0757    -2.8589
+TextOverlay (L2)       315.3008   194.6863       802.2810   134.4319    -2.9109
+Rotation             0.0150     0.0316         0.2277     0.0757    -3.6684
+Rotation (L2)       172.8209   139.3893       802.2810   134.4319    -4.5968
+
+Channel: ans_mcq_free
+Type          pert_mean_cos   pert_std  ctrl_mean_cos   ctrl_std    cohen_d
+--------------------------------------------------------------------------
+Translation          0.0073     0.0178         0.2319     0.0698    -4.4082
+Translation (L2)        64.0979    69.7659       584.1326    74.0782    -7.2273
+Pad/Crop             0.0091     0.0217         0.2319     0.0698    -4.3073
+Pad/Crop (L2)        71.8531    67.6918       584.1326    74.0782    -7.2196
+Scale                0.0068     0.0165         0.2319     0.0698    -4.4365
+Scale (L2)          76.6169    82.2410       584.1326    74.0782    -6.4845
+Scale+Pad            0.0085     0.0203         0.2319     0.0698    -4.3445
+Scale+Pad (L2)        83.6240    83.3180       584.1326    74.0782    -6.3489
+TextOverlay          0.1707     0.1983         0.2319     0.0698    -0.4119
+TextOverlay (L2)       470.5858   251.8410       584.1326    74.0782    -0.6117
+Rotation             0.0171     0.0320         0.2319     0.0698    -3.9551
+Rotation (L2)       132.6806    82.7420       584.1326    74.0782    -5.7488
+[drift] Summary + plots written to /mnt/beegfs/home/fwani/vlm-robustness/embedding_drift
+[drift] Summary appended to /mnt/beegfs/home/fwani/vlm-robustness/summary_drift.txt
+>>> Job finished.

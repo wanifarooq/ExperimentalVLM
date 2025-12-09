@@ -1,0 +1,3 @@
+[info] Using cached data at /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/seedbench/SEEDBench_IMG.tsv / /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/seedbench/images
+[setup] Loading model /mnt/beegfs/home/fwani/vlm-robustness/.hf_cache/models/Qwen_Qwen3-VL-2B-Instruct on cuda:0 with dtype=torch.float16 (local_only=False)
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
