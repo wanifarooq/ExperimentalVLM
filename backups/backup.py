@@ -3454,12 +3454,8 @@ def run_experiment(
     }
     pope_yes_stats = {t: PerturbStats() for t in perturb_types} if pope_metrics else {}
     pope_no_stats = {t: PerturbStats() for t in perturb_types} if pope_metrics else {}
-    pope_yes_gt_no_stats = {t: PerturbStats() for t in perturb_types} if pope_metrics else {}
-    pope_no_gt_yes_stats = {t: PerturbStats() for t in perturb_types} if pope_metrics else {}
     pope_yes_any = PerturbStats()
     pope_no_any = PerturbStats()
-    pope_yes_gt_no_any = PerturbStats()
-    pope_no_gt_yes_any = PerturbStats()
     pope_jsonl_file = None
     if pope_jsonl_active and pope_jsonl_path is not None:
         pope_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3602,8 +3598,6 @@ def run_experiment(
         pope_gt = _pope_label_to_yesno(gt_label, sample.options) if pope_enabled else None
         pope_base_yes = pope_metrics and pope_pred == "Yes" and pope_gt == "Yes"
         pope_base_no = pope_metrics and pope_pred == "No" and pope_gt == "No"
-        pope_base_yes_gt_no = pope_metrics and pope_pred == "Yes" and pope_gt == "No"
-        pope_base_no_gt_yes = pope_metrics and pope_pred == "No" and pope_gt == "Yes"
         if gt_label is not None:
             base_correct = base_repr == gt_label
             samples_with_gt += 1
@@ -3681,26 +3675,17 @@ def run_experiment(
             ps: PerturbStats,
             any_ps: PerturbStats,
             pert_repr: Optional[str],
-            base_is_correct: bool,
         ) -> None:
             if gt_label is None or pert_repr is None:
                 return
             ps.gt_evaluable += 1
             any_ps.gt_evaluable += 1
-            if base_is_correct:
-                if pert_repr == gt_label:
-                    ps.right_to_right += 1
-                    any_ps.right_to_right += 1
-                else:
-                    ps.right_to_wrong += 1
-                    any_ps.right_to_wrong += 1
+            if pert_repr == gt_label:
+                ps.right_to_right += 1
+                any_ps.right_to_right += 1
             else:
-                if pert_repr == gt_label:
-                    ps.wrong_to_right += 1
-                    any_ps.wrong_to_right += 1
-                else:
-                    ps.wrong_to_wrong += 1
-                    any_ps.wrong_to_wrong += 1
+                ps.right_to_wrong += 1
+                any_ps.right_to_wrong += 1
 
         def record_freq_delta(
             pert_type: str, pert_img: Image.Image, is_flip: bool
@@ -3861,28 +3846,12 @@ def run_experiment(
                         pope_yes_stats["Translation"],
                         pope_yes_any,
                         r,
-                        True,
                     )
                 if pope_base_no:
                     update_pope_base_confusion(
                         pope_no_stats["Translation"],
                         pope_no_any,
                         r,
-                        True,
-                    )
-                if pope_base_yes_gt_no:
-                    update_pope_base_confusion(
-                        pope_yes_gt_no_stats["Translation"],
-                        pope_yes_gt_no_any,
-                        r,
-                        False,
-                    )
-                if pope_base_no_gt_yes:
-                    update_pope_base_confusion(
-                        pope_no_gt_yes_stats["Translation"],
-                        pope_no_gt_yes_any,
-                        r,
-                        False,
                     )
                 if changed:
                     stats["Translation"].changed_instances += 1
@@ -3928,28 +3897,12 @@ def run_experiment(
                         pope_yes_stats["Pad/Crop"],
                         pope_yes_any,
                         r,
-                        True,
                     )
                 if pope_base_no:
                     update_pope_base_confusion(
                         pope_no_stats["Pad/Crop"],
                         pope_no_any,
                         r,
-                        True,
-                    )
-                if pope_base_yes_gt_no:
-                    update_pope_base_confusion(
-                        pope_yes_gt_no_stats["Pad/Crop"],
-                        pope_yes_gt_no_any,
-                        r,
-                        False,
-                    )
-                if pope_base_no_gt_yes:
-                    update_pope_base_confusion(
-                        pope_no_gt_yes_stats["Pad/Crop"],
-                        pope_no_gt_yes_any,
-                        r,
-                        False,
                     )
                 if changed:
                     stats["Pad/Crop"].changed_instances += 1
@@ -3991,28 +3944,12 @@ def run_experiment(
                     pope_yes_stats["Scale"],
                     pope_yes_any,
                     r,
-                    True,
                 )
             if pope_base_no:
                 update_pope_base_confusion(
                     pope_no_stats["Scale"],
                     pope_no_any,
                     r,
-                    True,
-                )
-            if pope_base_yes_gt_no:
-                update_pope_base_confusion(
-                    pope_yes_gt_no_stats["Scale"],
-                    pope_yes_gt_no_any,
-                    r,
-                    False,
-                )
-            if pope_base_no_gt_yes:
-                update_pope_base_confusion(
-                    pope_no_gt_yes_stats["Scale"],
-                    pope_no_gt_yes_any,
-                    r,
-                    False,
                 )
             if changed:
                 stats["Scale"].changed_instances += 1
@@ -4055,28 +3992,12 @@ def run_experiment(
                         pope_yes_stats["Scale+Pad"],
                         pope_yes_any,
                         r,
-                        True,
                     )
                 if pope_base_no:
                     update_pope_base_confusion(
                         pope_no_stats["Scale+Pad"],
                         pope_no_any,
                         r,
-                        True,
-                    )
-                if pope_base_yes_gt_no:
-                    update_pope_base_confusion(
-                        pope_yes_gt_no_stats["Scale+Pad"],
-                        pope_yes_gt_no_any,
-                        r,
-                        False,
-                    )
-                if pope_base_no_gt_yes:
-                    update_pope_base_confusion(
-                        pope_no_gt_yes_stats["Scale+Pad"],
-                        pope_no_gt_yes_any,
-                        r,
-                        False,
                     )
                 if changed:
                     stats["Scale+Pad"].changed_instances += 1
@@ -4138,28 +4059,12 @@ def run_experiment(
                         pope_yes_stats["TextOverlay"],
                         pope_yes_any,
                         r,
-                        True,
                     )
                 if pope_base_no:
                     update_pope_base_confusion(
                         pope_no_stats["TextOverlay"],
                         pope_no_any,
                         r,
-                        True,
-                    )
-                if pope_base_yes_gt_no:
-                    update_pope_base_confusion(
-                        pope_yes_gt_no_stats["TextOverlay"],
-                        pope_yes_gt_no_any,
-                        r,
-                        False,
-                    )
-                if pope_base_no_gt_yes:
-                    update_pope_base_confusion(
-                        pope_no_gt_yes_stats["TextOverlay"],
-                        pope_no_gt_yes_any,
-                        r,
-                        False,
                     )
                 if changed:
                     stats["TextOverlay"].changed_instances += 1
@@ -4205,28 +4110,12 @@ def run_experiment(
                         pope_yes_stats["BoxOverlay"],
                         pope_yes_any,
                         r,
-                        True,
                     )
                 if pope_base_no:
                     update_pope_base_confusion(
                         pope_no_stats["BoxOverlay"],
                         pope_no_any,
                         r,
-                        True,
-                    )
-                if pope_base_yes_gt_no:
-                    update_pope_base_confusion(
-                        pope_yes_gt_no_stats["BoxOverlay"],
-                        pope_yes_gt_no_any,
-                        r,
-                        False,
-                    )
-                if pope_base_no_gt_yes:
-                    update_pope_base_confusion(
-                        pope_no_gt_yes_stats["BoxOverlay"],
-                        pope_no_gt_yes_any,
-                        r,
-                        False,
                     )
                 if changed:
                     stats["BoxOverlay"].changed_instances += 1
@@ -4279,28 +4168,12 @@ def run_experiment(
                         pope_yes_stats["RandomText"],
                         pope_yes_any,
                         r,
-                        True,
                     )
                 if pope_base_no:
                     update_pope_base_confusion(
                         pope_no_stats["RandomText"],
                         pope_no_any,
                         r,
-                        True,
-                    )
-                if pope_base_yes_gt_no:
-                    update_pope_base_confusion(
-                        pope_yes_gt_no_stats["RandomText"],
-                        pope_yes_gt_no_any,
-                        r,
-                        False,
-                    )
-                if pope_base_no_gt_yes:
-                    update_pope_base_confusion(
-                        pope_no_gt_yes_stats["RandomText"],
-                        pope_no_gt_yes_any,
-                        r,
-                        False,
                     )
                 if changed:
                     stats["RandomText"].changed_instances += 1
@@ -4343,28 +4216,12 @@ def run_experiment(
                         pope_yes_stats["Rotation"],
                         pope_yes_any,
                         r,
-                        True,
                     )
                 if pope_base_no:
                     update_pope_base_confusion(
                         pope_no_stats["Rotation"],
                         pope_no_any,
                         r,
-                        True,
-                    )
-                if pope_base_yes_gt_no:
-                    update_pope_base_confusion(
-                        pope_yes_gt_no_stats["Rotation"],
-                        pope_yes_gt_no_any,
-                        r,
-                        False,
-                    )
-                if pope_base_no_gt_yes:
-                    update_pope_base_confusion(
-                        pope_no_gt_yes_stats["Rotation"],
-                        pope_no_gt_yes_any,
-                        r,
-                        False,
                     )
                 if changed:
                     stats["Rotation"].changed_instances += 1
@@ -4510,32 +4367,6 @@ def run_experiment(
             summary_lines.append(
                 f"{'Any':<12}  {pope_no_any.right_to_wrong:7d}  {pope_no_any.wrong_to_right:7d}  "
                 f"{pope_no_any.right_to_right:7d}  {pope_no_any.wrong_to_wrong:7d}  {pope_no_any.gt_evaluable:9d}"
-            )
-            summary_lines.append("\nConfusion vs ground truth (perturbation instances) [base pred=Yes, gt=No]")
-            summary_lines.append(conf_header)
-            summary_lines.append("-" * len(conf_header))
-            for t in perturb_types:
-                st = pope_yes_gt_no_stats[t]
-                summary_lines.append(
-                    f"{t:<12}  {st.right_to_wrong:7d}  {st.wrong_to_right:7d}  "
-                    f"{st.right_to_right:7d}  {st.wrong_to_wrong:7d}  {st.gt_evaluable:9d}"
-                )
-            summary_lines.append(
-                f"{'Any':<12}  {pope_yes_gt_no_any.right_to_wrong:7d}  {pope_yes_gt_no_any.wrong_to_right:7d}  "
-                f"{pope_yes_gt_no_any.right_to_right:7d}  {pope_yes_gt_no_any.wrong_to_wrong:7d}  {pope_yes_gt_no_any.gt_evaluable:9d}"
-            )
-            summary_lines.append("\nConfusion vs ground truth (perturbation instances) [base pred=No, gt=Yes]")
-            summary_lines.append(conf_header)
-            summary_lines.append("-" * len(conf_header))
-            for t in perturb_types:
-                st = pope_no_gt_yes_stats[t]
-                summary_lines.append(
-                    f"{t:<12}  {st.right_to_wrong:7d}  {st.wrong_to_right:7d}  "
-                    f"{st.right_to_right:7d}  {st.wrong_to_wrong:7d}  {st.gt_evaluable:9d}"
-                )
-            summary_lines.append(
-                f"{'Any':<12}  {pope_no_gt_yes_any.right_to_wrong:7d}  {pope_no_gt_yes_any.wrong_to_right:7d}  "
-                f"{pope_no_gt_yes_any.right_to_right:7d}  {pope_no_gt_yes_any.wrong_to_wrong:7d}  {pope_no_gt_yes_any.gt_evaluable:9d}"
             )
 
     if freq_helper is not None:
@@ -5708,7 +5539,7 @@ DEFAULT_RUN_CONFIG = {
     "gpus_per_worker": 0,
     "seed": 0,
     "deterministic": False,
-    "max_samples": 10000,
+    "max_samples": 20,
     "compare_mode": "label",
     "invariance_mode": "label",  # run both label + embedding by default
     "save_changed_dir": "changed_predictions",

@@ -7,3 +7,8 @@ __pycache__/
 .cache/
 .DS_Store
 .hf_cache/
+changed_predictions_mmmu_test_needed
+.codex
+.vscode/
+.idea/
+*.log
