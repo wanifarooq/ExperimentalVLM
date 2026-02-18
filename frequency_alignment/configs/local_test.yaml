@@ -1,0 +1,44 @@
+# Quick local testing config for 4070 16GB GPU
+# Use: python -m frequency_alignment.run_experiment --config frequency_alignment/configs/local_test.yaml
+
+seed: 42
+device: cuda:0
+cache_dir: .hf_cache
+out_dir: frequency_alignment_outputs_local
+
+model:
+  primary: Qwen/Qwen3-VL-2B-Instruct  # already cached, fits in 12GB without quantization
+  quantization: none
+  trust_remote_code: true
+
+data:
+  dataset: gqa
+  max_samples: 10
+
+perturbations:
+  severity_levels:
+    - 1
+  include_natural: true
+  include_frequency: true
+
+experiments:
+  exp1:
+    enabled: true
+    max_samples: 10
+  exp2:
+    enabled: true
+    max_samples: 5
+    layer_stride: 8  # fewer layers for faster testing
+  exp3:
+    enabled: true
+    max_samples: 5
+    perturbation_subset: 3
+  exp4:
+    enabled: true
+    max_samples: 5
+    sweep_steps: 5
+  exp5:
+    enabled: true
+  exp6:
+    enabled: true
+    max_samples: 5

@@ -1,0 +1,558 @@
+"""GQA dataset loader with 4-level granularity question generation.
+
+Downloads GQA scene graphs and images, then generates questions at four
+granularity levels from the same image:
+
+- **L1 (Coarse)**: Object presence -- "Is there a {object} in this image?"
+- **L2 (Medium)**: Attribute recognition -- "What {attr_type} is the {object}?"
+- **L3 (Fine)**: Spatial relationship -- "Is the {obj1} to the {relation} of {obj2}?"
+- **L4 (Very Fine)**: Compositional MCQ -- combines attributes + spatial reasoning
+
+GQA scene graph structure (per image)::
+
+    {
+        "imageId": {
+            "width": int,
+            "height": int,
+            "objects": {
+                "objId": {
+                    "name": str,
+                    "x": int, "y": int, "w": int, "h": int,
+                    "attributes": [str, ...],
+                    "relations": [
+                        {"name": str, "object": str (target objId)},
+                        ...
+                    ]
+                },
+                ...
+            }
+        }
+    }
+
+Download URLs:
+- Scene graphs: https://downloads.cs.stanford.edu/nlp/data/gqa/sceneGraphs.zip (42.7 MB)
+- Images: https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip (20.3 GB for images only)
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import random
+import zipfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import requests
+
+from .base import GranularityLevel, GranularitySample, LevelData
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Download URLs
+# ---------------------------------------------------------------------------
+_SCENE_GRAPHS_URL = "https://downloads.cs.stanford.edu/nlp/data/gqa/sceneGraphs.zip"
+_IMAGES_URL = "https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip"
+
+# Common attribute categories for L2 questions
+_ATTRIBUTE_CATEGORIES = {
+    "color": {
+        "white", "black", "red", "blue", "green", "yellow", "brown",
+        "gray", "grey", "orange", "pink", "purple", "beige", "tan",
+        "silver", "gold",
+    },
+    "material": {
+        "wooden", "metal", "plastic", "glass", "leather", "fabric",
+        "concrete", "brick", "stone", "ceramic", "rubber",
+    },
+    "shape": {
+        "round", "square", "rectangular", "circular", "oval",
+        "triangular", "flat", "curved",
+    },
+    "size": {"large", "small", "big", "little", "tall", "short", "long", "thin"},
+    "texture": {
+        "striped", "spotted", "plaid", "checkered", "smooth",
+        "rough", "shiny", "matte",
+    },
+}
+
+# Flatten for quick lookup: attribute_word -> category
+_ATTR_TO_CATEGORY: Dict[str, str] = {}
+for cat, words in _ATTRIBUTE_CATEGORIES.items():
+    for w in words:
+        _ATTR_TO_CATEGORY[w.lower()] = cat
+
+
+# ---------------------------------------------------------------------------
+# Download helpers
+# ---------------------------------------------------------------------------
+
+
+def _download_file(url: str, dest: Path, desc: str = "") -> None:
+    """Download a file with progress logging."""
+    if dest.exists():
+        logger.info("Already downloaded: %s", dest)
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Downloading %s → %s", desc or url, dest)
+    resp = requests.get(url, stream=True, timeout=60)
+    resp.raise_for_status()
+    total = int(resp.headers.get("content-length", 0))
+    downloaded = 0
+    with open(dest, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            f.write(chunk)
+            downloaded += len(chunk)
+            if total > 0 and downloaded % (10 * 1024 * 1024) < 8192:
+                logger.info("  %.1f / %.1f MB", downloaded / 1e6, total / 1e6)
+    logger.info("Download complete: %s (%.1f MB)", dest.name, dest.stat().st_size / 1e6)
+
+
+def download_scene_graphs(cache_dir: Path) -> Path:
+    """Download and extract GQA scene graphs.
+
+    Returns:
+        Directory containing ``val_sceneGraphs.json``.
+    """
+    sg_dir = cache_dir / "gqa" / "sceneGraphs"
+    val_json = sg_dir / "val_sceneGraphs.json"
+    if val_json.exists():
+        return sg_dir
+
+    zip_path = cache_dir / "gqa" / "sceneGraphs.zip"
+    _download_file(_SCENE_GRAPHS_URL, zip_path, "GQA scene graphs")
+
+    logger.info("Extracting scene graphs...")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(sg_dir)
+    # The zip may extract into a subdirectory; find the JSON
+    for candidate in [sg_dir / "val_sceneGraphs.json",
+                      sg_dir / "sceneGraphs" / "val_sceneGraphs.json"]:
+        if candidate.exists():
+            if candidate.parent != sg_dir:
+                # Move files up one level
+                for f in candidate.parent.iterdir():
+                    f.rename(sg_dir / f.name)
+            break
+    assert val_json.exists() or (sg_dir / "val_sceneGraphs.json").exists(), \
+        f"val_sceneGraphs.json not found in {sg_dir}"
+    return sg_dir
+
+
+def download_gqa_images(cache_dir: Path, allow_download: bool = True) -> Path:
+    """Get GQA images directory.
+
+    GQA uses Visual Genome images.  The full download is ~20 GB.
+    If images are not available, returns the expected path (individual
+    images will be downloaded on demand via :func:`download_single_image`).
+    """
+    img_dir = cache_dir / "gqa" / "images"
+    if img_dir.exists() and any(img_dir.iterdir()):
+        return img_dir
+
+    img_dir.mkdir(parents=True, exist_ok=True)
+
+    if allow_download:
+        zip_path = cache_dir / "gqa" / "images.zip"
+        if not zip_path.exists():
+            logger.info(
+                "GQA images not found locally. Individual images will be "
+                "downloaded on demand from Visual Genome servers."
+            )
+            return img_dir
+        logger.info("Extracting GQA images...")
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(img_dir.parent)
+    return img_dir
+
+
+# Visual Genome hosts GQA images in two directories
+_VG_IMAGE_URLS = [
+    "https://cs.stanford.edu/people/rak248/VG_100K/{image_id}.jpg",
+    "https://cs.stanford.edu/people/rak248/VG_100K_2/{image_id}.jpg",
+]
+
+
+def download_single_image(image_id: str, img_dir: Path) -> bool:
+    """Download a single GQA image on demand from Visual Genome.
+
+    Returns True if the image was successfully downloaded or already exists.
+    """
+    img_path = img_dir / f"{image_id}.jpg"
+    if img_path.exists():
+        return True
+
+    for url_template in _VG_IMAGE_URLS:
+        url = url_template.format(image_id=image_id)
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                img_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(img_path, "wb") as f:
+                    f.write(resp.content)
+                return True
+        except (requests.RequestException, OSError):
+            continue
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Scene graph loading
+# ---------------------------------------------------------------------------
+
+
+def load_scene_graphs(
+    sg_dir: Path, split: str = "val"
+) -> Dict[str, dict]:
+    """Load scene graphs JSON for the given split.
+
+    Returns:
+        ``{image_id: scene_graph_dict}``.
+    """
+    path = sg_dir / f"{split}_sceneGraphs.json"
+    logger.info("Loading scene graphs from %s ...", path)
+    with open(path, "r") as f:
+        data = json.load(f)
+    logger.info("Loaded %d scene graphs", len(data))
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Question generation per granularity level
+# ---------------------------------------------------------------------------
+
+
+def _classify_attributes(attributes: List[str]) -> Dict[str, str]:
+    """Classify a list of free-form attribute strings into categories.
+
+    Returns:
+        ``{category: attribute_value}`` for recognized attributes.
+    """
+    result: Dict[str, str] = {}
+    for attr in attributes:
+        attr_lower = attr.lower().strip()
+        cat = _ATTR_TO_CATEGORY.get(attr_lower)
+        if cat and cat not in result:
+            result[cat] = attr_lower
+    return result
+
+
+def _make_distractors(
+    correct: str,
+    category: str,
+    n: int = 3,
+    rng: random.Random | None = None,
+) -> List[str]:
+    """Generate distractor options for MCQ from the same attribute category."""
+    rng = rng or random.Random()
+    pool = list(_ATTRIBUTE_CATEGORIES.get(category, set()))
+    pool = [p for p in pool if p.lower() != correct.lower()]
+    rng.shuffle(pool)
+    return pool[:n]
+
+
+def build_l1_question(
+    sg: dict,
+    obj_id: str,
+    obj: dict,
+    rng: random.Random,
+    all_object_names: Set[str],
+) -> Optional[LevelData]:
+    """L1 (Coarse): Object presence Y/N."""
+    name = obj.get("name", "").strip()
+    if not name:
+        return None
+
+    # 80% positive, 20% negative
+    if rng.random() < 0.8:
+        question = f"Is there a {name} in this image?"
+        answer = "A"
+        options = {"A": "yes", "B": "no"}
+    else:
+        # Pick an absent object
+        absent = list(all_object_names - {o.get("name", "") for o in sg.get("objects", {}).values()})
+        if not absent:
+            return None
+        absent_name = rng.choice(absent)
+        question = f"Is there a {absent_name} in this image?"
+        answer = "B"
+        options = {"A": "yes", "B": "no"}
+
+    return LevelData(
+        level=GranularityLevel.L1_COARSE,
+        question=question,
+        options=options,
+        answer_label=answer,
+        question_type="object_presence",
+    )
+
+
+def build_l2_question(
+    sg: dict,
+    obj_id: str,
+    obj: dict,
+    rng: random.Random,
+) -> Optional[LevelData]:
+    """L2 (Medium): Attribute recognition MCQ."""
+    name = obj.get("name", "").strip()
+    attributes = obj.get("attributes", [])
+    if not name or not attributes:
+        return None
+
+    classified = _classify_attributes(attributes)
+    if not classified:
+        return None
+
+    # Pick a random attribute category
+    cat = rng.choice(list(classified.keys()))
+    correct_val = classified[cat]
+    distractors = _make_distractors(correct_val, cat, n=3, rng=rng)
+    if len(distractors) < 2:
+        return None
+
+    all_opts = [correct_val] + distractors[:3]
+    rng.shuffle(all_opts)
+    labels = ["A", "B", "C", "D"]
+    options = {labels[i]: opt for i, opt in enumerate(all_opts)}
+    answer = next(l for l, v in options.items() if v == correct_val)
+
+    question = f"What {cat} is the {name}?"
+    return LevelData(
+        level=GranularityLevel.L2_MEDIUM,
+        question=question,
+        options=options,
+        answer_label=answer,
+        question_type=f"attribute_{cat}",
+    )
+
+
+def build_l3_question(
+    sg: dict,
+    obj_id: str,
+    obj: dict,
+    objects: dict,
+    rng: random.Random,
+) -> Optional[LevelData]:
+    """L3 (Fine): Spatial relationship Y/N."""
+    name = obj.get("name", "").strip()
+    relations = obj.get("relations", [])
+    if not name or not relations:
+        return None
+
+    # Pick a random relation
+    rel = rng.choice(relations)
+    rel_name = rel.get("name", "").strip()
+    target_id = rel.get("object", "")
+    target_obj = objects.get(target_id)
+    if not rel_name or target_obj is None:
+        return None
+    target_name = target_obj.get("name", "").strip()
+    if not target_name:
+        return None
+
+    if rng.random() < 0.7:
+        # Positive: use the actual relation
+        question = f"Is the {name} {rel_name} the {target_name}?"
+        answer = "A"
+    else:
+        # Negative: use a different (likely wrong) relation
+        other_rels = ["to the left of", "to the right of", "above", "below",
+                      "behind", "in front of", "on top of", "next to"]
+        other_rels = [r for r in other_rels if r != rel_name]
+        if not other_rels:
+            return None
+        wrong_rel = rng.choice(other_rels)
+        question = f"Is the {name} {wrong_rel} the {target_name}?"
+        answer = "B"
+
+    options = {"A": "yes", "B": "no"}
+    return LevelData(
+        level=GranularityLevel.L3_FINE,
+        question=question,
+        options=options,
+        answer_label=answer,
+        question_type="spatial_relationship",
+    )
+
+
+def build_l4_question(
+    sg: dict,
+    objects: dict,
+    rng: random.Random,
+) -> Optional[LevelData]:
+    """L4 (Very Fine): Compositional MCQ combining attributes + relations.
+
+    Template: "What is the {attribute_category} of the {object} that is
+    {relation} the {other_object}?"
+    """
+    # Find an object with both attributes AND outgoing relations
+    candidates = []
+    for oid, obj in objects.items():
+        attrs = obj.get("attributes", [])
+        rels = obj.get("relations", [])
+        classified = _classify_attributes(attrs)
+        if classified and rels:
+            candidates.append((oid, obj, classified, rels))
+
+    if not candidates:
+        return None
+
+    oid, obj, classified, rels = rng.choice(candidates)
+    name = obj.get("name", "").strip()
+
+    # Pick a relation for the compositional reference
+    rel = rng.choice(rels)
+    rel_name = rel.get("name", "").strip()
+    target_id = rel.get("object", "")
+    target_obj = objects.get(target_id)
+    if not rel_name or target_obj is None:
+        return None
+    target_name = target_obj.get("name", "").strip()
+    if not target_name:
+        return None
+
+    # Pick an attribute to ask about
+    cat = rng.choice(list(classified.keys()))
+    correct_val = classified[cat]
+    distractors = _make_distractors(correct_val, cat, n=3, rng=rng)
+    if len(distractors) < 2:
+        return None
+
+    all_opts = [correct_val] + distractors[:3]
+    rng.shuffle(all_opts)
+    labels = ["A", "B", "C", "D"]
+    options = {labels[i]: opt for i, opt in enumerate(all_opts)}
+    answer = next(l for l, v in options.items() if v == correct_val)
+
+    question = (
+        f"What {cat} is the {name} that is {rel_name} the {target_name}?"
+    )
+    return LevelData(
+        level=GranularityLevel.L4_VERY_FINE,
+        question=question,
+        options=options,
+        answer_label=answer,
+        question_type=f"compositional_{cat}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dataset builder
+# ---------------------------------------------------------------------------
+
+
+def _collect_all_object_names(scene_graphs: Dict[str, dict]) -> Set[str]:
+    """Collect all unique object names across the dataset for negative sampling."""
+    names: Set[str] = set()
+    for sg in scene_graphs.values():
+        for obj in sg.get("objects", {}).values():
+            n = obj.get("name", "").strip()
+            if n:
+                names.add(n)
+    return names
+
+
+def build_granularity_dataset(
+    cache_dir: Path,
+    max_samples: int = 1000,
+    seed: int = 42,
+    split: str = "val",
+    allow_download: bool = True,
+) -> List[GranularitySample]:
+    """Build the 4-level granularity dataset from GQA.
+
+    Downloads scene graphs and images if needed, generates questions at
+    all four levels, and returns only images where all levels were
+    successfully constructed.
+
+    Args:
+        cache_dir: Root cache directory.
+        max_samples: Maximum number of complete samples to return.
+        seed: Random seed for reproducibility.
+        split: GQA split (``val`` or ``train``).
+        allow_download: Whether to download missing data.
+
+    Returns:
+        List of :class:`GranularitySample`, each with L1-L4 questions.
+    """
+    rng = random.Random(seed)
+
+    # Download data
+    sg_dir = download_scene_graphs(cache_dir)
+    img_dir = download_gqa_images(cache_dir, allow_download=allow_download)
+
+    # Load scene graphs
+    scene_graphs = load_scene_graphs(sg_dir, split)
+    all_names = _collect_all_object_names(scene_graphs)
+
+    # Generate questions per image
+    samples: List[GranularitySample] = []
+    image_ids = list(scene_graphs.keys())
+    rng.shuffle(image_ids)
+
+    for image_id in image_ids:
+        if len(samples) >= max_samples:
+            break
+
+        sg = scene_graphs[image_id]
+        objects = sg.get("objects", {})
+        if len(objects) < 2:
+            continue
+
+        # Check image exists; download on demand if needed
+        img_path = img_dir / f"{image_id}.jpg"
+        if not img_path.exists():
+            if not download_single_image(image_id, img_dir):
+                continue
+
+        # Pick a random object with enough annotations
+        obj_ids = list(objects.keys())
+        rng.shuffle(obj_ids)
+
+        levels: Dict[GranularityLevel, LevelData] = {}
+
+        for obj_id in obj_ids:
+            obj = objects[obj_id]
+
+            if GranularityLevel.L1_COARSE not in levels:
+                q = build_l1_question(sg, obj_id, obj, rng, all_names)
+                if q is not None:
+                    levels[GranularityLevel.L1_COARSE] = q
+
+            if GranularityLevel.L2_MEDIUM not in levels:
+                q = build_l2_question(sg, obj_id, obj, rng)
+                if q is not None:
+                    levels[GranularityLevel.L2_MEDIUM] = q
+
+            if GranularityLevel.L3_FINE not in levels:
+                q = build_l3_question(sg, obj_id, obj, objects, rng)
+                if q is not None:
+                    levels[GranularityLevel.L3_FINE] = q
+
+            if len(levels) >= 3:
+                break
+
+        # L4 uses the full scene graph
+        if GranularityLevel.L4_VERY_FINE not in levels:
+            q = build_l4_question(sg, objects, rng)
+            if q is not None:
+                levels[GranularityLevel.L4_VERY_FINE] = q
+
+        # Only keep images where all 4 levels were generated
+        if len(levels) == 4:
+            sample = GranularitySample(
+                image_id=image_id,
+                image_path=img_path,
+                levels=levels,
+                dataset="gqa",
+                split=split,
+                metadata={"num_objects": len(objects)},
+            )
+            samples.append(sample)
+
+    logger.info(
+        "Built %d complete samples (all 4 levels) from %d scene graphs",
+        len(samples), len(scene_graphs),
+    )
+    return samples

@@ -1,0 +1,108 @@
+seed: 42
+deterministic: false
+device: auto
+cache_dir: .hf_cache
+out_dir: frequency_alignment_outputs
+
+model:
+  primary: Qwen/Qwen3-VL-8B-Instruct
+  alternatives:
+    - llava-hf/llava-onevision-qwen2-7b-ov-hf
+    - OpenGVLab/InternVL2-8B
+    - Qwen/Qwen2.5-VL-72B-Instruct
+  quantization: null  # null, 4bit, 8bit
+  trust_remote_code: true
+
+data:
+  dataset: gqa  # gqa, seedbench, partimagenet
+  gqa_dir: null  # auto-download if null
+  partimagenet_dir: null  # auto-download if null
+  seedbench_tsv: null  # reuse parent cache
+  max_samples: 1000
+  negative_ratio: 0.2
+  rebuild_manifest: false
+  allow_download: true
+
+perturbations:
+  severity_levels:
+    - 1
+    - 2
+    - 3
+  include_natural: true
+  include_frequency: true
+  natural_types:
+    - translation
+    - padcrop
+    - scale
+    - scalepad_black
+    - scalepad_white
+    - rotation
+    - text_overlay
+    - box_overlay
+    - random_text
+  frequency_types:
+    - lowpass_keep
+    - highpass_keep
+    - lowband_noise
+    - highband_noise
+    - allband_noise
+  severity_params:
+    1:
+      translate: 4
+      padcrop: 4
+      scale: 0.95
+      rotation: 10
+      freq_cutoff: 0.18
+      freq_epsilon: 0.03137  # 8/255
+      text_scale: 0.3
+    2:
+      translate: 8
+      padcrop: 8
+      scale: 0.90
+      rotation: 20
+      freq_cutoff: 0.28
+      freq_epsilon: 0.03137
+      text_scale: 0.5
+    3:
+      translate: 12
+      padcrop: 12
+      scale: 0.85
+      rotation: 30
+      freq_cutoff: 0.38
+      freq_epsilon: 0.03137
+      text_scale: 0.7
+
+analysis:
+  num_bands: 10
+  attention_layers: all  # all, or list of layer indices
+  significance_level: 0.05
+  hypothesis_testing: true
+
+experiments:
+  exp1:
+    enabled: true
+    max_samples: 1000
+    batch_size: 1
+  exp2:
+    enabled: true
+    max_samples: 200
+    batch_size: 1
+    layer_stride: 4  # extract every Nth layer to save memory
+  exp3:
+    enabled: true
+    max_samples: 200
+    perturbation_subset: 10  # top-N most informative perturbations
+  exp4:
+    enabled: true
+    max_samples: 500
+    sweep_steps: 20
+    sweep_modes:
+      - lowpass
+      - highpass
+  exp5:
+    enabled: true
+    # uses outputs from exp1 + exp2; no independent samples
+  exp6:
+    enabled: true
+    max_samples: 300
+    dataset: partimagenet

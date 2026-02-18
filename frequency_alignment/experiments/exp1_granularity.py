@@ -1,0 +1,591 @@
+"""Experiment 1: Task Granularity Spectrum.
+
+For each image at each of 4 granularity levels (L1-coarse through L4-very-fine),
+measure VLM accuracy degradation under perturbations.  The central hypothesis is
+that sensitivity scales monotonically with task granularity: coarse tasks are
+robust because they rely on low-frequency features, while fine-grained tasks are
+fragile because they require broad spectral support.
+
+Outputs:
+    exp1/summary.json          -- aggregate metrics and hypothesis tests
+    exp1/per_sample.jsonl      -- per-sample results for downstream experiments
+    exp1/degradation_by_level.json -- mean degradation per (level, perturbation)
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+from PIL import Image
+
+from ..analysis.statistics import (
+    bootstrap_ci,
+    cohens_d,
+    monotonicity_test,
+    one_way_anova,
+    spearman_correlation,
+)
+from ..data.base import (
+    ExperimentResult,
+    GranularityLevel,
+    GranularitySample,
+)
+from ..data.gqa import build_granularity_dataset
+from ..models import get_adapter
+from ..perturbations import build_perturbation_suite, PerturbationResult
+from ..utils.device import select_device
+from ..utils.io import save_json
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _predict_label(
+    scores: Dict[str, float],
+) -> str:
+    """Pick the label with the highest score."""
+    return max(scores, key=scores.get)
+
+
+def _is_correct(scores: Dict[str, float], answer_label: str) -> bool:
+    """Check if the top-scoring label matches the ground truth."""
+    return _predict_label(scores) == answer_label
+
+
+def _compute_cosine_drift(
+    clean_tokens: Optional[np.ndarray],
+    perturbed_tokens: Optional[np.ndarray],
+) -> float:
+    """Mean cosine distance between clean and perturbed vision tokens.
+
+    Returns 0.0 if either is None or shapes mismatch.
+    """
+    if clean_tokens is None or perturbed_tokens is None:
+        return 0.0
+    c = clean_tokens.reshape(-1).astype(np.float64)
+    p = perturbed_tokens.reshape(-1).astype(np.float64)
+    if c.shape != p.shape or np.linalg.norm(c) == 0 or np.linalg.norm(p) == 0:
+        return 0.0
+    cos_sim = np.dot(c, p) / (np.linalg.norm(c) * np.linalg.norm(p))
+    return float(1.0 - cos_sim)
+
+
+# ---------------------------------------------------------------------------
+# Core evaluation loop
+# ---------------------------------------------------------------------------
+
+
+def _evaluate_sample(
+    sample: GranularitySample,
+    adapter,
+    perturbation_results: List[PerturbationResult],
+    extract_vision_tokens: bool = False,
+) -> Dict[str, Any]:
+    """Evaluate one sample across all levels and perturbations.
+
+    Returns a dict with per-level clean/perturbed accuracy and drift metrics.
+    """
+    image = Image.open(sample.image_path).convert("RGB")
+    record: Dict[str, Any] = {
+        "image_id": sample.image_id,
+        "levels": {},
+    }
+
+    # --- Clean evaluation per level ---
+    clean_vision_tokens = None
+    if extract_vision_tokens:
+        try:
+            vt = adapter.get_vision_tokens(image)
+            if vt is not None:
+                clean_vision_tokens = vt.cpu().numpy()
+        except Exception:
+            pass
+
+    for level in GranularityLevel:
+        level_data = sample.levels.get(level)
+        if level_data is None:
+            continue
+
+        level_key = level.name  # e.g. "L1_COARSE"
+        level_record: Dict[str, Any] = {
+            "question": level_data.question,
+            "answer_label": level_data.answer_label,
+            "clean": {},
+            "perturbations": [],
+        }
+
+        # Score on clean image
+        try:
+            clean_scores = adapter.score_options(
+                image, level_data.question, level_data.options,
+            )
+            clean_pred = _predict_label(clean_scores)
+            clean_correct = _is_correct(clean_scores, level_data.answer_label)
+            level_record["clean"] = {
+                "predicted": clean_pred,
+                "correct": clean_correct,
+                "scores": {k: float(v) for k, v in clean_scores.items()},
+            }
+        except Exception as e:
+            logger.warning(
+                "Clean scoring failed for %s level %s: %s",
+                sample.image_id, level_key, e,
+            )
+            level_record["clean"] = {"correct": False, "error": str(e)}
+
+        # --- Perturbed evaluation ---
+        for pr in perturbation_results:
+            pert_record: Dict[str, Any] = {
+                "name": pr.name,
+                "family": pr.family,
+                "severity": pr.severity,
+            }
+
+            try:
+                pert_scores = adapter.score_options(
+                    pr.perturbed_image, level_data.question, level_data.options,
+                )
+                pert_pred = _predict_label(pert_scores)
+                pert_correct = _is_correct(pert_scores, level_data.answer_label)
+                pert_record["predicted"] = pert_pred
+                pert_record["correct"] = pert_correct
+                pert_record["scores"] = {
+                    k: float(v) for k, v in pert_scores.items()
+                }
+                # Accuracy drop (1 if correct→wrong, 0 if stayed same)
+                pert_record["accuracy_drop"] = (
+                    1.0 if level_record["clean"].get("correct") and not pert_correct
+                    else 0.0
+                )
+                # Score drift: absolute change in log-likelihood of correct answer
+                if level_data.answer_label in clean_scores:
+                    clean_ll = clean_scores[level_data.answer_label]
+                    pert_ll = pert_scores.get(level_data.answer_label, clean_ll)
+                    pert_record["loglik_drift"] = float(clean_ll - pert_ll)
+            except Exception as e:
+                logger.warning(
+                    "Perturbed scoring failed for %s level %s pert %s: %s",
+                    sample.image_id, level_key, pr.name, e,
+                )
+                pert_record["error"] = str(e)
+                pert_record["correct"] = False
+                pert_record["accuracy_drop"] = (
+                    1.0 if level_record["clean"].get("correct") else 0.0
+                )
+
+            # Vision token cosine drift
+            if extract_vision_tokens:
+                try:
+                    pvt = adapter.get_vision_tokens(pr.perturbed_image)
+                    if pvt is not None:
+                        pert_np = pvt.cpu().numpy()
+                        pert_record["cosine_drift"] = _compute_cosine_drift(
+                            clean_vision_tokens, pert_np,
+                        )
+                except Exception:
+                    pass
+
+            # Store spectral signature stats (for downstream Exp 5)
+            pert_record["delta_f_norm"] = float(np.linalg.norm(pr.delta_f))
+            pert_record["delta_f_peak_band"] = int(np.argmax(pr.delta_f))
+
+            level_record["perturbations"].append(pert_record)
+
+        record["levels"][level_key] = level_record
+
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Aggregation and hypothesis testing
+# ---------------------------------------------------------------------------
+
+
+def _aggregate_results(
+    per_sample: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Aggregate per-sample results into per-level statistics."""
+    # Collect accuracy drops by (level, perturbation_name)
+    level_drops: Dict[str, List[float]] = defaultdict(list)
+    level_loglik_drifts: Dict[str, List[float]] = defaultdict(list)
+    level_clean_acc: Dict[str, List[float]] = defaultdict(list)
+    level_pert_acc: Dict[str, List[float]] = defaultdict(list)
+    level_cosine_drifts: Dict[str, List[float]] = defaultdict(list)
+
+    # Per (level, perturbation) breakdown
+    level_pert_drops: Dict[str, Dict[str, List[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+
+    for record in per_sample:
+        for level_key, level_data in record.get("levels", {}).items():
+            clean_correct = level_data.get("clean", {}).get("correct", False)
+            level_clean_acc[level_key].append(1.0 if clean_correct else 0.0)
+
+            for pr in level_data.get("perturbations", []):
+                drop = pr.get("accuracy_drop", 0.0)
+                level_drops[level_key].append(drop)
+                level_pert_acc[level_key].append(
+                    1.0 if pr.get("correct", False) else 0.0
+                )
+
+                drift = pr.get("loglik_drift", 0.0)
+                level_loglik_drifts[level_key].append(drift)
+
+                cos_d = pr.get("cosine_drift", 0.0)
+                if cos_d > 0:
+                    level_cosine_drifts[level_key].append(cos_d)
+
+                pname = pr.get("name", "unknown")
+                level_pert_drops[level_key][pname].append(drop)
+
+    # Build aggregate dict
+    agg: Dict[str, Any] = {"per_level": {}}
+    levels_ordered = sorted(level_drops.keys())
+
+    for lk in levels_ordered:
+        drops = level_drops[lk]
+        drifts = level_loglik_drifts[lk]
+        clean = level_clean_acc.get(lk, [])
+        pert = level_pert_acc.get(lk, [])
+        cos_drifts = level_cosine_drifts.get(lk, [])
+
+        agg["per_level"][lk] = {
+            "clean_accuracy": float(np.mean(clean)) if clean else 0.0,
+            "perturbed_accuracy": float(np.mean(pert)) if pert else 0.0,
+            "mean_accuracy_drop": float(np.mean(drops)) if drops else 0.0,
+            "std_accuracy_drop": float(np.std(drops)) if drops else 0.0,
+            "mean_loglik_drift": float(np.mean(drifts)) if drifts else 0.0,
+            "std_loglik_drift": float(np.std(drifts)) if drifts else 0.0,
+            "mean_cosine_drift": float(np.mean(cos_drifts)) if cos_drifts else 0.0,
+            "num_samples": len(clean),
+            "num_perturbation_evals": len(drops),
+        }
+
+    # Per-level, per-perturbation breakdown
+    agg["per_level_perturbation"] = {}
+    for lk in levels_ordered:
+        agg["per_level_perturbation"][lk] = {}
+        for pname, drops in sorted(level_pert_drops[lk].items()):
+            agg["per_level_perturbation"][lk][pname] = {
+                "mean_drop": float(np.mean(drops)),
+                "std_drop": float(np.std(drops)),
+                "n": len(drops),
+            }
+
+    return agg
+
+
+def _run_hypothesis_tests(
+    agg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Run statistical tests on aggregated results.
+
+    Core hypothesis: sensitivity scales monotonically with granularity.
+    """
+    tests: Dict[str, Any] = {}
+    per_level = agg.get("per_level", {})
+
+    # Order levels by granularity
+    level_order = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
+    present_levels = [lk for lk in level_order if lk in per_level]
+
+    if len(present_levels) < 2:
+        tests["insufficient_levels"] = True
+        return tests
+
+    # H1: Spearman correlation between granularity rank and mean accuracy drop
+    granularity_ranks = list(range(1, len(present_levels) + 1))
+    mean_drops = [per_level[lk]["mean_accuracy_drop"] for lk in present_levels]
+    mean_drifts = [per_level[lk]["mean_loglik_drift"] for lk in present_levels]
+
+    rho_drop, p_drop = spearman_correlation(granularity_ranks, mean_drops)
+    tests["spearman_drop_vs_granularity"] = {
+        "rho": rho_drop,
+        "p_value": p_drop,
+        "target": "rho > 0.8",
+        "passed": rho_drop > 0.8 and p_drop < 0.05,
+    }
+
+    rho_drift, p_drift = spearman_correlation(granularity_ranks, mean_drifts)
+    tests["spearman_loglik_drift_vs_granularity"] = {
+        "rho": rho_drift,
+        "p_value": p_drift,
+        "passed": rho_drift > 0.6,
+    }
+
+    # H2: Monotonicity of mean accuracy drop across levels
+    is_mono, tau = monotonicity_test(mean_drops)
+    tests["monotonicity_accuracy_drop"] = {
+        "is_monotonic": is_mono,
+        "kendall_tau": tau,
+        "values": dict(zip(present_levels, mean_drops)),
+        "passed": tau > 0.6,
+    }
+
+    # H3: ANOVA across levels — are the groups significantly different?
+    # Collect per-perturbation drops grouped by level
+    per_level_all_drops: Dict[str, List[float]] = defaultdict(list)
+    for lk in present_levels:
+        for pert_data in agg.get("per_level_perturbation", {}).get(lk, {}).values():
+            per_level_all_drops[lk].extend(
+                [pert_data["mean_drop"]] * max(1, pert_data["n"])
+            )
+
+    groups = [per_level_all_drops[lk] for lk in present_levels]
+    valid_groups = [g for g in groups if len(g) > 0]
+    if len(valid_groups) >= 2:
+        f_stat, p_anova = one_way_anova(*valid_groups)
+        tests["anova_across_levels"] = {
+            "F_statistic": f_stat,
+            "p_value": p_anova,
+            "target": "F > 10, p < 0.001",
+            "passed": f_stat > 10 and p_anova < 0.001,
+        }
+
+    # H4: Cohen's d between L1 (coarsest) and L4 (finest)
+    if "L1_COARSE" in per_level_all_drops and "L4_VERY_FINE" in per_level_all_drops:
+        d = cohens_d(
+            per_level_all_drops["L4_VERY_FINE"],
+            per_level_all_drops["L1_COARSE"],
+        )
+        tests["cohens_d_L4_vs_L1"] = {
+            "d": d,
+            "target": "d > 0.8 (large effect)",
+            "passed": d > 0.8,
+        }
+
+    # Bootstrap CI on mean degradation per level
+    tests["bootstrap_ci"] = {}
+    for lk in present_levels:
+        drops = per_level_all_drops.get(lk, [])
+        if len(drops) >= 5:
+            point, lo, hi = bootstrap_ci(drops, n_boot=1000)
+            tests["bootstrap_ci"][lk] = {
+                "mean": point,
+                "ci_95_lower": lo,
+                "ci_95_upper": hi,
+            }
+
+    # Summary verdict
+    core_tests = [
+        tests.get("spearman_drop_vs_granularity", {}).get("passed", False),
+        tests.get("monotonicity_accuracy_drop", {}).get("passed", False),
+    ]
+    tests["hypothesis_supported"] = all(core_tests)
+    tests["num_criteria_passed"] = sum(1 for t in core_tests if t)
+    tests["num_criteria_total"] = len(core_tests)
+
+    return tests
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
+def run_exp1(
+    cfg: dict,
+    out_dir: Path,
+    results_so_far: Dict[int, ExperimentResult],
+) -> ExperimentResult:
+    """Run Experiment 1: Task Granularity Spectrum.
+
+    For each image × level × perturbation, score MCQ and record accuracy
+    degradation.  Then test whether degradation scales monotonically with
+    task granularity.
+    """
+    logger.info("=" * 50)
+    logger.info("Experiment 1: Task Granularity Spectrum")
+    logger.info("=" * 50)
+
+    exp_cfg = cfg.get("experiments", {}).get("exp1", {})
+    max_samples = exp_cfg.get("max_samples", cfg.get("data", {}).get("max_samples", 100))
+    seed = cfg.get("seed", 42)
+
+    # --- Load model ---
+    model_cfg = cfg.get("model", {})
+    model_id = model_cfg.get("primary", "Qwen/Qwen3-VL-8B-Instruct")
+    device = select_device(cfg.get("device", "auto"))
+    quantization = model_cfg.get("quantization")
+
+    logger.info("Loading model: %s (device=%s, quant=%s)", model_id, device, quantization)
+    adapter = get_adapter(model_id)
+    adapter.load(
+        model_id=model_id,
+        device=device,
+        cache_dir=cfg.get("cache_dir"),
+        quantization=quantization,
+        trust_remote_code=model_cfg.get("trust_remote_code", True),
+    )
+    logger.info("Model loaded successfully")
+
+    # --- Load dataset ---
+    logger.info("Building GQA granularity dataset (max_samples=%d)...", max_samples)
+    cache_dir = Path(cfg.get("cache_dir", ".hf_cache"))
+    data_cfg = cfg.get("data", {})
+    samples = build_granularity_dataset(
+        cache_dir=cache_dir,
+        max_samples=max_samples,
+        seed=seed,
+        allow_download=data_cfg.get("allow_download", True),
+    )
+    logger.info("Loaded %d samples with all 4 granularity levels", len(samples))
+
+    if not samples:
+        logger.error("No samples loaded. Check GQA data availability.")
+        return ExperimentResult(
+            experiment_id=1,
+            experiment_name="exp1_granularity",
+            config=exp_cfg,
+            metrics={"error": "no_samples"},
+        )
+
+    # --- Perturbation config ---
+    pert_cfg = cfg.get("perturbations", {})
+    severity_levels = pert_cfg.get("severity_levels", [1, 2, 3])
+    num_bands = cfg.get("analysis", {}).get("num_bands", 10)
+
+    # Whether to extract vision tokens for cosine drift (slower)
+    extract_vision_tokens = exp_cfg.get("extract_vision_tokens", False)
+
+    # --- Evaluation loop ---
+    per_sample_results: List[Dict[str, Any]] = []
+    t0 = time.time()
+
+    for idx, sample in enumerate(samples):
+        logger.info(
+            "Processing sample %d/%d: %s", idx + 1, len(samples), sample.image_id,
+        )
+
+        # Build perturbation suite for this image
+        try:
+            image = Image.open(sample.image_path).convert("RGB")
+        except Exception as e:
+            logger.warning("Cannot open image %s: %s", sample.image_path, e)
+            continue
+
+        perturbations = build_perturbation_suite(
+            image,
+            severity_levels=severity_levels,
+            include_natural=pert_cfg.get("include_natural", True),
+            include_frequency=pert_cfg.get("include_frequency", True),
+            num_bands=num_bands,
+            seed=seed + idx,
+        )
+
+        if not perturbations:
+            logger.warning("No perturbations for sample %s", sample.image_id)
+            continue
+
+        # Evaluate across all levels and perturbations
+        record = _evaluate_sample(
+            sample, adapter, perturbations,
+            extract_vision_tokens=extract_vision_tokens,
+        )
+        per_sample_results.append(record)
+
+        # Progress logging
+        if (idx + 1) % 10 == 0:
+            elapsed = time.time() - t0
+            rate = (idx + 1) / elapsed
+            eta = (len(samples) - idx - 1) / rate if rate > 0 else 0
+            logger.info(
+                "Progress: %d/%d (%.1f samples/s, ETA %.0fs)",
+                idx + 1, len(samples), rate, eta,
+            )
+
+    total_time = time.time() - t0
+    logger.info(
+        "Evaluation complete: %d samples in %.1fs (%.2f samples/s)",
+        len(per_sample_results), total_time,
+        len(per_sample_results) / total_time if total_time > 0 else 0,
+    )
+
+    # --- Aggregate results ---
+    agg = _aggregate_results(per_sample_results)
+
+    # --- Hypothesis testing ---
+    hypothesis_tests = _run_hypothesis_tests(agg)
+
+    # --- Log key results ---
+    logger.info("-" * 40)
+    logger.info("Key results:")
+    for lk, stats in agg.get("per_level", {}).items():
+        logger.info(
+            "  %s: clean_acc=%.3f  pert_acc=%.3f  mean_drop=%.3f",
+            lk, stats["clean_accuracy"], stats["perturbed_accuracy"],
+            stats["mean_accuracy_drop"],
+        )
+    spearman = hypothesis_tests.get("spearman_drop_vs_granularity", {})
+    logger.info(
+        "  Spearman(granularity, degradation): rho=%.3f, p=%.4f [%s]",
+        spearman.get("rho", 0), spearman.get("p_value", 1),
+        "PASS" if spearman.get("passed") else "FAIL",
+    )
+    logger.info(
+        "  Hypothesis supported: %s (%d/%d criteria)",
+        hypothesis_tests.get("hypothesis_supported", False),
+        hypothesis_tests.get("num_criteria_passed", 0),
+        hypothesis_tests.get("num_criteria_total", 0),
+    )
+    logger.info("-" * 40)
+
+    # --- Save outputs ---
+    save_json(agg, out_dir / "summary.json")
+    save_json(hypothesis_tests, out_dir / "hypothesis_tests.json")
+
+    # Save per-sample as JSONL
+    jsonl_path = out_dir / "per_sample.jsonl"
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(jsonl_path, "w") as f:
+        for record in per_sample_results:
+            f.write(json.dumps(record, default=str) + "\n")
+    logger.info("Saved %d per-sample records to %s", len(per_sample_results), jsonl_path)
+
+    # Save degradation breakdown
+    save_json(
+        agg.get("per_level_perturbation", {}),
+        out_dir / "degradation_by_level.json",
+    )
+
+    # --- Cleanup ---
+    try:
+        adapter.unload()
+    except Exception:
+        pass
+
+    # --- Build result ---
+    metrics = {
+        "num_samples": len(per_sample_results),
+        "total_time_s": total_time,
+        **{
+            f"{lk}_clean_acc": stats["clean_accuracy"]
+            for lk, stats in agg.get("per_level", {}).items()
+        },
+        **{
+            f"{lk}_mean_drop": stats["mean_accuracy_drop"]
+            for lk, stats in agg.get("per_level", {}).items()
+        },
+        "spearman_rho": spearman.get("rho", 0),
+        "spearman_p": spearman.get("p_value", 1),
+    }
+
+    return ExperimentResult(
+        experiment_id=1,
+        experiment_name="exp1_granularity",
+        config=exp_cfg,
+        metrics=metrics,
+        per_sample=per_sample_results,
+        hypothesis_tests=hypothesis_tests,
+    )
