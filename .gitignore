@@ -12,3 +12,43 @@ changed_predictions_mmmu_test_needed
 .vscode/
 .idea/
 *.log
+
+# Experiment outputs (plots, results, generated data)
+frequency_alignment_outputs/
+segmentation_robustness_outputs/
+outputs/
+results/
+
+# Plots
+**plots/
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+
+# Large data / model cache
+*.npy
+*.npz
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# HuggingFace cache
+.hf_cache/
+hf_cache/
+hub/
+
+# Node (accidentally added)
+node_modules/
+package-lock.json
+package.json
+
+# Misc
+*.zip
+*.tar.gz
+*.h5
+tmp/
+temp/
