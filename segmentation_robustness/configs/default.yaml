@@ -5,38 +5,31 @@ cache_dir: segmentation_robustness/.cache
 max_samples: 200
 include_natural: true
 include_frequency: true
-severity_levels: [1, 2, 3]
+severity_levels:
+- 1
+- 2
+- 3
 out_dir: segmentation_robustness_outputs
 save_visuals: true
 visual_limit: 20
 iou_threshold: 0.5
-
 run:
-  mode: both  # sam2 | sam3 | both
-
+  mode: both
+experiment:
+  mode: both
 dataset:
   preset: mini_coco
   negative_ratio: 0.2
   rebuild_manifest: false
   allow_download: true
   davis_resolution: 480p
-  # Other datasets (not implemented presets) with suggested compatibility:
-  # - SA-V (Segment Anything Video): SAM2 or both with added text prompts.
-  # - SA-Co-Gold: SAM3 or both with added boxes/points.
-  # - SA-Co-Silver: SAM3 or both with added boxes/points.
-  # - SA-Co-VEval: SAM3 or both with added boxes/points.
-  # - COCO panoptic/instance: both (masks + prompts + boxes/points).
-  # - LVIS instance: both (masks + prompts + boxes/points).
-  # - ADE20K: both (masks + prompts + boxes/points).
-  # - DAVIS-2017: both (video masks + prompts + boxes/points).
-
 sam2:
   config: configs/sam2.1/sam2.1_hiera_b+.yaml
   checkpoint: null
   auto_download: true
+  gtbox: true
   config_url: https://raw.githubusercontent.com/facebookresearch/sam2/main/sam2/configs/sam2.1/sam2.1_hiera_b%2B.yaml
   checkpoint_url: https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
-
 sam3:
   backend: auto
   module: null
@@ -48,8 +41,20 @@ sam3:
   # https://huggingface.co/facebook/sam3/tree/main
   hf_token: null
   auto_download: true
-
+eval:
+  iou_tau: 0.5
+  topk_boxes: 5
+plots:
+  group_by:
+    family:
+    - natural
+    - lowfreq_keep
+    - highfreq_keep
+    - lowfreq_noise
+    - highfreq_noise
+    - allfreq_noise
 gdino:
+  enable: true
   config: null
   checkpoint: null
   auto_download: true
@@ -57,3 +62,8 @@ gdino:
   checkpoint_url: https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha2/groundingdino_swinb_cogcoor.pth
   box_threshold: 0.3
   text_threshold: 0.25
+analysis:
+  hypothesis_testing: true
+  significance_level: 0.05
+  min_correlation: 0.6
+  min_samples_per_test: 10

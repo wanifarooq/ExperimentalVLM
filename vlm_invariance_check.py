@@ -848,6 +848,19 @@ def safe_model_dir_name(model_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", model_id)
 
 
+def _is_complete_model_snapshot(model_dir: Path) -> bool:
+    if not model_dir.exists():
+        return False
+    if not (model_dir / "config.json").exists():
+        return False
+    if (model_dir / "model.safetensors.index.json").exists():
+        return True
+    if (model_dir / "pytorch_model.bin.index.json").exists():
+        return True
+    weight_globs = ("*.safetensors", "*.bin", "*.pt")
+    return any(any(model_dir.glob(pattern)) for pattern in weight_globs)
+
+
 def ensure_model_available(
     model_id: str,
     model_path: Optional[str],
@@ -875,7 +888,16 @@ def ensure_model_available(
     local_dir = models_root / safe_model_dir_name(model_id)
 
     if local_dir.exists() and any(local_dir.iterdir()):
-        return local_dir
+        if _is_complete_model_snapshot(local_dir):
+            return local_dir
+        if offline:
+            raise FileNotFoundError(
+                f"Model snapshot at {local_dir} appears incomplete (missing config/weights), and offline mode is enabled."
+            )
+        print(
+            f"[warn] Incomplete model snapshot at {local_dir}; re-downloading.",
+            file=sys.stderr,
+        )
 
     if offline:
         raise FileNotFoundError(
@@ -2029,6 +2051,19 @@ def prepare_model(
             setattr(config, "vision_aspect_ratio", image_aspect_ratio)
     model_type = getattr(config, "model_type", "")
     architectures = getattr(config, "architectures", None) or []
+    if (
+        device.startswith("cuda")
+        and model_type.startswith("gemma")
+        and dtype == torch.float16
+        and torch.cuda.is_available()
+        and torch.cuda.is_bf16_supported()
+    ):
+        dtype = torch.bfloat16
+        model_kwargs["torch_dtype"] = dtype
+        print(
+            "[setup] Using bfloat16 for Gemma on CUDA for numerical stability.",
+            file=sys.stderr,
+        )
     llava_onevision = model_type == "llava_onevision" or any(
         "LlavaOnevision" in arch for arch in architectures
     )
@@ -2093,17 +2128,34 @@ def prepare_model(
                     file=sys.stderr,
                 )
     else:
-        model_cls = AutoModelForImageTextToText
+        model = None
+        model_loaders: List[Any] = [AutoModelForImageTextToText]
         if AutoModelForVisionText2Text is not None:
-            model_cls = AutoModelForVisionText2Text
-        elif AutoModelForVision2Seq is not None:
-            model_cls = AutoModelForVision2Seq
-        model = model_cls.from_pretrained(
-            model_id,
-            config=config,
-            local_files_only=local_files_only,
-            **model_kwargs,
-        )
+            model_loaders.append(AutoModelForVisionText2Text)
+        if AutoModelForVision2Seq is not None:
+            model_loaders.append(AutoModelForVision2Seq)
+
+        load_errors: List[Exception] = []
+        for model_cls in model_loaders:
+            try:
+                model = model_cls.from_pretrained(
+                    model_id,
+                    config=config,
+                    local_files_only=local_files_only,
+                    **model_kwargs,
+                )
+                break
+            except ValueError as exc:
+                load_errors.append(exc)
+                print(
+                    f"[warn] {model_cls.__name__} failed for {model_id}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+        if model is None:
+            if load_errors:
+                raise load_errors[-1]
+            raise RuntimeError(f"Failed to load model {model_id}.")
 
     if processor is None:
         processor = AutoProcessor.from_pretrained(
@@ -2615,16 +2667,23 @@ def get_vision_tokens(
     except Exception as exc:
         print(f"[warn] Vision encoder failed: {exc}", file=sys.stderr)
         return None
-    if not outputs:
-        return None
-
-    tokens = outputs[0]
+    tokens: Any = outputs
+    if isinstance(tokens, dict):
+        tokens = next((v for v in tokens.values() if isinstance(v, torch.Tensor)), None)
+    elif not isinstance(tokens, torch.Tensor) and hasattr(tokens, "to_tuple"):
+        try:
+            tokens = tokens.to_tuple()
+        except Exception:
+            pass
     while isinstance(tokens, (tuple, list)):
         if not tokens:
             return None
-        tokens = tokens[0]
+        tensor_item = next((v for v in tokens if isinstance(v, torch.Tensor)), None)
+        tokens = tensor_item if tensor_item is not None else tokens[0]
     if not isinstance(tokens, torch.Tensor):
         return None
+    if tokens.dim() == 3 and tokens.shape[0] == 1:
+        tokens = tokens[0]
     if grid is not None:
         visual_module = getattr(getattr(model, "model", None), "visual", None)
         merge_size = int(getattr(visual_module, "spatial_merge_size", 1))
@@ -4573,17 +4632,25 @@ def _record_similarity(
     """Update accumulators if both embeddings are present."""
     if base is None or pert is None:
         return
+    if not torch.isfinite(base).all() or not torch.isfinite(pert).all():
+        return
     cos = F.cosine_similarity(
         base.unsqueeze(0), pert.unsqueeze(0), dim=-1
     ).item()
     l2 = torch.norm(base - pert, p=2).item()
+    if not math.isfinite(cos) or not math.isfinite(l2):
+        return
     acc.update(cos, l2)
     acc_any.update(cos, l2)
 
 
 def _cosine_distance(a: torch.Tensor, b: torch.Tensor) -> float:
     """Return 1 - cosine similarity."""
+    if not torch.isfinite(a).all() or not torch.isfinite(b).all():
+        return float("nan")
     cos = F.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0), dim=-1).item()
+    if not math.isfinite(cos):
+        return float("nan")
     return 1.0 - cos
 
 
@@ -4636,7 +4703,7 @@ class EmbeddingVizCollector:
             return
         if not self.wants_sample(sample_idx):
             return
-        vec = emb.detach().cpu().numpy()
+        vec = emb.detach().float().cpu().numpy()
         self.points.setdefault(channel, []).append(
             {
                 "vec": vec,
@@ -5425,6 +5492,8 @@ def run_embedding_drift_analysis(
                     continue
                 cos_d = _cosine_distance(base, emb)
                 l2_d = torch.norm(base - emb, p=2).item()
+                if not math.isfinite(cos_d) or not math.isfinite(l2_d):
+                    continue
                 per_type_lists[ch][ptype]["cos"].append(cos_d)
                 per_type_lists[ch][ptype]["l2"].append(l2_d)
 
@@ -5539,6 +5608,10 @@ def run_embedding_drift_analysis(
                 continue
             cos_vals = [_cosine_distance(rec.base_embs[ch], emb) for _, emb in picks]
             l2_vals = [torch.norm(rec.base_embs[ch] - emb, p=2).item() for _, emb in picks]
+            cos_vals = [v for v in cos_vals if math.isfinite(v)]
+            l2_vals = [v for v in l2_vals if math.isfinite(v)]
+            if not cos_vals or not l2_vals:
+                continue
             control[ch] = {
                 "cos": float(np.mean(cos_vals)),
                 "l2": float(np.mean(l2_vals)),
@@ -5554,9 +5627,13 @@ def run_embedding_drift_analysis(
     summary_lines.append("Metrics are mean cosine distance (1 - cos) and L2.")
 
     def _summ_stats(vals: List[float]) -> tuple[float, float]:
-        if not vals:
+        clean = [float(v) for v in vals if math.isfinite(float(v))]
+        if not clean:
             return 0.0, 0.0
-        return float(np.mean(vals)), float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
+        return (
+            float(np.mean(clean)),
+            float(np.std(clean, ddof=1)) if len(clean) > 1 else 0.0,
+        )
 
     for ch in channel_names:
         summary_lines.append(f"\nChannel: {ch}")
@@ -5578,6 +5655,10 @@ def run_embedding_drift_analysis(
                 ctrl_cos.append(cd.get("cos"))
                 pert_l2.append(pd.get("l2"))
                 ctrl_l2.append(cd.get("l2"))
+            pert_cos = [float(v) for v in pert_cos if v is not None and math.isfinite(float(v))]
+            ctrl_cos = [float(v) for v in ctrl_cos if v is not None and math.isfinite(float(v))]
+            pert_l2 = [float(v) for v in pert_l2 if v is not None and math.isfinite(float(v))]
+            ctrl_l2 = [float(v) for v in ctrl_l2 if v is not None and math.isfinite(float(v))]
             if pert_cos and ctrl_cos:
                 p_mean, p_std = _summ_stats(pert_cos)
                 c_mean, c_std = _summ_stats(ctrl_cos)
