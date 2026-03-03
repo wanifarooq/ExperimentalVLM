@@ -41,10 +41,15 @@ results/
 hf_cache/
 hub/
 
-# Node (accidentally added)
+# Node (accidentally added, not part of project)
 node_modules/
 package-lock.json
 package.json
+
+# Local documentation / notes (keep locally, not on GitHub)
+*.txt
+*.md
+!README.md
 
 # Misc
 *.zip
