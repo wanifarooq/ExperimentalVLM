@@ -1,27 +1,29 @@
+# Server profile for 2x+ NVIDIA A100-class GPUs.
+# Goal: publishable runs with a larger recent Qwen3-VL checkpoint and real drift metrics.
+
 seed: 42
 deterministic: false
-device: auto
+device: cuda:0
 cache_dir: .hf_cache
 out_dir: frequency_alignment_outputs
 
 model:
-  primary: Qwen/Qwen3-VL-8B-Instruct
+  primary: Qwen/Qwen3-VL-30B-A3B-Instruct
   alternatives:
-    - llava-hf/llava-onevision-qwen2-7b-ov-hf
-    - OpenGVLab/InternVL2-8B
-    - Qwen/Qwen2.5-VL-72B-Instruct
-  quantization: null  # null, 4bit, 8bit
+    - Qwen/Qwen3-VL-8B-Instruct
+    - llava-hf/llava-v1.6-mistral-7b-hf
+    - OpenGVLab/InternVL3-8B-hf
+  quantization: null
+  device_map: auto
   trust_remote_code: true
 
 data:
-  dataset: gqa  # gqa, seedbench, partimagenet
-  gqa_dir: null  # auto-download if null
-  partimagenet_dir: null  # auto-download if null
-  seedbench_tsv: null  # reuse parent cache
+  dataset: gqa
   max_samples: 1000
-  negative_ratio: 0.2
-  rebuild_manifest: false
   allow_download: true
+  seedbench_tsv: null
+  seedbench_image_root: null
+  partimagenet_dir: null
 
 perturbations:
   severity_levels:
@@ -53,7 +55,7 @@ perturbations:
       scale: 0.95
       rotation: 10
       freq_cutoff: 0.18
-      freq_epsilon: 0.03137  # 8/255
+      freq_epsilon: 0.03137
       text_scale: 0.3
     2:
       translate: 8
@@ -74,7 +76,7 @@ perturbations:
 
 analysis:
   num_bands: 10
-  attention_layers: all  # all, or list of layer indices
+  attention_layers: all
   significance_level: 0.05
   hypothesis_testing: true
 
@@ -82,16 +84,15 @@ experiments:
   exp1:
     enabled: true
     max_samples: 1000
-    batch_size: 1
+    extract_vision_tokens: true
   exp2:
     enabled: true
     max_samples: 200
-    batch_size: 1
-    layer_stride: 4  # extract every Nth layer to save memory
+    layer_stride: 2
   exp3:
     enabled: true
     max_samples: 200
-    perturbation_subset: 10  # top-N most informative perturbations
+    perturbation_subset: 10
   exp4:
     enabled: true
     max_samples: 500
@@ -101,7 +102,6 @@ experiments:
       - highpass
   exp5:
     enabled: true
-    # uses outputs from exp1 + exp2; no independent samples
   exp6:
     enabled: true
     max_samples: 300

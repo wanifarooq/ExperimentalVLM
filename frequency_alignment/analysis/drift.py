@@ -23,6 +23,7 @@ def compute_band_drift(
     clean_features: np.ndarray,
     perturbed_features: np.ndarray,
     num_bands: int = 10,
+    patch_grid: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
     """Compute frequency-band-decomposed drift between clean and perturbed features.
 
@@ -39,15 +40,27 @@ def compute_band_drift(
     """
     diff = perturbed_features.astype(np.float64) - clean_features.astype(np.float64)
 
+    if diff.ndim == 4 and diff.shape[0] == 1:
+        diff = diff[0]
+    if diff.ndim == 3 and patch_grid is not None:
+        h, w = patch_grid
+        if diff.shape[0] == h and diff.shape[1] == w:
+            pass
+        elif diff.shape[0] == 1:
+            diff = diff[0]
+        else:
+            diff = diff.reshape(-1, diff.shape[-1])
+    if diff.ndim == 3 and patch_grid is None and diff.shape[0] == 1:
+        diff = diff[0]
     if diff.ndim == 2:
-        # (tokens, dim) -> try to reshape to square spatial grid
-        n_tokens, dim = diff.shape
-        side = int(np.sqrt(n_tokens))
-        if side * side != n_tokens:
-            # Not a perfect square; use closest
-            side = int(np.round(np.sqrt(n_tokens)))
-            diff = diff[:side * side]
-        diff = diff.reshape(side, side, -1)
+        n_tokens = diff.shape[0]
+        if patch_grid is not None and patch_grid[0] * patch_grid[1] <= n_tokens:
+            h, w = patch_grid
+        else:
+            h = max(1, int(np.sqrt(n_tokens)))
+            w = max(1, n_tokens // h)
+        usable = min(n_tokens, h * w)
+        diff = diff[:usable].reshape(h, w, -1)
 
     # diff now has shape (H, W, D)
     h, w = diff.shape[0], diff.shape[1]
@@ -112,6 +125,8 @@ def compute_scalar_drift(
         Mean per-token L2 drift.
     """
     diff = perturbed_features.astype(np.float64) - clean_features.astype(np.float64)
+    if diff.ndim > 2:
+        diff = diff.reshape(-1, diff.shape[-1])
     per_token_norm = np.linalg.norm(diff, axis=-1)
     return float(per_token_norm.mean())
 

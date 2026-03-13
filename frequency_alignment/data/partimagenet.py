@@ -18,21 +18,30 @@ import json
 import logging
 import random
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
+
+import numpy as np
+from PIL import Image, ImageDraw
 
 from .base import GranularityLevel, GranularitySample, LevelData
 
 logger = logging.getLogger(__name__)
 
 
-def _find_partimagenet_root(cache_dir: Path) -> Optional[Path]:
+def _find_partimagenet_root(
+    cache_dir: Path,
+    root_override: Optional[Path] = None,
+) -> Optional[Path]:
     """Search for PartImageNet data in common locations."""
-    candidates = [
+    candidates = []
+    if root_override is not None:
+        candidates.append(root_override)
+    candidates.extend([
         cache_dir / "partimagenet",
         cache_dir / "PartImageNet",
         Path.home() / "datasets" / "PartImageNet",
         Path("/data") / "PartImageNet",
-    ]
+    ])
     for c in candidates:
         if c.exists() and (c / "train").exists():
             return c
@@ -112,12 +121,76 @@ def _classify_part_level(
     return None
 
 
+def _build_text_prompt(category_name: str) -> str:
+    parts = category_name.replace("_", " ").split()
+    if not parts:
+        return "segment the object"
+    if len(parts) == 1:
+        return f"segment the {parts[0]}"
+    if len(parts) == 2:
+        return f"segment the {parts[1]} of the {parts[0]}"
+    subject = parts[0]
+    rel_chain = list(reversed(parts[1:]))
+    phrase = f" of the ".join(rel_chain)
+    return f"segment the {phrase} of the {subject}"
+
+
+def bbox_xywh_to_xyxy(bbox: List[float]) -> Optional[List[float]]:
+    if len(bbox) != 4:
+        return None
+    x, y, w, h = [float(v) for v in bbox]
+    return [x, y, x + w, y + h]
+
+
+def segmentation_to_mask(
+    segmentation,
+    image_size: Tuple[int, int],
+) -> Optional[np.ndarray]:
+    width, height = image_size
+    if not segmentation:
+        return None
+
+    if isinstance(segmentation, list):
+        mask = Image.new("L", (width, height), 0)
+        draw = ImageDraw.Draw(mask)
+        for polygon in segmentation:
+            if not isinstance(polygon, list) or len(polygon) < 6:
+                continue
+            points = [(polygon[i], polygon[i + 1]) for i in range(0, len(polygon), 2)]
+            draw.polygon(points, outline=1, fill=1)
+        return np.array(mask, dtype=bool)
+
+    if isinstance(segmentation, dict):
+        try:
+            from pycocotools import mask as mask_utils
+        except ImportError:
+            return None
+
+        rle = segmentation
+        if isinstance(segmentation.get("counts"), list):
+            rle = mask_utils.frPyObjects(segmentation, height, width)
+        decoded = mask_utils.decode(rle)
+        if decoded.ndim == 3:
+            decoded = decoded.any(axis=-1)
+        return decoded.astype(bool)
+
+    return None
+
+
+def mask_to_box(mask: np.ndarray) -> Optional[List[float]]:
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+    return [float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)]
+
+
 def build_partimagenet_dataset(
     cache_dir: Path,
     max_samples: int = 300,
     seed: int = 42,
     split: str = "val",
     allow_download: bool = True,
+    root_dir: Optional[Path] = None,
 ) -> List[GranularitySample]:
     """Build 3-level segmentation dataset from PartImageNet.
 
@@ -133,7 +206,7 @@ def build_partimagenet_dataset(
     """
     rng = random.Random(seed)
 
-    root = _find_partimagenet_root(cache_dir)
+    root = _find_partimagenet_root(cache_dir, root_override=root_dir)
     if root is None:
         logger.warning(
             "PartImageNet not found in %s. "
@@ -200,24 +273,25 @@ def build_partimagenet_dataset(
             if level is None or level in levels:
                 continue
 
-            cat_name = anno["category"].replace("_", " ")
-            if level == GranularityLevel.L1_COARSE:
-                prompt = f"segment the {cat_name}"
-            elif level == GranularityLevel.L2_MEDIUM:
-                prompt = f"segment the {cat_name}"
-            else:
-                prompt = f"segment the {cat_name}"
+            prompt = _build_text_prompt(anno["category"])
 
             levels[level] = LevelData(
                 level=level,
                 question=prompt,
                 options={},
                 text_prompt=prompt,
+                bbox=bbox_xywh_to_xyxy(anno["bbox"]),
+                segmentation=anno["segmentation"],
                 question_type="segmentation",
             )
 
-        # Need at least 2 levels for meaningful comparison
-        if len(levels) >= 2:
+        # Need a complete hierarchy for meaningful comparison
+        required_levels = {
+            GranularityLevel.L1_COARSE,
+            GranularityLevel.L2_MEDIUM,
+            GranularityLevel.L3_FINE,
+        }
+        if required_levels.issubset(levels):
             samples.append(GranularitySample(
                 image_id=str(img_id),
                 image_path=img_path,

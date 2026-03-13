@@ -14,7 +14,7 @@ import random as _random
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -74,6 +74,7 @@ class PerturbationResult:
     perturbed_image: Image.Image
     delta_f: np.ndarray                # |ΔF(ω)|², radially binned, shape (num_bands,)
     delta_f_2d: Optional[np.ndarray] = None  # full 2D spectral diff (optional)
+    mask_transform: Optional[Callable[[Image.Image], Image.Image]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -161,16 +162,8 @@ def _apply_frequency_perturbation(
         make_mask, fft_keep = _import_frequency_utils()
         # Convert to tensor for FFT operations
         t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)  # (1, C, H, W)
-        keep_low = mode == "lowpass_keep"
-        mask = make_mask(t.shape[-2:], cutoff, keep_low=keep_low)
-        # Apply mask in frequency domain per channel
-        result = torch.zeros_like(t)
-        for c in range(t.shape[1]):
-            fft = torch.fft.fft2(t[0, c])
-            fft_shifted = torch.fft.fftshift(fft)
-            fft_filtered = fft_shifted * mask
-            fft_unshifted = torch.fft.ifftshift(fft_filtered)
-            result[0, c] = torch.fft.ifft2(fft_unshifted).real
+        keep_mode = "low" if mode == "lowpass_keep" else "high"
+        result = fft_keep(t, keep_mode, cutoff)
         result = result.clamp(0, 1).squeeze(0).permute(1, 2, 0).numpy()
         return Image.fromarray((result * 255).astype(np.uint8))
 
@@ -185,7 +178,14 @@ def _apply_frequency_perturbation(
             import torch
             make_mask, _ = _import_frequency_utils()
             keep_low = mode == "lowband_noise"
-            mask_2d = make_mask((h, w), cutoff, keep_low=keep_low).numpy()
+            mask_2d = make_mask(
+                h,
+                w,
+                "low" if keep_low else "high",
+                cutoff,
+                torch.device("cpu"),
+                torch.float32,
+            ).numpy()
             for ch in range(c):
                 fft_n = np.fft.fft2(noise[:, :, ch])
                 fft_n_shifted = np.fft.fftshift(fft_n)
@@ -197,6 +197,10 @@ def _apply_frequency_perturbation(
         return Image.fromarray((result * 255).astype(np.uint8))
 
     raise ValueError(f"Unknown frequency mode: {mode}")
+
+
+def _identity_image(image: Image.Image) -> Image.Image:
+    return image.copy()
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +224,8 @@ def build_perturbation_suite(
     include_natural: bool = True,
     include_frequency: bool = True,
     num_bands: int = 10,
+    natural_types: List[str] | None = None,
+    frequency_types: List[str] | None = None,
     severity_params: Dict[int, Dict[str, Any]] | None = None,
     seed: int = 42,
 ) -> List[PerturbationResult]:
@@ -242,6 +248,8 @@ def build_perturbation_suite(
     params = severity_params or _DEFAULT_SEVERITY
     rng = _random.Random(seed)
     fns = _import_parent_perturbations()
+    enabled_natural = {name.lower() for name in (natural_types or [])}
+    enabled_frequency = {name.lower() for name in (frequency_types or [])}
 
     results: List[PerturbationResult] = []
 
@@ -256,34 +264,99 @@ def build_perturbation_suite(
 
         # -- Natural perturbations --
         if include_natural:
+            random_text = str(rng.randint(0, 99999))
             natural_specs = [
-                (f"Translation(+{tx})", "natural",
-                 lambda img, n=tx: fns["cyclic_horizontal_shift"](img, n)),
-                (f"Translation(-{tx})", "natural",
-                 lambda img, n=tx: fns["cyclic_horizontal_shift"](img, -n)),
-                (f"PadCrop(+{pc})", "natural",
-                 lambda img, n=pc: fns["pad_or_crop"](img, n)),
-                (f"PadCrop(-{pc})", "natural",
-                 lambda img, n=pc: fns["pad_or_crop"](img, -n)),
-                (f"Scale({sc})", "natural",
-                 lambda img, s=sc: fns["scale_image"](img, s)),
-                (f"ScalePadBlack({sc})", "natural",
-                 lambda img, s=sc: fns["scale_and_pad"](img, s, background="black")),
-                (f"ScalePadWhite({sc})", "natural",
-                 lambda img, s=sc: fns["scale_and_pad"](img, s, background="white")),
-                (f"Rotation(+{rot})", "natural",
-                 lambda img, a=rot: fns["rotate_image"](img, a)),
-                (f"Rotation(-{rot})", "natural",
-                 lambda img, a=rot: fns["rotate_image"](img, -a)),
-                (f"TextOverlay", "natural",
-                 lambda img: fns["text_overlay"](img, "SAMPLE TEXT")),
-                (f"BoxOverlay", "natural",
-                 lambda img: fns["box_overlay"](img, [(10, 10, img.width // 3, img.height // 3)])),
-                (f"RandomText", "natural",
-                 lambda img: fns["text_overlay"](img, str(rng.randint(0, 99999)))),
+                (
+                    "translation",
+                    f"Translation(+{tx})",
+                    "natural",
+                    lambda img, n=tx: fns["cyclic_horizontal_shift"](img, n),
+                    lambda img, n=tx: fns["cyclic_horizontal_shift"](img, n),
+                ),
+                (
+                    "translation",
+                    f"Translation(-{tx})",
+                    "natural",
+                    lambda img, n=tx: fns["cyclic_horizontal_shift"](img, -n),
+                    lambda img, n=tx: fns["cyclic_horizontal_shift"](img, -n),
+                ),
+                (
+                    "padcrop",
+                    f"PadCrop(+{pc})",
+                    "natural",
+                    lambda img, n=pc: fns["pad_or_crop"](img, n),
+                    lambda img, n=pc: fns["pad_or_crop"](img, n),
+                ),
+                (
+                    "padcrop",
+                    f"PadCrop(-{pc})",
+                    "natural",
+                    lambda img, n=pc: fns["pad_or_crop"](img, -n),
+                    lambda img, n=pc: fns["pad_or_crop"](img, -n),
+                ),
+                (
+                    "scale",
+                    f"Scale({sc})",
+                    "natural",
+                    lambda img, s=sc: fns["scale_image"](img, s),
+                    lambda img, s=sc: fns["scale_image"](img, s),
+                ),
+                (
+                    "scalepad_black",
+                    f"ScalePadBlack({sc})",
+                    "natural",
+                    lambda img, s=sc: fns["scale_and_pad"](img, s, background="black"),
+                    lambda img, s=sc: fns["scale_and_pad"](img, s, background="black"),
+                ),
+                (
+                    "scalepad_white",
+                    f"ScalePadWhite({sc})",
+                    "natural",
+                    lambda img, s=sc: fns["scale_and_pad"](img, s, background="white"),
+                    lambda img, s=sc: fns["scale_and_pad"](img, s, background="white"),
+                ),
+                (
+                    "rotation",
+                    f"Rotation(+{rot})",
+                    "natural",
+                    lambda img, a=rot: fns["rotate_image"](img, a),
+                    lambda img, a=rot: fns["rotate_image"](img, a),
+                ),
+                (
+                    "rotation",
+                    f"Rotation(-{rot})",
+                    "natural",
+                    lambda img, a=rot: fns["rotate_image"](img, -a),
+                    lambda img, a=rot: fns["rotate_image"](img, -a),
+                ),
+                (
+                    "text_overlay",
+                    "TextOverlay",
+                    "natural",
+                    lambda img: fns["text_overlay"](img, "SAMPLE TEXT"),
+                    _identity_image,
+                ),
+                (
+                    "box_overlay",
+                    "BoxOverlay",
+                    "natural",
+                    lambda img: fns["box_overlay"](
+                        img, [(10, 10, img.width // 3, img.height // 3)]
+                    ),
+                    _identity_image,
+                ),
+                (
+                    "random_text",
+                    "RandomText",
+                    "natural",
+                    lambda img, text=random_text: fns["text_overlay"](img, text),
+                    _identity_image,
+                ),
             ]
 
-            for name, family, fn in natural_specs:
+            for pert_type, name, family, fn, mask_fn in natural_specs:
+                if enabled_natural and pert_type not in enabled_natural:
+                    continue
                 try:
                     perturbed = fn(image)
                     delta_f, delta_2d = compute_spectral_signature(
@@ -296,6 +369,7 @@ def build_perturbation_suite(
                         perturbed_image=perturbed,
                         delta_f=delta_f,
                         delta_f_2d=delta_2d,
+                        mask_transform=mask_fn,
                     ))
                 except Exception as e:
                     logger.warning("Perturbation %s failed: %s", name, e)
@@ -303,14 +377,16 @@ def build_perturbation_suite(
         # -- Frequency perturbations --
         if include_frequency:
             freq_specs = [
-                (f"LowPassKeep({fc:.2f})", "lowfreq", "lowpass_keep"),
-                (f"HighPassKeep({fc:.2f})", "highfreq", "highpass_keep"),
-                (f"LowBandNoise({fc:.2f})", "lowfreq", "lowband_noise"),
-                (f"HighBandNoise({fc:.2f})", "highfreq", "highband_noise"),
-                (f"AllBandNoise({fc:.2f})", "highfreq", "allband_noise"),
+                ("lowpass_keep", f"LowPassKeep({fc:.2f})", "lowfreq", "lowpass_keep"),
+                ("highpass_keep", f"HighPassKeep({fc:.2f})", "highfreq", "highpass_keep"),
+                ("lowband_noise", f"LowBandNoise({fc:.2f})", "lowfreq", "lowband_noise"),
+                ("highband_noise", f"HighBandNoise({fc:.2f})", "highfreq", "highband_noise"),
+                ("allband_noise", f"AllBandNoise({fc:.2f})", "highfreq", "allband_noise"),
             ]
 
-            for name, family, mode in freq_specs:
+            for pert_type, name, family, mode in freq_specs:
+                if enabled_frequency and pert_type not in enabled_frequency:
+                    continue
                 try:
                     perturbed = _apply_frequency_perturbation(
                         image, mode, fc, fe, rng
@@ -325,6 +401,7 @@ def build_perturbation_suite(
                         perturbed_image=perturbed,
                         delta_f=delta_f,
                         delta_f_2d=delta_2d,
+                        mask_transform=_identity_image,
                     ))
                 except Exception as e:
                     logger.warning("Perturbation %s failed: %s", name, e)

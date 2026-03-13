@@ -22,7 +22,7 @@ import logging
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from PIL import Image
@@ -38,43 +38,43 @@ from ..analysis.statistics import (
     bootstrap_ci,
 )
 from ..data.base import ExperimentResult, GranularityLevel
-from ..data.gqa import build_granularity_dataset
+from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
 from ..perturbations import build_perturbation_suite
 from ..utils.device import select_device
-from ..utils.io import save_json
+from ..utils.io import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
 
 def _load_W_t_from_exp2(
-    results_so_far: Dict[int, ExperimentResult],
     exp2_out_dir: Path,
-) -> Dict[str, np.ndarray]:
-    """Load average W_t filters from Experiment 2 outputs."""
-    filters: Dict[str, np.ndarray] = {}
+) -> Tuple[Dict[str, np.ndarray], Dict[Tuple[str, str], np.ndarray]]:
+    """Load average and per-sample W_t filters from Experiment 2 outputs."""
+    average_filters: Dict[str, np.ndarray] = {}
+    sample_filters: Dict[Tuple[str, str], np.ndarray] = {}
 
-    # Try loading from saved npy files
     filters_dir = exp2_out_dir / "filters"
     for level_key in ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]:
         path = filters_dir / f"average_{level_key}.npy"
         if path.exists():
-            filters[level_key] = np.load(path)
+            average_filters[level_key] = np.load(path)
 
-    if filters:
-        logger.info("Loaded W_t filters from %s: %s", filters_dir, list(filters.keys()))
-        return filters
+    power_path = exp2_out_dir / "power_spectra.json"
+    if power_path.exists():
+        for record in load_json(power_path):
+            image_id = str(record.get("image_id"))
+            for level_key, level_data in record.get("levels", {}).items():
+                W_t = level_data.get("W_t")
+                if W_t:
+                    sample_filters[(image_id, level_key)] = np.asarray(W_t, dtype=np.float64)
 
-    # Try from results_so_far
-    exp2_result = results_so_far.get(2)
-    if exp2_result and exp2_result.metrics.get("error") is None:
-        # Extract from hypothesis_tests or per_sample
-        logger.info("Attempting to extract W_t from exp2 in-memory results")
-        # This is a fallback; in practice the npy files should exist
-        pass
-
-    logger.warning("No W_t filters found from Experiment 2")
-    return filters
+    logger.info(
+        "Loaded W_t filters: %d averages, %d per-sample",
+        len(average_filters),
+        len(sample_filters),
+    )
+    return average_filters, sample_filters
 
 
 def run_exp3(
@@ -100,7 +100,7 @@ def run_exp3(
 
     # Load W_t from Experiment 2
     base_out = Path(cfg.get("out_dir", "frequency_alignment_outputs"))
-    W_t_filters = _load_W_t_from_exp2(results_so_far, base_out / "exp2")
+    W_t_average, W_t_per_sample = _load_W_t_from_exp2(base_out / "exp2")
 
     # --- Load model ---
     model_cfg = cfg.get("model", {})
@@ -116,17 +116,12 @@ def run_exp3(
         cache_dir=cfg.get("cache_dir"),
         quantization=quantization,
         trust_remote_code=model_cfg.get("trust_remote_code", True),
+        device_map=model_cfg.get("device_map"),
+        local_files_only=cfg.get("offline", False),
     )
 
     # --- Load dataset ---
-    cache_dir = Path(cfg.get("cache_dir", ".hf_cache"))
-    data_cfg = cfg.get("data", {})
-    samples = build_granularity_dataset(
-        cache_dir=cache_dir,
-        max_samples=max_samples,
-        seed=seed,
-        allow_download=data_cfg.get("allow_download", True),
-    )
+    samples = load_multilevel_vqa_dataset(cfg, max_samples=max_samples)
     logger.info("Loaded %d samples", len(samples))
 
     if not samples:
@@ -147,6 +142,7 @@ def run_exp3(
     level_amplifications: Dict[str, List[np.ndarray]] = defaultdict(list)
     level_pre_drifts: Dict[str, List[float]] = defaultdict(list)
     level_post_drifts: Dict[str, List[float]] = defaultdict(list)
+    level_filters: Dict[str, List[np.ndarray]] = defaultdict(list)
     t0 = time.time()
 
     for idx, sample in enumerate(samples):
@@ -162,9 +158,12 @@ def run_exp3(
         perturbations = build_perturbation_suite(
             image,
             severity_levels=severity_levels,
-            include_natural=True,
-            include_frequency=True,
+            include_natural=pert_cfg_global.get("include_natural", True),
+            include_frequency=pert_cfg_global.get("include_frequency", True),
             num_bands=num_bands,
+            natural_types=pert_cfg_global.get("natural_types"),
+            frequency_types=pert_cfg_global.get("frequency_types"),
+            severity_params=pert_cfg_global.get("severity_params"),
             seed=seed + idx,
         )
         if pert_subset and len(perturbations) > pert_subset:
@@ -181,6 +180,9 @@ def run_exp3(
             if level_data is None:
                 continue
             level_key = level.name
+            W_t = W_t_per_sample.get((sample.image_id, level_key), W_t_average.get(level_key))
+            if W_t is None:
+                continue
 
             prompt = level_data.question
             if level_data.options:
@@ -207,6 +209,7 @@ def run_exp3(
 
             clean_pre = clean_internals.pre_fusion_features.cpu().float().numpy()
             clean_post = clean_internals.post_fusion_features.cpu().float().numpy()
+            patch_grid = clean_internals.patch_grid
 
             level_pert_records = []
 
@@ -229,8 +232,8 @@ def run_exp3(
                 pert_post = pert_internals.post_fusion_features.cpu().float().numpy()
 
                 # Band-decomposed drift
-                pre_drift_bands = compute_band_drift(clean_pre, pert_pre, num_bands)
-                post_drift_bands = compute_band_drift(clean_post, pert_post, num_bands)
+                pre_drift_bands = compute_band_drift(clean_pre, pert_pre, num_bands, patch_grid)
+                post_drift_bands = compute_band_drift(clean_post, pert_post, num_bands, patch_grid)
 
                 # Amplification ratio
                 R_omega = compute_amplification_ratio(pre_drift_bands, post_drift_bands)
@@ -242,6 +245,7 @@ def run_exp3(
                 level_amplifications[level_key].append(R_omega)
                 level_pre_drifts[level_key].append(pre_scalar)
                 level_post_drifts[level_key].append(post_scalar)
+                level_filters[level_key].append(W_t)
 
                 level_pert_records.append({
                     "perturbation": pr.name,
@@ -249,6 +253,7 @@ def run_exp3(
                     "post_drift_scalar": post_scalar,
                     "amplification_ratio": R_omega.tolist(),
                     "mean_amplification": float(R_omega.mean()),
+                    "W_t": W_t.tolist(),
                 })
 
             sample_record["levels"][level_key] = {
@@ -292,7 +297,9 @@ def run_exp3(
     # H1: R(ω) correlates with W_t(ω) per level
     for lk in present_levels:
         R_mean = np.array(agg["per_level"][lk]["mean_amplification_ratio"])
-        W_t = W_t_filters.get(lk)
+        if not level_filters[lk]:
+            continue
+        W_t = np.mean(np.stack(level_filters[lk]), axis=0)
         if W_t is not None and len(R_mean) == len(W_t):
             r, p = pearson_correlation(R_mean, W_t)
             tests[f"pearson_R_vs_Wt_{lk}"] = {

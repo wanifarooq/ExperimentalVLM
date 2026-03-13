@@ -37,7 +37,7 @@ from ..analysis.statistics import (
     bootstrap_ci,
 )
 from ..data.base import ExperimentResult, GranularityLevel
-from ..data.gqa import build_granularity_dataset
+from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
 from ..utils.device import select_device
 from ..utils.io import save_json
@@ -144,18 +144,13 @@ def run_exp2(
         cache_dir=cfg.get("cache_dir"),
         quantization=quantization,
         trust_remote_code=model_cfg.get("trust_remote_code", True),
+        device_map=model_cfg.get("device_map"),
+        local_files_only=cfg.get("offline", False),
     )
     logger.info("Model loaded successfully")
 
     # --- Load dataset ---
-    cache_dir = Path(cfg.get("cache_dir", ".hf_cache"))
-    data_cfg = cfg.get("data", {})
-    samples = build_granularity_dataset(
-        cache_dir=cache_dir,
-        max_samples=max_samples,
-        seed=seed,
-        allow_download=data_cfg.get("allow_download", True),
-    )
+    samples = load_multilevel_vqa_dataset(cfg, max_samples=max_samples)
     logger.info("Loaded %d samples for attention analysis", len(samples))
 
     if not samples:

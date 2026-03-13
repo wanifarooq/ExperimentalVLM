@@ -1,52 +1,38 @@
-"""Experiment 5: Spectral Overlap Prediction.
-
-Synthesis experiment combining Exp 1 (actual sensitivities) and Exp 2
-(W_t filters) to validate Theorem 1.
-
-For each (level, perturbation) pair:
-    predicted = ∫ |W_t(ω)|² × |ΔF(ω)|² dω
-    actual    = mean accuracy drop from Exp 1
-
-If Pearson r(predicted, actual) > 0.7, the spectral overlap theory is
-validated: knowing the task's frequency filter and the perturbation's
-spectral signature is sufficient to predict sensitivity.
-
-Depends on: Experiment 1 + Experiment 2 outputs.
-
-Outputs:
-    exp5/summary.json           -- correlation metrics
-    exp5/hypothesis_tests.json  -- Pearson/Spearman with targets
-    exp5/scatter_data.json      -- (predicted, actual) pairs for plotting
-"""
+"""Experiment 5: Spectral Overlap Prediction."""
 
 from __future__ import annotations
 
+import json
 import logging
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-from ..analysis.overlap import (
-    load_actual_sensitivities_from_exp1,
-    match_predictions_to_actuals,
-    predict_sensitivities,
-)
-from ..analysis.statistics import (
-    pearson_correlation,
-    spearman_correlation,
-    bootstrap_ci,
-)
+from ..analysis.spectral import compute_spectral_overlap
+from ..analysis.statistics import bootstrap_ci, pearson_correlation, spearman_correlation
 from ..data.base import ExperimentResult
 from ..utils.io import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
 
-def _load_W_t_filters(exp2_out_dir: Path) -> Dict[str, np.ndarray]:
-    """Load average W_t filters from Exp 2 output directory."""
-    filters: Dict[str, np.ndarray] = {}
+def _load_jsonl(path: Path) -> List[dict]:
+    if not path.exists():
+        return []
+    records = []
+    with open(path, "r") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+def _load_average_filters(exp2_out_dir: Path) -> Dict[str, np.ndarray]:
     filters_dir = exp2_out_dir / "filters"
+    filters: Dict[str, np.ndarray] = {}
     for level_key in ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]:
         path = filters_dir / f"average_{level_key}.npy"
         if path.exists():
@@ -54,72 +40,85 @@ def _load_W_t_filters(exp2_out_dir: Path) -> Dict[str, np.ndarray]:
     return filters
 
 
-def _load_perturbation_spectra_from_exp1(
+def _load_sample_filters(exp2_out_dir: Path) -> Dict[Tuple[str, str], np.ndarray]:
+    power_path = exp2_out_dir / "power_spectra.json"
+    if not power_path.exists():
+        return {}
+
+    filters: Dict[Tuple[str, str], np.ndarray] = {}
+    for record in load_json(power_path):
+        image_id = str(record.get("image_id"))
+        for level_key, level_data in record.get("levels", {}).items():
+            w_t = level_data.get("W_t")
+            if w_t:
+                filters[(image_id, level_key)] = np.asarray(w_t, dtype=np.float64)
+    return filters
+
+
+def _build_overlap_pairs(
     exp1_out_dir: Path,
-) -> List[tuple]:
-    """Extract perturbation spectral signatures from Exp 1 per-sample data.
+    exp2_out_dir: Path,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    exp1_records = _load_jsonl(exp1_out_dir / "per_sample.jsonl")
+    sample_filters = _load_sample_filters(exp2_out_dir)
+    average_filters = _load_average_filters(exp2_out_dir)
 
-    Since each perturbation has delta_f_norm stored, we reconstruct approximate
-    spectra.  For more accurate matching, we rebuild perturbations on a
-    reference image.
+    sample_pairs: List[Dict[str, Any]] = []
+    grouped: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(
+        lambda: {"predicted": [], "actual": [], "loglik_drift": []}
+    )
 
-    Returns:
-        List of (pert_name, delta_f_array) tuples.
-    """
-    # Try loading degradation_by_level.json to get perturbation names
-    deg_path = exp1_out_dir / "degradation_by_level.json"
-    if not deg_path.exists():
-        return []
+    for record in exp1_records:
+        image_id = str(record.get("image_id"))
+        for level_key, level_data in record.get("levels", {}).items():
+            W_t = sample_filters.get((image_id, level_key), average_filters.get(level_key))
+            if W_t is None:
+                continue
 
-    deg_data = load_json(deg_path)
+            for perturbation in level_data.get("perturbations", []):
+                delta_f = np.asarray(perturbation.get("delta_f") or [], dtype=np.float64)
+                if delta_f.size == 0:
+                    continue
 
-    # Collect unique perturbation names across all levels
-    pert_names = set()
-    for level_data in deg_data.values():
-        pert_names.update(level_data.keys())
+                predicted = compute_spectral_overlap(W_t, delta_f)
+                actual = float(perturbation.get("accuracy_drop", 0.0))
+                loglik_drift = float(perturbation.get("loglik_drift", 0.0))
+                pair = {
+                    "image_id": image_id,
+                    "level": level_key,
+                    "perturbation": perturbation.get("name", "unknown"),
+                    "predicted": predicted,
+                    "actual": actual,
+                    "loglik_drift": loglik_drift,
+                }
+                sample_pairs.append(pair)
 
-    # For a proper spectral signature, we need to rebuild perturbations.
-    # As a fallback, generate synthetic spectral profiles based on
-    # perturbation family classification.
-    spectra = []
-    num_bands = 10
+                key = (level_key, pair["perturbation"])
+                grouped[key]["predicted"].append(predicted)
+                grouped[key]["actual"].append(actual)
+                grouped[key]["loglik_drift"].append(loglik_drift)
 
-    for pname in sorted(pert_names):
-        # Classify family from name
-        name_lower = pname.lower()
-        if "lowpass" in name_lower or "lowband" in name_lower:
-            # Energy concentrated in low bands
-            delta_f = np.exp(-np.linspace(0, 3, num_bands))
-        elif "highpass" in name_lower or "highband" in name_lower:
-            # Energy concentrated in high bands
-            delta_f = np.exp(-np.linspace(3, 0, num_bands))
-        elif "allband" in name_lower:
-            # Uniform energy
-            delta_f = np.ones(num_bands)
-        elif "rotation" in name_lower:
-            # Rotation affects mid-high frequencies
-            delta_f = np.exp(-0.5 * (np.linspace(0, 1, num_bands) - 0.5) ** 2 / 0.1)
-        elif "translation" in name_lower or "shift" in name_lower:
-            # Translation is phase shift - affects all bands equally
-            delta_f = np.ones(num_bands) * 0.5
-        elif "scale" in name_lower:
-            # Scaling redistributes energy across bands
-            delta_f = np.linspace(0.3, 1.0, num_bands)
-        elif "padcrop" in name_lower:
-            # Pad/crop introduces edge effects (high freq)
-            delta_f = np.linspace(0.2, 0.8, num_bands)
-        elif "text" in name_lower or "box" in name_lower:
-            # Overlay adds high-frequency content
-            delta_f = np.linspace(0.1, 1.0, num_bands)
-        else:
-            delta_f = np.ones(num_bands)
+    grouped_pairs: List[Dict[str, Any]] = []
+    for (level_key, perturbation), values in sorted(grouped.items()):
+        grouped_pairs.append(
+            {
+                "label": f"{level_key}|{perturbation}",
+                "level": level_key,
+                "perturbation": perturbation,
+                "predicted": float(np.mean(values["predicted"])),
+                "actual": float(np.mean(values["actual"])),
+                "mean_loglik_drift": float(np.mean(values["loglik_drift"])),
+                "n": len(values["actual"]),
+            }
+        )
 
-        # Normalize
-        if delta_f.sum() > 0:
-            delta_f = delta_f / delta_f.sum()
-        spectra.append((pname, delta_f))
+    return sample_pairs, grouped_pairs
 
-    return spectra
+
+def _correlate(pairs: List[Dict[str, Any]], actual_key: str) -> Tuple[np.ndarray, np.ndarray]:
+    predicted = np.asarray([pair["predicted"] for pair in pairs], dtype=np.float64)
+    actual = np.asarray([pair[actual_key] for pair in pairs], dtype=np.float64)
+    return predicted, actual
 
 
 def run_exp5(
@@ -127,163 +126,108 @@ def run_exp5(
     out_dir: Path,
     results_so_far: Dict[int, ExperimentResult],
 ) -> ExperimentResult:
-    """Run Experiment 5: Spectral Overlap Prediction.
-
-    Combine W_t from Exp 2 and actual sensitivities from Exp 1 to validate
-    that spectral overlap predicts perturbation sensitivity.
-    """
+    """Run Experiment 5: Spectral Overlap Prediction."""
     logger.info("=" * 50)
     logger.info("Experiment 5: Spectral Overlap Prediction")
     logger.info("=" * 50)
 
     exp_cfg = cfg.get("experiments", {}).get("exp5", {})
     base_out = Path(cfg.get("out_dir", "frequency_alignment_outputs"))
-
-    # --- Load W_t from Exp 2 ---
-    exp2_dir = base_out / "exp2"
-    W_t_filters = _load_W_t_filters(exp2_dir)
-    if not W_t_filters:
-        logger.error("No W_t filters found from Experiment 2. Run Exp 2 first.")
-        return ExperimentResult(
-            experiment_id=5,
-            experiment_name="exp5_overlap_prediction",
-            config=exp_cfg,
-            metrics={"error": "no_W_t_filters"},
-        )
-    logger.info("Loaded W_t filters for levels: %s", list(W_t_filters.keys()))
-
-    # --- Load actual sensitivities from Exp 1 ---
     exp1_dir = base_out / "exp1"
-    exp1_summary_path = exp1_dir / "summary.json"
-    if not exp1_summary_path.exists():
-        logger.error("No Exp 1 summary found. Run Exp 1 first.")
+    exp2_dir = base_out / "exp2"
+
+    sample_pairs, grouped_pairs = _build_overlap_pairs(exp1_dir, exp2_dir)
+    if len(grouped_pairs) < 3:
+        logger.warning("Too few grouped pairs (%d) for correlation", len(grouped_pairs))
         return ExperimentResult(
             experiment_id=5,
             experiment_name="exp5_overlap_prediction",
             config=exp_cfg,
-            metrics={"error": "no_exp1_summary"},
+            metrics={"error": "too_few_pairs", "n_pairs": len(grouped_pairs)},
         )
 
-    exp1_summary = load_json(exp1_summary_path)
-    actuals = load_actual_sensitivities_from_exp1(exp1_summary)
-    logger.info("Loaded actual sensitivities for %d levels", len(actuals))
-
-    # --- Load/generate perturbation spectra ---
-    pert_spectra = _load_perturbation_spectra_from_exp1(exp1_dir)
-    if not pert_spectra:
-        logger.error("No perturbation spectra available.")
-        return ExperimentResult(
-            experiment_id=5,
-            experiment_name="exp5_overlap_prediction",
-            config=exp_cfg,
-            metrics={"error": "no_perturbation_spectra"},
-        )
-    logger.info("Generated %d perturbation spectral signatures", len(pert_spectra))
-
-    # --- Predict sensitivities ---
-    predictions = predict_sensitivities(W_t_filters, pert_spectra)
-
-    # --- Match and correlate ---
-    pred_arr, actual_arr, labels = match_predictions_to_actuals(predictions, actuals)
-
-    if len(pred_arr) < 3:
-        logger.warning("Too few matched pairs (%d) for correlation", len(pred_arr))
-        return ExperimentResult(
-            experiment_id=5,
-            experiment_name="exp5_overlap_prediction",
-            config=exp_cfg,
-            metrics={"error": "too_few_pairs", "n_pairs": len(pred_arr)},
-        )
-
-    logger.info("Matched %d (level, perturbation) pairs", len(pred_arr))
-
-    # --- Correlations ---
+    pred_arr, actual_arr = _correlate(grouped_pairs, "actual")
     r_pearson, p_pearson = pearson_correlation(pred_arr, actual_arr)
     rho_spearman, p_spearman = spearman_correlation(pred_arr, actual_arr)
 
-    # Bootstrap CI on Pearson r
-    # Use Fisher z-transform for bootstrap
-    if len(pred_arr) >= 10:
-        from ..analysis.statistics import bootstrap_ci as _bc
+    sample_pred_arr, sample_actual_arr = _correlate(sample_pairs, "actual")
+    sample_r, sample_r_p = pearson_correlation(sample_pred_arr, sample_actual_arr)
 
-        def _pearson_statistic(indices):
-            return np.corrcoef(pred_arr[indices.astype(int)], actual_arr[indices.astype(int)])[0, 1]
+    pearson_ci = None
+    if len(grouped_pairs) >= 10:
+        def _pearson_stat(indices):
+            idx = indices.astype(int)
+            return np.corrcoef(pred_arr[idx], actual_arr[idx])[0, 1]
 
-        point, ci_lo, ci_hi = _bc(
-            np.arange(len(pred_arr)),
-            statistic=_pearson_statistic,
-            n_boot=1000,
-        )
-        pearson_ci = {"mean": point, "ci_95_lower": ci_lo, "ci_95_upper": ci_hi}
-    else:
-        pearson_ci = None
+        point, lo, hi = bootstrap_ci(np.arange(len(grouped_pairs)), statistic=_pearson_stat)
+        pearson_ci = {"mean": point, "ci_95_lower": lo, "ci_95_upper": hi}
 
-    # --- Hypothesis tests ---
     tests: Dict[str, Any] = {
-        "pearson_predicted_vs_actual": {
+        "pearson_predicted_vs_actual_grouped": {
             "r": r_pearson,
             "p_value": p_pearson,
             "target": "r > 0.7",
             "passed": r_pearson > 0.7,
         },
-        "spearman_predicted_vs_actual": {
+        "spearman_predicted_vs_actual_grouped": {
             "rho": rho_spearman,
             "p_value": p_spearman,
             "passed": rho_spearman > 0.6,
         },
+        "pearson_predicted_vs_actual_sample": {
+            "r": sample_r,
+            "p_value": sample_r_p,
+            "passed": sample_r > 0.3,
+        },
     }
-    if pearson_ci:
-        tests["pearson_bootstrap_ci"] = pearson_ci
+    if pearson_ci is not None:
+        tests["pearson_grouped_bootstrap_ci"] = pearson_ci
+    tests["hypothesis_supported"] = tests["pearson_predicted_vs_actual_grouped"]["passed"]
 
-    tests["hypothesis_supported"] = tests["pearson_predicted_vs_actual"]["passed"]
-
-    # --- Per-level breakdown ---
     per_level_corr: Dict[str, Any] = {}
-    for level_key in sorted(predictions.keys()):
-        level_preds = []
-        level_actuals = []
-        for pert_name, s_pred in predictions[level_key]:
-            actual_val = actuals.get(level_key, {}).get(pert_name)
-            if actual_val is not None:
-                level_preds.append(s_pred)
-                level_actuals.append(actual_val)
-        if len(level_preds) >= 3:
-            r, p = pearson_correlation(level_preds, level_actuals)
-            per_level_corr[level_key] = {"pearson_r": r, "p_value": p, "n": len(level_preds)}
+    for level_key in sorted({pair["level"] for pair in grouped_pairs}):
+        level_pairs = [pair for pair in grouped_pairs if pair["level"] == level_key]
+        if len(level_pairs) < 3:
+            continue
+        level_pred, level_actual = _correlate(level_pairs, "actual")
+        r, p = pearson_correlation(level_pred, level_actual)
+        per_level_corr[level_key] = {"pearson_r": r, "p_value": p, "n": len(level_pairs)}
 
-    # --- Log ---
     logger.info("-" * 40)
-    logger.info("  Pearson r = %.3f  (p = %.4f) [%s]",
-                r_pearson, p_pearson,
-                "PASS" if r_pearson > 0.7 else "FAIL")
-    logger.info("  Spearman rho = %.3f  (p = %.4f)",
-                rho_spearman, p_spearman)
-    for lk, lc in per_level_corr.items():
-        logger.info("  %s: r = %.3f (n=%d)", lk, lc["pearson_r"], lc["n"])
+    logger.info(
+        "  Grouped Pearson r = %.3f (p = %.4f) [%s]",
+        r_pearson,
+        p_pearson,
+        "PASS" if r_pearson > 0.7 else "FAIL",
+    )
+    logger.info("  Grouped Spearman rho = %.3f (p = %.4f)", rho_spearman, p_spearman)
+    logger.info("  Sample Pearson r = %.3f (p = %.4f)", sample_r, sample_r_p)
     logger.info("-" * 40)
 
-    # --- Save ---
-    save_json({
-        "n_pairs": len(pred_arr),
-        "pearson_r": r_pearson,
-        "spearman_rho": rho_spearman,
-        "per_level_correlation": per_level_corr,
-    }, out_dir / "summary.json")
+    save_json(
+        {
+            "n_grouped_pairs": len(grouped_pairs),
+            "n_sample_pairs": len(sample_pairs),
+            "pearson_r_grouped": r_pearson,
+            "spearman_rho_grouped": rho_spearman,
+            "pearson_r_sample": sample_r,
+            "per_level_correlation": per_level_corr,
+        },
+        out_dir / "summary.json",
+    )
     save_json(tests, out_dir / "hypothesis_tests.json")
-
-    # Scatter data for plotting
-    scatter_data = [
-        {"label": labels[i], "predicted": float(pred_arr[i]), "actual": float(actual_arr[i])}
-        for i in range(len(labels))
-    ]
-    save_json(scatter_data, out_dir / "scatter_data.json")
+    save_json(grouped_pairs, out_dir / "scatter_data.json")
+    save_json(sample_pairs, out_dir / "sample_scatter_data.json")
 
     metrics = {
-        "n_pairs": len(pred_arr),
-        "pearson_r": r_pearson,
-        "pearson_p": p_pearson,
-        "spearman_rho": rho_spearman,
-        "spearman_p": p_spearman,
+        "n_grouped_pairs": len(grouped_pairs),
+        "n_sample_pairs": len(sample_pairs),
+        "pearson_r_grouped": r_pearson,
+        "pearson_p_grouped": p_pearson,
+        "spearman_rho_grouped": rho_spearman,
+        "spearman_p_grouped": p_spearman,
+        "pearson_r_sample": sample_r,
+        "pearson_p_sample": sample_r_p,
     }
 
     return ExperimentResult(

@@ -36,11 +36,12 @@ from ..data.base import (
     GranularityLevel,
     GranularitySample,
 )
-from ..data.gqa import build_granularity_dataset
+from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
 from ..perturbations import build_perturbation_suite, PerturbationResult
 from ..utils.device import select_device
 from ..utils.io import save_json
+from ..utils.parent_bridge import dirichlet_energy_from_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -98,16 +99,19 @@ def _evaluate_sample(
     image = Image.open(sample.image_path).convert("RGB")
     record: Dict[str, Any] = {
         "image_id": sample.image_id,
+        "dataset": sample.dataset,
         "levels": {},
     }
 
     # --- Clean evaluation per level ---
     clean_vision_tokens = None
+    clean_dirichlet = None
     if extract_vision_tokens:
         try:
             vt = adapter.get_vision_tokens(image)
             if vt is not None:
                 clean_vision_tokens = vt.cpu().numpy()
+                clean_dirichlet = dirichlet_energy_from_tokens(vt)
         except Exception:
             pass
 
@@ -125,6 +129,7 @@ def _evaluate_sample(
         }
 
         # Score on clean image
+        clean_scores: Dict[str, float] = {}
         try:
             clean_scores = adapter.score_options(
                 image, level_data.question, level_data.options,
@@ -136,6 +141,8 @@ def _evaluate_sample(
                 "correct": clean_correct,
                 "scores": {k: float(v) for k, v in clean_scores.items()},
             }
+            if clean_dirichlet is not None:
+                level_record["clean"]["dirichlet_energy"] = float(clean_dirichlet)
         except Exception as e:
             logger.warning(
                 "Clean scoring failed for %s level %s: %s",
@@ -192,10 +199,17 @@ def _evaluate_sample(
                         pert_record["cosine_drift"] = _compute_cosine_drift(
                             clean_vision_tokens, pert_np,
                         )
+                        if clean_dirichlet is not None:
+                            pert_dirichlet = dirichlet_energy_from_tokens(pvt)
+                            if pert_dirichlet is not None:
+                                pert_record["dirichlet_delta"] = float(
+                                    pert_dirichlet - clean_dirichlet
+                                )
                 except Exception:
                     pass
 
             # Store spectral signature stats (for downstream Exp 5)
+            pert_record["delta_f"] = pr.delta_f.tolist()
             pert_record["delta_f_norm"] = float(np.linalg.norm(pr.delta_f))
             pert_record["delta_f_peak_band"] = int(np.argmax(pr.delta_f))
 
@@ -221,6 +235,7 @@ def _aggregate_results(
     level_clean_acc: Dict[str, List[float]] = defaultdict(list)
     level_pert_acc: Dict[str, List[float]] = defaultdict(list)
     level_cosine_drifts: Dict[str, List[float]] = defaultdict(list)
+    level_dirichlet_deltas: Dict[str, List[float]] = defaultdict(list)
 
     # Per (level, perturbation) breakdown
     level_pert_drops: Dict[str, Dict[str, List[float]]] = defaultdict(
@@ -246,6 +261,10 @@ def _aggregate_results(
                 if cos_d > 0:
                     level_cosine_drifts[level_key].append(cos_d)
 
+                dirichlet_delta = pr.get("dirichlet_delta")
+                if dirichlet_delta is not None:
+                    level_dirichlet_deltas[level_key].append(dirichlet_delta)
+
                 pname = pr.get("name", "unknown")
                 level_pert_drops[level_key][pname].append(drop)
 
@@ -268,6 +287,12 @@ def _aggregate_results(
             "mean_loglik_drift": float(np.mean(drifts)) if drifts else 0.0,
             "std_loglik_drift": float(np.std(drifts)) if drifts else 0.0,
             "mean_cosine_drift": float(np.mean(cos_drifts)) if cos_drifts else 0.0,
+            "mean_dirichlet_delta": float(np.mean(level_dirichlet_deltas.get(lk, [])))
+            if level_dirichlet_deltas.get(lk)
+            else 0.0,
+            "std_dirichlet_delta": float(np.std(level_dirichlet_deltas.get(lk, [])))
+            if level_dirichlet_deltas.get(lk)
+            else 0.0,
             "num_samples": len(clean),
             "num_perturbation_evals": len(drops),
         }
@@ -427,20 +452,15 @@ def run_exp1(
         cache_dir=cfg.get("cache_dir"),
         quantization=quantization,
         trust_remote_code=model_cfg.get("trust_remote_code", True),
+        device_map=model_cfg.get("device_map"),
+        local_files_only=cfg.get("offline", False),
     )
     logger.info("Model loaded successfully")
 
     # --- Load dataset ---
-    logger.info("Building GQA granularity dataset (max_samples=%d)...", max_samples)
-    cache_dir = Path(cfg.get("cache_dir", ".hf_cache"))
-    data_cfg = cfg.get("data", {})
-    samples = build_granularity_dataset(
-        cache_dir=cache_dir,
-        max_samples=max_samples,
-        seed=seed,
-        allow_download=data_cfg.get("allow_download", True),
-    )
-    logger.info("Loaded %d samples with all 4 granularity levels", len(samples))
+    logger.info("Building VQA granularity dataset (max_samples=%d)...", max_samples)
+    samples = load_multilevel_vqa_dataset(cfg, max_samples=max_samples)
+    logger.info("Loaded %d samples with all available granularity levels", len(samples))
 
     if not samples:
         logger.error("No samples loaded. Check GQA data availability.")
@@ -481,6 +501,9 @@ def run_exp1(
             include_natural=pert_cfg.get("include_natural", True),
             include_frequency=pert_cfg.get("include_frequency", True),
             num_bands=num_bands,
+            natural_types=pert_cfg.get("natural_types"),
+            frequency_types=pert_cfg.get("frequency_types"),
+            severity_params=pert_cfg.get("severity_params"),
             seed=seed + idx,
         )
 

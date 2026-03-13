@@ -9,6 +9,24 @@ from typing import Any
 import yaml
 
 
+def ensure_dir(path: str | Path) -> Path:
+    """Create *path* if needed and return it as a Path."""
+    resolved = Path(path)
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def merge_configs(base: dict, overrides: dict) -> dict:
+    """Recursively merge config dictionaries."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_configs(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def save_json(data: Any, path: Path) -> None:
     """Save data as formatted JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)

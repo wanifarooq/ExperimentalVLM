@@ -28,6 +28,8 @@ class LevelData:
     # For segmentation experiments:
     mask_path: Optional[Path] = None
     text_prompt: Optional[str] = None
+    bbox: Optional[List[float]] = None
+    segmentation: Any = None
     # Metadata:
     question_type: Optional[str] = None  # e.g. "object_presence", "attribute", etc.
 

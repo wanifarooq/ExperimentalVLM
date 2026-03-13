@@ -22,7 +22,11 @@ def select_device(requested: str = "auto") -> torch.device:
 
 def get_dtype(device: torch.device) -> torch.dtype:
     """Return appropriate dtype for the device."""
-    if device.type in ("cuda", "mps"):
+    if device.type == "cuda":
+        if torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        return torch.float16
+    if device.type == "mps":
         return torch.float16
     return torch.float32
 
