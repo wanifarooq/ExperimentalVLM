@@ -118,6 +118,10 @@ def run_exp3(
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         device_map=model_cfg.get("device_map"),
         local_files_only=cfg.get("offline", False),
+        attn_implementation=model_cfg.get("attn_implementation"),
+        attention_extract_implementation=model_cfg.get(
+            "attention_extract_implementation", "eager"
+        ),
     )
 
     # --- Load dataset ---
@@ -209,7 +213,7 @@ def run_exp3(
 
             clean_pre = clean_internals.pre_fusion_features.cpu().float().numpy()
             clean_post = clean_internals.post_fusion_features.cpu().float().numpy()
-            patch_grid = clean_internals.patch_grid
+            clean_patch_grid = clean_internals.patch_grid
 
             level_pert_records = []
 
@@ -230,17 +234,40 @@ def run_exp3(
 
                 pert_pre = pert_internals.pre_fusion_features.cpu().float().numpy()
                 pert_post = pert_internals.post_fusion_features.cpu().float().numpy()
+                pert_patch_grid = pert_internals.patch_grid
 
                 # Band-decomposed drift
-                pre_drift_bands = compute_band_drift(clean_pre, pert_pre, num_bands, patch_grid)
-                post_drift_bands = compute_band_drift(clean_post, pert_post, num_bands, patch_grid)
+                pre_drift_bands = compute_band_drift(
+                    clean_pre,
+                    pert_pre,
+                    num_bands,
+                    clean_patch_grid,
+                    pert_patch_grid,
+                )
+                post_drift_bands = compute_band_drift(
+                    clean_post,
+                    pert_post,
+                    num_bands,
+                    clean_patch_grid,
+                    pert_patch_grid,
+                )
 
                 # Amplification ratio
                 R_omega = compute_amplification_ratio(pre_drift_bands, post_drift_bands)
 
                 # Scalar drifts
-                pre_scalar = compute_scalar_drift(clean_pre, pert_pre)
-                post_scalar = compute_scalar_drift(clean_post, pert_post)
+                pre_scalar = compute_scalar_drift(
+                    clean_pre,
+                    pert_pre,
+                    clean_patch_grid,
+                    pert_patch_grid,
+                )
+                post_scalar = compute_scalar_drift(
+                    clean_post,
+                    pert_post,
+                    clean_patch_grid,
+                    pert_patch_grid,
+                )
 
                 level_amplifications[level_key].append(R_omega)
                 level_pre_drifts[level_key].append(pre_scalar)

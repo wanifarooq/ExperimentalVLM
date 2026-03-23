@@ -146,6 +146,10 @@ def run_exp2(
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         device_map=model_cfg.get("device_map"),
         local_files_only=cfg.get("offline", False),
+        attn_implementation=model_cfg.get("attn_implementation"),
+        attention_extract_implementation=model_cfg.get(
+            "attention_extract_implementation", "eager"
+        ),
     )
     logger.info("Model loaded successfully")
 

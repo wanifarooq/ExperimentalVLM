@@ -19,11 +19,76 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _to_spatial_grid(
+    features: np.ndarray,
+    patch_grid: Optional[Tuple[int, int]] = None,
+) -> np.ndarray:
+    arr = np.asarray(features, dtype=np.float64)
+    if arr.ndim == 4 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim == 3 and patch_grid is not None:
+        h, w = patch_grid
+        if arr.shape[:2] == (h, w):
+            return arr
+        if arr.shape[0] == 1:
+            arr = arr[0]
+        else:
+            arr = arr.reshape(-1, arr.shape[-1])
+    if arr.ndim == 3 and patch_grid is None and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim == 2:
+        n_tokens = arr.shape[0]
+        if patch_grid is not None and patch_grid[0] * patch_grid[1] <= n_tokens:
+            h, w = patch_grid
+        else:
+            h = max(1, int(np.sqrt(n_tokens)))
+            w = max(1, n_tokens // h)
+        usable = min(n_tokens, h * w)
+        return arr[:usable].reshape(h, w, -1)
+    return arr
+
+
+def _resize_spatial_grid(
+    features: np.ndarray,
+    target_h: int,
+    target_w: int,
+) -> np.ndarray:
+    if features.shape[:2] == (target_h, target_w):
+        return features
+    y_idx = np.linspace(0, features.shape[0] - 1, target_h).round().astype(int)
+    x_idx = np.linspace(0, features.shape[1] - 1, target_w).round().astype(int)
+    return features[y_idx][:, x_idx, :]
+
+
+def _align_features(
+    clean_features: np.ndarray,
+    perturbed_features: np.ndarray,
+    clean_patch_grid: Optional[Tuple[int, int]] = None,
+    perturbed_patch_grid: Optional[Tuple[int, int]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    clean = _to_spatial_grid(clean_features, clean_patch_grid)
+    perturbed = _to_spatial_grid(perturbed_features, perturbed_patch_grid)
+
+    if clean.ndim == 3 and perturbed.ndim == 3:
+        target_h = min(clean.shape[0], perturbed.shape[0])
+        target_w = min(clean.shape[1], perturbed.shape[1])
+        return (
+            _resize_spatial_grid(clean, target_h, target_w),
+            _resize_spatial_grid(perturbed, target_h, target_w),
+        )
+
+    clean_tokens = clean.reshape(-1, clean.shape[-1])
+    perturbed_tokens = perturbed.reshape(-1, perturbed.shape[-1])
+    usable = min(clean_tokens.shape[0], perturbed_tokens.shape[0])
+    return clean_tokens[:usable], perturbed_tokens[:usable]
+
+
 def compute_band_drift(
     clean_features: np.ndarray,
     perturbed_features: np.ndarray,
     num_bands: int = 10,
-    patch_grid: Optional[Tuple[int, int]] = None,
+    clean_patch_grid: Optional[Tuple[int, int]] = None,
+    perturbed_patch_grid: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
     """Compute frequency-band-decomposed drift between clean and perturbed features.
 
@@ -32,33 +97,25 @@ def compute_band_drift(
 
     Args:
         clean_features: Shape ``(num_tokens, hidden_dim)`` or ``(H, W, D)``.
-        perturbed_features: Same shape as ``clean_features``.
+        perturbed_features: Same feature layout as ``clean_features``.
         num_bands: Number of radial frequency bands.
+        clean_patch_grid: Optional spatial grid for clean features.
+        perturbed_patch_grid: Optional spatial grid for perturbed features.
 
     Returns:
         Band-decomposed drift energy, shape ``(num_bands,)``.
     """
-    diff = perturbed_features.astype(np.float64) - clean_features.astype(np.float64)
-
-    if diff.ndim == 4 and diff.shape[0] == 1:
-        diff = diff[0]
-    if diff.ndim == 3 and patch_grid is not None:
-        h, w = patch_grid
-        if diff.shape[0] == h and diff.shape[1] == w:
-            pass
-        elif diff.shape[0] == 1:
-            diff = diff[0]
-        else:
-            diff = diff.reshape(-1, diff.shape[-1])
-    if diff.ndim == 3 and patch_grid is None and diff.shape[0] == 1:
-        diff = diff[0]
+    clean, perturbed = _align_features(
+        clean_features,
+        perturbed_features,
+        clean_patch_grid,
+        perturbed_patch_grid,
+    )
+    diff = perturbed - clean
     if diff.ndim == 2:
         n_tokens = diff.shape[0]
-        if patch_grid is not None and patch_grid[0] * patch_grid[1] <= n_tokens:
-            h, w = patch_grid
-        else:
-            h = max(1, int(np.sqrt(n_tokens)))
-            w = max(1, n_tokens // h)
+        h = max(1, int(np.sqrt(n_tokens)))
+        w = max(1, n_tokens // h)
         usable = min(n_tokens, h * w)
         diff = diff[:usable].reshape(h, w, -1)
 
@@ -114,6 +171,8 @@ def compute_amplification_ratio(
 def compute_scalar_drift(
     clean_features: np.ndarray,
     perturbed_features: np.ndarray,
+    clean_patch_grid: Optional[Tuple[int, int]] = None,
+    perturbed_patch_grid: Optional[Tuple[int, int]] = None,
 ) -> float:
     """Compute scalar drift as mean L2 distance between features.
 
@@ -124,7 +183,13 @@ def compute_scalar_drift(
     Returns:
         Mean per-token L2 drift.
     """
-    diff = perturbed_features.astype(np.float64) - clean_features.astype(np.float64)
+    clean, perturbed = _align_features(
+        clean_features,
+        perturbed_features,
+        clean_patch_grid,
+        perturbed_patch_grid,
+    )
+    diff = perturbed - clean
     if diff.ndim > 2:
         diff = diff.reshape(-1, diff.shape[-1])
     per_token_norm = np.linalg.norm(diff, axis=-1)

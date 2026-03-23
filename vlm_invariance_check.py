@@ -2023,6 +2023,7 @@ def prepare_model(
     *,
     device_map: Optional[str] = None,
     local_files_only: bool = False,
+    attn_implementation: Optional[str] = None,
 ):
     dtype = infer_dtype(device)
     model_kwargs: Dict[str, Any] = {"torch_dtype": dtype}
@@ -2031,12 +2032,15 @@ def prepare_model(
         model_kwargs["cache_dir"] = cache_dir
     if device_map is not None:
         model_kwargs["device_map"] = device_map
+    if attn_implementation:
+        model_kwargs["attn_implementation"] = attn_implementation
     if trust_remote:
         model_kwargs["trust_remote_code"] = True
 
     print(
         f"[setup] Loading model {model_id} on {device} with dtype={dtype} "
-        f"(local_only={local_files_only}, device_map={device_map})",
+        f"(local_only={local_files_only}, device_map={device_map}, "
+        f"attn_impl={attn_implementation or 'default'})",
         file=sys.stderr,
     )
     config = AutoConfig.from_pretrained(

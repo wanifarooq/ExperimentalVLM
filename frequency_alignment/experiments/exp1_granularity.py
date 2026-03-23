@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from PIL import Image
 
+from ..analysis.spectral import compute_feature_spectral_signature
 from ..analysis.statistics import (
     bootstrap_ci,
     cohens_d,
@@ -91,6 +92,8 @@ def _evaluate_sample(
     adapter,
     perturbation_results: List[PerturbationResult],
     extract_vision_tokens: bool = False,
+    store_feature_delta_f: bool = True,
+    num_bands: int = 10,
 ) -> Dict[str, Any]:
     """Evaluate one sample across all levels and perturbations.
 
@@ -105,15 +108,66 @@ def _evaluate_sample(
 
     # --- Clean evaluation per level ---
     clean_vision_tokens = None
+    clean_patch_grid = None
     clean_dirichlet = None
-    if extract_vision_tokens:
+    need_vision_features = extract_vision_tokens or store_feature_delta_f
+    perturbation_vision_metrics: Dict[str, Dict[str, Any]] = {}
+    if need_vision_features:
         try:
             vt = adapter.get_vision_tokens(image)
             if vt is not None:
                 clean_vision_tokens = vt.cpu().numpy()
+                if clean_vision_tokens.ndim == 4 and clean_vision_tokens.shape[0] == 1:
+                    clean_patch_grid = (
+                        int(clean_vision_tokens.shape[1]),
+                        int(clean_vision_tokens.shape[2]),
+                    )
+                elif clean_vision_tokens.ndim == 3:
+                    clean_patch_grid = (
+                        int(clean_vision_tokens.shape[0]),
+                        int(clean_vision_tokens.shape[1]),
+                    )
                 clean_dirichlet = dirichlet_energy_from_tokens(vt)
         except Exception:
             pass
+    if clean_vision_tokens is not None:
+        for perturbation in perturbation_results:
+            try:
+                pert_tokens = adapter.get_vision_tokens(perturbation.perturbed_image)
+            except Exception:
+                continue
+            if pert_tokens is None:
+                continue
+            pert_np = pert_tokens.cpu().numpy()
+            pert_patch_grid = None
+            if pert_np.ndim == 4 and pert_np.shape[0] == 1:
+                pert_patch_grid = (int(pert_np.shape[1]), int(pert_np.shape[2]))
+            elif pert_np.ndim == 3:
+                pert_patch_grid = (int(pert_np.shape[0]), int(pert_np.shape[1]))
+
+            metrics: Dict[str, Any] = {}
+            if extract_vision_tokens:
+                metrics["cosine_drift"] = _compute_cosine_drift(clean_vision_tokens, pert_np)
+                if clean_dirichlet is not None:
+                    pert_dirichlet = dirichlet_energy_from_tokens(pert_tokens)
+                    if pert_dirichlet is not None:
+                        metrics["dirichlet_delta"] = float(pert_dirichlet - clean_dirichlet)
+            if store_feature_delta_f:
+                try:
+                    delta_f_vision, _ = compute_feature_spectral_signature(
+                        clean_vision_tokens,
+                        pert_np,
+                        num_bands=num_bands,
+                        clean_patch_grid=clean_patch_grid,
+                        perturbed_patch_grid=pert_patch_grid,
+                    )
+                except Exception:
+                    delta_f_vision = None
+                if delta_f_vision is not None:
+                    metrics["delta_f_vision"] = delta_f_vision.tolist()
+                    metrics["delta_f_vision_norm"] = float(np.linalg.norm(delta_f_vision))
+                    metrics["delta_f_vision_peak_band"] = int(np.argmax(delta_f_vision))
+            perturbation_vision_metrics[perturbation.name] = metrics
 
     for level in GranularityLevel:
         level_data = sample.levels.get(level)
@@ -190,28 +244,13 @@ def _evaluate_sample(
                     1.0 if level_record["clean"].get("correct") else 0.0
                 )
 
-            # Vision token cosine drift
-            if extract_vision_tokens:
-                try:
-                    pvt = adapter.get_vision_tokens(pr.perturbed_image)
-                    if pvt is not None:
-                        pert_np = pvt.cpu().numpy()
-                        pert_record["cosine_drift"] = _compute_cosine_drift(
-                            clean_vision_tokens, pert_np,
-                        )
-                        if clean_dirichlet is not None:
-                            pert_dirichlet = dirichlet_energy_from_tokens(pvt)
-                            if pert_dirichlet is not None:
-                                pert_record["dirichlet_delta"] = float(
-                                    pert_dirichlet - clean_dirichlet
-                                )
-                except Exception:
-                    pass
-
             # Store spectral signature stats (for downstream Exp 5)
             pert_record["delta_f"] = pr.delta_f.tolist()
             pert_record["delta_f_norm"] = float(np.linalg.norm(pr.delta_f))
             pert_record["delta_f_peak_band"] = int(np.argmax(pr.delta_f))
+            vision_metrics = perturbation_vision_metrics.get(pr.name)
+            if vision_metrics:
+                pert_record.update(vision_metrics)
 
             level_record["perturbations"].append(pert_record)
 
@@ -454,6 +493,10 @@ def run_exp1(
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         device_map=model_cfg.get("device_map"),
         local_files_only=cfg.get("offline", False),
+        attn_implementation=model_cfg.get("attn_implementation"),
+        attention_extract_implementation=model_cfg.get(
+            "attention_extract_implementation", "eager"
+        ),
     )
     logger.info("Model loaded successfully")
 
@@ -478,6 +521,7 @@ def run_exp1(
 
     # Whether to extract vision tokens for cosine drift (slower)
     extract_vision_tokens = exp_cfg.get("extract_vision_tokens", False)
+    store_feature_delta_f = exp_cfg.get("store_feature_delta_f", True)
 
     # --- Evaluation loop ---
     per_sample_results: List[Dict[str, Any]] = []
@@ -515,6 +559,8 @@ def run_exp1(
         record = _evaluate_sample(
             sample, adapter, perturbations,
             extract_vision_tokens=extract_vision_tokens,
+            store_feature_delta_f=store_feature_delta_f,
+            num_bands=num_bands,
         )
         per_sample_results.append(record)
 

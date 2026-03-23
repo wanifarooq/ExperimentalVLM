@@ -20,6 +20,76 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _features_to_spatial_grid(
+    features: np.ndarray,
+    patch_grid: Optional[Tuple[int, int]] = None,
+) -> np.ndarray:
+    arr = np.asarray(features, dtype=np.float64)
+    if arr.ndim == 4 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim == 3 and patch_grid is not None:
+        h, w = patch_grid
+        if arr.shape[:2] == (h, w):
+            return arr
+        if arr.shape[0] == 1:
+            arr = arr[0]
+        else:
+            arr = arr.reshape(-1, arr.shape[-1])
+    if arr.ndim == 3 and patch_grid is None and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim == 2:
+        n_tokens = arr.shape[0]
+        if patch_grid is not None and patch_grid[0] * patch_grid[1] <= n_tokens:
+            h, w = patch_grid
+        else:
+            h = max(1, int(np.sqrt(n_tokens)))
+            w = max(1, n_tokens // h)
+        usable = min(n_tokens, h * w)
+        return arr[:usable].reshape(h, w, -1)
+    return arr
+
+
+def _resize_spatial_grid(
+    features: np.ndarray,
+    target_h: int,
+    target_w: int,
+) -> np.ndarray:
+    if features.shape[:2] == (target_h, target_w):
+        return features
+    y_idx = np.linspace(0, features.shape[0] - 1, target_h).round().astype(int)
+    x_idx = np.linspace(0, features.shape[1] - 1, target_w).round().astype(int)
+    return features[y_idx][:, x_idx, :]
+
+
+def _align_feature_grids(
+    clean_features: np.ndarray,
+    perturbed_features: np.ndarray,
+    clean_patch_grid: Optional[Tuple[int, int]] = None,
+    perturbed_patch_grid: Optional[Tuple[int, int]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    clean = _features_to_spatial_grid(clean_features, clean_patch_grid)
+    perturbed = _features_to_spatial_grid(perturbed_features, perturbed_patch_grid)
+
+    if clean.ndim == 3 and perturbed.ndim == 3:
+        target_h = min(clean.shape[0], perturbed.shape[0])
+        target_w = min(clean.shape[1], perturbed.shape[1])
+        return (
+            _resize_spatial_grid(clean, target_h, target_w),
+            _resize_spatial_grid(perturbed, target_h, target_w),
+        )
+
+    clean_tokens = clean.reshape(-1, clean.shape[-1])
+    perturbed_tokens = perturbed.reshape(-1, perturbed.shape[-1])
+    usable = min(clean_tokens.shape[0], perturbed_tokens.shape[0])
+    side = max(1, int(np.sqrt(usable)))
+    width = max(1, usable // side)
+    usable = min(usable, side * width)
+    return (
+        clean_tokens[:usable].reshape(side, width, -1),
+        perturbed_tokens[:usable].reshape(side, width, -1),
+    )
+
+
 def attention_to_spatial_grid(
     attention: np.ndarray,
     patch_grid: Tuple[int, int],
@@ -134,6 +204,45 @@ def compute_attention_power_spectrum_multi(
 
     stacked = np.stack(all_radials)
     return stacked.mean(axis=0), all_radials
+
+
+def compute_feature_spectral_signature(
+    clean_features: np.ndarray,
+    perturbed_features: np.ndarray,
+    num_bands: int = 10,
+    clean_patch_grid: Optional[Tuple[int, int]] = None,
+    perturbed_patch_grid: Optional[Tuple[int, int]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute radially binned FFT-difference energy in feature space."""
+    clean_grid, perturbed_grid = _align_feature_grids(
+        clean_features,
+        perturbed_features,
+        clean_patch_grid,
+        perturbed_patch_grid,
+    )
+    clean_fft = np.fft.fft2(clean_grid, axes=(0, 1))
+    perturbed_fft = np.fft.fft2(perturbed_grid, axes=(0, 1))
+    delta_fft = perturbed_fft - clean_fft
+    delta_power_2d = np.abs(delta_fft) ** 2
+    if delta_power_2d.ndim == 3:
+        delta_power_2d = delta_power_2d.mean(axis=-1)
+
+    h, w = delta_power_2d.shape
+    cy, cx = h // 2, w // 2
+    y_grid, x_grid = np.ogrid[:h, :w]
+    dist = np.sqrt((y_grid - cy) ** 2 + (x_grid - cx) ** 2)
+    max_dist = np.sqrt(cy ** 2 + cx ** 2)
+    delta_shifted = np.fft.fftshift(delta_power_2d)
+
+    edges = np.linspace(0, max_dist, num_bands + 1)
+    radial_bins = np.zeros(num_bands, dtype=np.float64)
+    for band_idx in range(num_bands):
+        mask = (dist >= edges[band_idx]) & (dist < edges[band_idx + 1])
+        count = mask.sum()
+        if count > 0:
+            radial_bins[band_idx] = delta_shifted[mask].mean()
+
+    return radial_bins, delta_power_2d
 
 
 def compute_effective_bandwidth(power_spectrum: np.ndarray) -> float:

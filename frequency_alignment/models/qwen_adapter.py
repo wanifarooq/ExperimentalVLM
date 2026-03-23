@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 import math
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -29,6 +30,8 @@ class HFVLMAdapter(VLMAdapter):
         self._device_obj = torch.device("cpu")
         self._model_id = ""
         self._context_len_cache: Dict[tuple, int] = {}
+        self._default_attn_implementation: Optional[str] = None
+        self._attention_extract_implementation: Optional[str] = "eager"
 
     def load(
         self,
@@ -40,6 +43,8 @@ class HFVLMAdapter(VLMAdapter):
         trust_remote_code: bool = True,
         device_map: Optional[str] = None,
         local_files_only: bool = False,
+        attn_implementation: Optional[str] = None,
+        attention_extract_implementation: Optional[str] = "eager",
         **kwargs: Any,
     ) -> None:
         load_kwargs: Dict[str, Any] = {}
@@ -58,6 +63,8 @@ class HFVLMAdapter(VLMAdapter):
             load_kwargs["device_map"] = device_map or "auto"
         elif device_map:
             load_kwargs["device_map"] = device_map
+        if attn_implementation:
+            load_kwargs["attn_implementation"] = attn_implementation
 
         self._model, self._processor = prepare_model(
             model_id,
@@ -69,6 +76,8 @@ class HFVLMAdapter(VLMAdapter):
         self._model_id = model_id
         self._device_obj = next(self._model.parameters()).device
         self._context_len_cache.clear()
+        self._attention_extract_implementation = attention_extract_implementation
+        self._default_attn_implementation = self._current_attn_implementation()
         logger.info("Loaded %s on %s", model_id, self._device_obj)
 
     def unload(self) -> None:
@@ -79,6 +88,8 @@ class HFVLMAdapter(VLMAdapter):
             del self._processor
             self._processor = None
         self._context_len_cache.clear()
+        self._default_attn_implementation = None
+        self._attention_extract_implementation = "eager"
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -162,6 +173,60 @@ class HFVLMAdapter(VLMAdapter):
             if layers is not None:
                 return list(layers)
         return []
+
+    def _current_attn_implementation(self) -> Optional[str]:
+        config = getattr(self._model, "config", None)
+        if config is None:
+            return None
+        for attr in ("_attn_implementation", "_attn_implementation_internal"):
+            value = getattr(config, attr, None)
+            if value:
+                return str(value)
+        return None
+
+    @contextmanager
+    def _temporary_attention_backend(self, implementation: Optional[str]):
+        previous = self._current_attn_implementation() or self._default_attn_implementation
+        switched = False
+        if implementation and implementation != previous:
+            setter = getattr(self._model, "set_attn_implementation", None)
+            if callable(setter):
+                try:
+                    setter(implementation)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not enable %s attention for %s: %s",
+                        implementation,
+                        self._model_id,
+                        exc,
+                    )
+                else:
+                    switched = self._current_attn_implementation() == implementation
+                    if not switched:
+                        logger.warning(
+                            "Requested %s attention for %s but active backend is %s",
+                            implementation,
+                            self._model_id,
+                            self._current_attn_implementation(),
+                        )
+            else:
+                logger.warning(
+                    "%s does not expose set_attn_implementation(); attention extraction may be unavailable",
+                    self._model.__class__.__name__,
+                )
+        try:
+            yield
+        finally:
+            if switched and previous and previous != implementation:
+                try:
+                    self._model.set_attn_implementation(previous)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not restore %s attention for %s: %s",
+                        previous,
+                        self._model_id,
+                        exc,
+                    )
 
     def _image_token_id(self) -> Optional[int]:
         tokenizer = getattr(self._processor, "tokenizer", self._processor)
@@ -310,7 +375,9 @@ class HFVLMAdapter(VLMAdapter):
             output_attentions=extract_attention,
             output_hidden_states=extract_post_fusion,
         )
-        outputs = self._model(**inputs)
+        backend = self._attention_extract_implementation if extract_attention else None
+        with self._temporary_attention_backend(backend):
+            outputs = self._model(**inputs)
 
         vision_range = self._find_vision_token_range(inputs["input_ids"])
         pre_fusion_features = None

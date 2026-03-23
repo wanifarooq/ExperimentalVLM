@@ -12,10 +12,14 @@ changed_predictions_mmmu_test_needed
 .vscode/
 .idea/
 *.log
+.claude/
+
 
 # Experiment outputs (plots, results, generated data)
+adversarial/
 frequency_alignment_outputs/
 segmentation_robustness_outputs/
+frequency_alignment_outputs_*/
 outputs/
 results/
 

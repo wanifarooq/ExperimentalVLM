@@ -58,6 +58,7 @@ def _load_sample_filters(exp2_out_dir: Path) -> Dict[Tuple[str, str], np.ndarray
 def _build_overlap_pairs(
     exp1_out_dir: Path,
     exp2_out_dir: Path,
+    delta_key: str = "delta_f",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     exp1_records = _load_jsonl(exp1_out_dir / "per_sample.jsonl")
     sample_filters = _load_sample_filters(exp2_out_dir)
@@ -76,7 +77,7 @@ def _build_overlap_pairs(
                 continue
 
             for perturbation in level_data.get("perturbations", []):
-                delta_f = np.asarray(perturbation.get("delta_f") or [], dtype=np.float64)
+                delta_f = np.asarray(perturbation.get(delta_key) or [], dtype=np.float64)
                 if delta_f.size == 0:
                     continue
 
@@ -115,37 +116,10 @@ def _build_overlap_pairs(
     return sample_pairs, grouped_pairs
 
 
-def _correlate(pairs: List[Dict[str, Any]], actual_key: str) -> Tuple[np.ndarray, np.ndarray]:
-    predicted = np.asarray([pair["predicted"] for pair in pairs], dtype=np.float64)
-    actual = np.asarray([pair[actual_key] for pair in pairs], dtype=np.float64)
-    return predicted, actual
-
-
-def run_exp5(
-    cfg: dict,
-    out_dir: Path,
-    results_so_far: Dict[int, ExperimentResult],
-) -> ExperimentResult:
-    """Run Experiment 5: Spectral Overlap Prediction."""
-    logger.info("=" * 50)
-    logger.info("Experiment 5: Spectral Overlap Prediction")
-    logger.info("=" * 50)
-
-    exp_cfg = cfg.get("experiments", {}).get("exp5", {})
-    base_out = Path(cfg.get("out_dir", "frequency_alignment_outputs"))
-    exp1_dir = base_out / "exp1"
-    exp2_dir = base_out / "exp2"
-
-    sample_pairs, grouped_pairs = _build_overlap_pairs(exp1_dir, exp2_dir)
-    if len(grouped_pairs) < 3:
-        logger.warning("Too few grouped pairs (%d) for correlation", len(grouped_pairs))
-        return ExperimentResult(
-            experiment_id=5,
-            experiment_name="exp5_overlap_prediction",
-            config=exp_cfg,
-            metrics={"error": "too_few_pairs", "n_pairs": len(grouped_pairs)},
-        )
-
+def _summarize_overlap(
+    sample_pairs: List[Dict[str, Any]],
+    grouped_pairs: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     pred_arr, actual_arr = _correlate(grouped_pairs, "actual")
     r_pearson, p_pearson = pearson_correlation(pred_arr, actual_arr)
     rho_spearman, p_spearman = spearman_correlation(pred_arr, actual_arr)
@@ -193,32 +167,14 @@ def run_exp5(
         r, p = pearson_correlation(level_pred, level_actual)
         per_level_corr[level_key] = {"pearson_r": r, "p_value": p, "n": len(level_pairs)}
 
-    logger.info("-" * 40)
-    logger.info(
-        "  Grouped Pearson r = %.3f (p = %.4f) [%s]",
-        r_pearson,
-        p_pearson,
-        "PASS" if r_pearson > 0.7 else "FAIL",
-    )
-    logger.info("  Grouped Spearman rho = %.3f (p = %.4f)", rho_spearman, p_spearman)
-    logger.info("  Sample Pearson r = %.3f (p = %.4f)", sample_r, sample_r_p)
-    logger.info("-" * 40)
-
-    save_json(
-        {
-            "n_grouped_pairs": len(grouped_pairs),
-            "n_sample_pairs": len(sample_pairs),
-            "pearson_r_grouped": r_pearson,
-            "spearman_rho_grouped": rho_spearman,
-            "pearson_r_sample": sample_r,
-            "per_level_correlation": per_level_corr,
-        },
-        out_dir / "summary.json",
-    )
-    save_json(tests, out_dir / "hypothesis_tests.json")
-    save_json(grouped_pairs, out_dir / "scatter_data.json")
-    save_json(sample_pairs, out_dir / "sample_scatter_data.json")
-
+    summary = {
+        "n_grouped_pairs": len(grouped_pairs),
+        "n_sample_pairs": len(sample_pairs),
+        "pearson_r_grouped": r_pearson,
+        "spearman_rho_grouped": rho_spearman,
+        "pearson_r_sample": sample_r,
+        "per_level_correlation": per_level_corr,
+    }
     metrics = {
         "n_grouped_pairs": len(grouped_pairs),
         "n_sample_pairs": len(sample_pairs),
@@ -229,6 +185,110 @@ def run_exp5(
         "pearson_r_sample": sample_r,
         "pearson_p_sample": sample_r_p,
     }
+    return summary, tests, metrics
+
+
+def _correlate(pairs: List[Dict[str, Any]], actual_key: str) -> Tuple[np.ndarray, np.ndarray]:
+    predicted = np.asarray([pair["predicted"] for pair in pairs], dtype=np.float64)
+    actual = np.asarray([pair[actual_key] for pair in pairs], dtype=np.float64)
+    return predicted, actual
+
+
+def run_exp5(
+    cfg: dict,
+    out_dir: Path,
+    results_so_far: Dict[int, ExperimentResult],
+) -> ExperimentResult:
+    """Run Experiment 5: Spectral Overlap Prediction."""
+    logger.info("=" * 50)
+    logger.info("Experiment 5: Spectral Overlap Prediction")
+    logger.info("=" * 50)
+
+    exp_cfg = cfg.get("experiments", {}).get("exp5", {})
+    base_out = Path(cfg.get("out_dir", "frequency_alignment_outputs"))
+    exp1_dir = base_out / "exp1"
+    exp2_dir = base_out / "exp2"
+
+    overlap_sources = {
+        "image_space": _build_overlap_pairs(exp1_dir, exp2_dir, "delta_f"),
+        "vision_feature_space": _build_overlap_pairs(exp1_dir, exp2_dir, "delta_f_vision"),
+    }
+    analyses: Dict[str, Dict[str, Any]] = {}
+    for source_name, (sample_pairs, grouped_pairs) in overlap_sources.items():
+        if len(grouped_pairs) < 3:
+            logger.warning(
+                "Too few grouped pairs (%d) for correlation in %s",
+                len(grouped_pairs),
+                source_name,
+            )
+            continue
+        summary, tests, metrics = _summarize_overlap(sample_pairs, grouped_pairs)
+        analyses[source_name] = {
+            "summary": summary,
+            "tests": tests,
+            "metrics": metrics,
+            "sample_pairs": sample_pairs,
+            "grouped_pairs": grouped_pairs,
+        }
+
+    if not analyses:
+        return ExperimentResult(
+            experiment_id=5,
+            experiment_name="exp5_overlap_prediction",
+            config=exp_cfg,
+            metrics={"error": "too_few_pairs", "n_pairs": 0},
+        )
+    image_analysis = analyses.get("image_space")
+    vision_analysis = analyses.get("vision_feature_space")
+
+    logger.info("-" * 40)
+    if image_analysis is not None:
+        logger.info(
+            "  Image-space grouped Pearson r = %.3f [%s]",
+            image_analysis["summary"]["pearson_r_grouped"],
+            "PASS" if image_analysis["tests"]["pearson_predicted_vs_actual_grouped"]["passed"] else "FAIL",
+        )
+        logger.info(
+            "  Image-space sample Pearson r = %.3f",
+            image_analysis["summary"]["pearson_r_sample"],
+        )
+    if vision_analysis is not None:
+        logger.info(
+            "  Vision-feature grouped Pearson r = %.3f [%s]",
+            vision_analysis["summary"]["pearson_r_grouped"],
+            "PASS" if vision_analysis["tests"]["pearson_predicted_vs_actual_grouped"]["passed"] else "FAIL",
+        )
+        logger.info(
+            "  Vision-feature sample Pearson r = %.3f",
+            vision_analysis["summary"]["pearson_r_sample"],
+        )
+    logger.info("-" * 40)
+
+    summary_payload: Dict[str, Any] = {}
+    tests_payload: Dict[str, Any] = {}
+    metrics: Dict[str, Any] = {}
+    for source_name, analysis in analyses.items():
+        summary_payload[source_name] = analysis["summary"]
+        tests_payload[source_name] = analysis["tests"]
+        for metric_name, value in analysis["metrics"].items():
+            metrics[f"{metric_name}_{source_name}"] = value
+
+    primary = image_analysis or next(iter(analyses.values()))
+    summary_payload.update(primary["summary"])
+    tests_payload.update(primary["tests"])
+    tests_payload["hypothesis_supported"] = any(
+        analysis["tests"].get("hypothesis_supported", False)
+        for analysis in analyses.values()
+    )
+
+    save_json(summary_payload, out_dir / "summary.json")
+    save_json(tests_payload, out_dir / "hypothesis_tests.json")
+    if image_analysis is not None:
+        save_json(image_analysis["grouped_pairs"], out_dir / "scatter_data.json")
+        save_json(image_analysis["sample_pairs"], out_dir / "sample_scatter_data.json")
+    if vision_analysis is not None:
+        save_json(vision_analysis["grouped_pairs"], out_dir / "vision_scatter_data.json")
+        save_json(vision_analysis["sample_pairs"], out_dir / "vision_sample_scatter_data.json")
 
     return ExperimentResult(
         experiment_id=5,

@@ -12,6 +12,7 @@ because finer tasks require higher-frequency information to answer correctly.
 Outputs:
     exp4/summary.json             -- critical cutoffs and hypothesis tests
     exp4/accuracy_curves.json     -- accuracy vs cutoff per level
+    exp4/per_sample.json          -- per-sample cutoff sweeps
     exp4/hypothesis_tests.json    -- monotonicity and Spearman tests
 """
 
@@ -78,6 +79,10 @@ def run_exp4(
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         device_map=model_cfg.get("device_map"),
         local_files_only=cfg.get("offline", False),
+        attn_implementation=model_cfg.get("attn_implementation"),
+        attention_extract_implementation=model_cfg.get(
+            "attention_extract_implementation", "eager"
+        ),
     )
 
     # --- Load dataset ---
@@ -251,6 +256,7 @@ def run_exp4(
         {"cutoffs": reference_cutoffs, "data": agg["per_mode"]},
         out_dir / "accuracy_curves.json",
     )
+    save_json(per_sample, out_dir / "per_sample.json")
 
     try:
         adapter.unload()
