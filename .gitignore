@@ -13,7 +13,7 @@ changed_predictions_mmmu_test_needed
 .idea/
 *.log
 .claude/
-
+vlm-robustness.code-workspace
 
 # Experiment outputs (plots, results, generated data)
 adversarial/
