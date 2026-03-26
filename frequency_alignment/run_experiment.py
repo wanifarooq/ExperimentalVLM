@@ -163,7 +163,7 @@ def main() -> None:
         out_dir = Path(cfg.get("out_dir", "frequency_alignment_outputs"))
         logger.info("Plot-only mode: generating plots from %s", out_dir)
         from .plotting import generate_all_plots
-        generate_all_plots(out_dir)
+        generate_all_plots(out_dir, cfg)
         return
 
     exp_ids = resolve_experiments(args.experiment)
@@ -218,7 +218,7 @@ def main() -> None:
     # Generate plots from results
     try:
         from .plotting import generate_all_plots
-        generate_all_plots(out_dir)
+        generate_all_plots(out_dir, cfg)
     except Exception:
         logger.exception("Plot generation failed (non-fatal)")
 

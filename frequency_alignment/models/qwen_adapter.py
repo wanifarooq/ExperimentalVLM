@@ -16,6 +16,7 @@ from ..utils.parent_bridge import (
     prepare_model,
     score_options_loglik_batch,
 )
+from ..utils.layer_groups import resolve_post_fusion_hidden_state_index
 from .base import HookOutputs, VLMAdapter
 
 logger = logging.getLogger(__name__)
@@ -368,6 +369,8 @@ class HFVLMAdapter(VLMAdapter):
         extract_pre_fusion: bool = True,
         extract_post_fusion: bool = True,
         layer_stride: int = 1,
+        post_fusion_layer_index: Optional[int] = None,
+        post_fusion_layer_fraction: float = 0.8,
     ) -> HookOutputs:
         inputs = self._build_inputs(
             image,
@@ -396,6 +399,7 @@ class HFVLMAdapter(VLMAdapter):
         vis_start, vis_end = vision_range
         if extract_attention:
             attn_list: List[torch.Tensor] = []
+            layer_indices: List[int] = []
             for layer_index, attn in enumerate(getattr(outputs, "attentions", None) or []):
                 if attn is None or vis_end <= vis_start:
                     continue
@@ -406,16 +410,25 @@ class HFVLMAdapter(VLMAdapter):
                 lang_mask[vis_start:vis_end] = False
                 cross = attn[0, :, lang_mask, vis_start:vis_end].detach().cpu()
                 attn_list.append(cross)
+                layer_indices.append(layer_index)
             result.cross_attention_weights = attn_list or None
+            result.cross_attention_layer_indices = layer_indices or None
 
         if extract_post_fusion:
             hidden_states = getattr(outputs, "hidden_states", None) or ()
             if hidden_states:
-                target_layer = min(3, len(hidden_states) - 1)
-                post = hidden_states[target_layer][0]
-                if vis_end > vis_start and post.shape[0] >= vis_end:
-                    post = post[vis_start:vis_end]
+                target_layer = resolve_post_fusion_hidden_state_index(
+                    len(hidden_states),
+                    explicit_index=post_fusion_layer_index,
+                    fraction=post_fusion_layer_fraction,
+                )
+                post_all = hidden_states[target_layer][0]
+                result.post_fusion_all_features = post_all.detach().cpu()
+                post = post_all
+                if vis_end > vis_start and post_all.shape[0] >= vis_end:
+                    post = post_all[vis_start:vis_end]
                 result.post_fusion_features = post.detach().cpu()
+                result.post_fusion_layer_index = target_layer
 
         return result
 

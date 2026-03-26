@@ -77,10 +77,17 @@ perturbations:
       text_scale: 0.7
 
 analysis:
-  num_bands: 10
+  num_bands: 20
+  suppress_dc: true
   attention_layers: all
+  # Set to hann / hamming to enable windowing, or none / off / false to disable it.
+  attention_fft_window: none
   significance_level: 0.05
   hypothesis_testing: true
+
+plotting:
+  profile: exhaustive
+  representative_samples: 3
 
 experiments:
   exp1:
@@ -92,10 +99,16 @@ experiments:
     enabled: true
     max_samples: 200
     layer_stride: 2
+    # Overrides analysis.attention_fft_window. Use none / off / false to disable.
+    fft_window: none
+    prompt_controls:
+      - empty_language
+      - random_language
   exp3:
     enabled: true
     max_samples: 200
     perturbation_subset: 10
+    post_fusion_layer_fraction: 0.8
   exp4:
     enabled: true
     max_samples: 500
@@ -105,6 +118,8 @@ experiments:
       - highpass
   exp5:
     enabled: true
+    primary_layer_group: late
+    primary_delta_normalization: relative
   exp6:
     enabled: true
     max_samples: 300

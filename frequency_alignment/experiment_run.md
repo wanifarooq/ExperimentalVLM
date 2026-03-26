@@ -64,19 +64,25 @@ python3 -m frequency_alignment.run_experiment \
 
 - Uses the configured VQA dataset. For the main research path this should be `gqa`.
 - Scores MCQ options with the parent repository’s assistant-continuation log-likelihood routine.
-- Stores actual per-perturbation `delta_f` spectra, optional cosine drift, and optional Dirichlet deltas.
+- Stores raw and relative image-space perturbation spectra: `delta_f`, `delta_f_relative`.
+- When vision-token extraction is enabled, also stores raw and relative feature-space perturbation spectra: `delta_f_vision`, `delta_f_vision_relative`.
+- Stores the correct-option score change used downstream as `loglik_drift`, plus optional cosine drift and Dirichlet deltas.
 
 ### Experiment 2
 
-- Extracts per-level attention tensors from the model output.
-- Computes radial power spectra and per-sample `W_t` filters.
+- Extracts the effective language-to-vision attention map from the self-attention slice returned by the model.
+- Applies the configured attention FFT window before the 2D FFT to reduce spectral leakage from patch-grid borders. Supported values are `hann`, `hamming`, and the off modes `none` / `off` / `false`. The current configs default this to `none`.
+- Computes radial power spectra, `W_t`, and bandwidth for `overall`, `early`, `mid`, and `late` layer groups.
+- Runs prompt-only controls (`empty_language`, `random_language`) on the same images and stores divergence-to-task statistics.
 - Saves both per-sample and average filters for downstream experiments.
 
 ### Experiment 3
 
 - Loads the real `W_t` filters from Experiment 2.
-- Compares pre-fusion vision tokens with post-fusion vision-token slices from the decoder hidden states.
-- Runs FFT-based drift on the actual patch grid instead of an implicit square reshape.
+- Computes task-agnostic pre-fusion band drift from vision tokens only, once per perturbation.
+- Computes the task-conditioned post-fusion response as scalar drift over all aligned tokens from a late decoder hidden state.
+- Groups perturbations by similar pre-fusion drift profiles so the controlled input is approximately held fixed.
+- Reports controlled overlap-vs-response correlations for `overall`, `early`, `mid`, and `late`, with `late` as the main post-fusion test.
 
 ### Experiment 4
 
@@ -85,9 +91,15 @@ python3 -m frequency_alignment.run_experiment \
 
 ### Experiment 5
 
-- Uses real `delta_f` vectors emitted by Experiment 1.
-- Uses real per-sample `W_t` filters from Experiment 2.
-- Reports grouped and sample-level overlap correlations.
+- Uses real per-sample `W_t` filters from Experiment 2 for `overall`, `early`, `mid`, and `late`.
+- Uses both image-space and vision-feature perturbation spectra from Experiment 1.
+- Keeps both raw and relative-normalized overlap branches; the primary aliases `image_space` and `vision_feature_space` currently point to the relative branch, while raw branches remain available as controls.
+- Reports grouped and sample-level overlap correlations against:
+  - `accuracy_drop`
+  - `loglik_erosion`
+  - `net_drop`
+  - grouped `relative_accuracy_drop`
+- Treats the `late` filter group as the primary hypothesis test and the others as controls.
 
 ### Experiment 6
 
@@ -168,15 +180,23 @@ frequency_alignment_outputs/
   exp1/hypothesis_tests.json
   exp1/per_sample.jsonl
   exp2/summary.json
+  exp2/hypothesis_tests.json
   exp2/power_spectra.json
-  exp2/filters/*.npy
   exp3/summary.json
+  exp3/hypothesis_tests.json
   exp3/amplification.json
   exp4/summary.json
   exp4/accuracy_curves.json
   exp5/summary.json
+  exp5/hypothesis_tests.json
   exp5/scatter_data.json
+  exp5/vision_scatter_data.json
   exp5/sample_scatter_data.json
+  exp5/vision_sample_scatter_data.json
+  exp5/scatter_data_by_group.json
+  exp5/sample_scatter_data_by_group.json
+  exp5/scatter_data_by_group_and_target.json
+  exp5/sample_scatter_data_by_group_and_target.json
   exp6/summary.json
   exp6/per_sample.jsonl
   plots/*.png

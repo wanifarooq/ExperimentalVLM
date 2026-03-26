@@ -83,6 +83,7 @@ def run_exp6(
     max_samples = exp_cfg.get("max_samples", 300)
     seed = cfg.get("seed", 42)
     num_bands = cfg.get("analysis", {}).get("num_bands", 10)
+    suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
 
     samples = load_segmentation_dataset(
         cfg,
@@ -145,6 +146,7 @@ def run_exp6(
         except Exception as exc:
             logger.warning("Cannot open image %s: %s", sample.image_path, exc)
             continue
+        overlay_options, overlay_base_label = sample.reference_overlay_context()
 
         perturbations = build_perturbation_suite(
             image,
@@ -152,10 +154,14 @@ def run_exp6(
             include_natural=pert_cfg.get("include_natural", True),
             include_frequency=pert_cfg.get("include_frequency", True),
             num_bands=num_bands,
+            suppress_dc=suppress_dc,
             natural_types=pert_cfg.get("natural_types"),
             frequency_types=pert_cfg.get("frequency_types"),
             severity_params=pert_cfg.get("severity_params"),
             seed=seed + idx,
+            overlay_options=overlay_options,
+            overlay_base_label=overlay_base_label,
+            overlay_seed=seed + idx,
         )
 
         sample_record: Dict[str, Any] = {"image_id": sample.image_id, "models": {}}

@@ -31,7 +31,7 @@ perturbations:
   severity_levels:
     - 1
   include_natural: true
-  include_frequency: true
+  include_frequency: False
   natural_types:
     - translation
     - padcrop
@@ -59,10 +59,17 @@ perturbations:
       text_scale: 0.3
 
 analysis:
-  num_bands: 10
+  num_bands: 20
+  suppress_dc: true
   attention_layers: all
+  # Set to hann / hamming to enable windowing, or none / off / false to disable it.
+  attention_fft_window: none
   significance_level: 0.05
   hypothesis_testing: true
+
+plotting:
+  profile: exhaustive
+  representative_samples: 10
 
 experiments:
   exp1:
@@ -74,16 +81,24 @@ experiments:
     enabled: true
     max_samples: 5
     layer_stride: 8
+    # Overrides analysis.attention_fft_window. Use none / off / false to disable.
+    fft_window: none
+    prompt_controls:
+      - empty_language
+      - random_language
   exp3:
     enabled: true
     max_samples: 5
     perturbation_subset: 3
+    post_fusion_layer_fraction: 0.8
   exp4:
     enabled: true
     max_samples: 5
     sweep_steps: 5
   exp5:
     enabled: true
+    primary_layer_group: late
+    primary_delta_normalization: relative
   exp6:
     enabled: false
     max_samples: 3

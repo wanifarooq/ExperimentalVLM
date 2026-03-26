@@ -1,12 +1,21 @@
 """Analysis modules for spectral, drift, overlap, and statistical analysis."""
 
 from .spectral import (
+    apply_window_2d,
     attention_to_spatial_grid,
+    build_window_2d,
+    compare_spectral_filters,
     compute_attention_power_spectrum,
     compute_attention_power_spectrum_multi,
+    compute_distribution_js_divergence,
     compute_effective_bandwidth,
+    compute_feature_spectral_signature_stats,
+    compute_image_spectral_signature_stats,
     compute_filter_W_t,
     compute_spectral_overlap,
+    radially_bin_power,
+    spectral_band_centers,
+    spectral_vector_length,
 )
 from .drift import (
     compute_amplification_ratio,

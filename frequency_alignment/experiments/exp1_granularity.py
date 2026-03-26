@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from PIL import Image
 
-from ..analysis.spectral import compute_feature_spectral_signature
+from ..analysis.spectral import compute_feature_spectral_signature_stats
 from ..analysis.statistics import (
     bootstrap_ci,
     cohens_d,
@@ -94,6 +94,7 @@ def _evaluate_sample(
     extract_vision_tokens: bool = False,
     store_feature_delta_f: bool = True,
     num_bands: int = 10,
+    suppress_dc: bool = True,
 ) -> Dict[str, Any]:
     """Evaluate one sample across all levels and perturbations.
 
@@ -154,19 +155,25 @@ def _evaluate_sample(
                         metrics["dirichlet_delta"] = float(pert_dirichlet - clean_dirichlet)
             if store_feature_delta_f:
                 try:
-                    delta_f_vision, _ = compute_feature_spectral_signature(
+                    feature_stats = compute_feature_spectral_signature_stats(
                         clean_vision_tokens,
                         pert_np,
                         num_bands=num_bands,
                         clean_patch_grid=clean_patch_grid,
                         perturbed_patch_grid=pert_patch_grid,
+                        suppress_dc=suppress_dc,
                     )
                 except Exception:
-                    delta_f_vision = None
-                if delta_f_vision is not None:
+                    feature_stats = None
+                if feature_stats is not None:
+                    delta_f_vision = feature_stats["delta_f"]
                     metrics["delta_f_vision"] = delta_f_vision.tolist()
+                    metrics["delta_f_vision_relative"] = feature_stats["delta_f_relative"].tolist()
                     metrics["delta_f_vision_norm"] = float(np.linalg.norm(delta_f_vision))
                     metrics["delta_f_vision_peak_band"] = int(np.argmax(delta_f_vision))
+                    metrics["clean_feature_spectral_energy"] = float(
+                        feature_stats["clean_total_energy"]
+                    )
             perturbation_vision_metrics[perturbation.name] = metrics
 
     for level in GranularityLevel:
@@ -246,8 +253,12 @@ def _evaluate_sample(
 
             # Store spectral signature stats (for downstream Exp 5)
             pert_record["delta_f"] = pr.delta_f.tolist()
+            if pr.delta_f_relative is not None:
+                pert_record["delta_f_relative"] = pr.delta_f_relative.tolist()
             pert_record["delta_f_norm"] = float(np.linalg.norm(pr.delta_f))
             pert_record["delta_f_peak_band"] = int(np.argmax(pr.delta_f))
+            if pr.clean_spectral_energy is not None:
+                pert_record["clean_spectral_energy"] = float(pr.clean_spectral_energy)
             vision_metrics = perturbation_vision_metrics.get(pr.name)
             if vision_metrics:
                 pert_record.update(vision_metrics)
@@ -518,6 +529,7 @@ def run_exp1(
     pert_cfg = cfg.get("perturbations", {})
     severity_levels = pert_cfg.get("severity_levels", [1, 2, 3])
     num_bands = cfg.get("analysis", {}).get("num_bands", 10)
+    suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
 
     # Whether to extract vision tokens for cosine drift (slower)
     extract_vision_tokens = exp_cfg.get("extract_vision_tokens", False)
@@ -538,6 +550,7 @@ def run_exp1(
         except Exception as e:
             logger.warning("Cannot open image %s: %s", sample.image_path, e)
             continue
+        overlay_options, overlay_base_label = sample.reference_overlay_context()
 
         perturbations = build_perturbation_suite(
             image,
@@ -545,10 +558,14 @@ def run_exp1(
             include_natural=pert_cfg.get("include_natural", True),
             include_frequency=pert_cfg.get("include_frequency", True),
             num_bands=num_bands,
+            suppress_dc=suppress_dc,
             natural_types=pert_cfg.get("natural_types"),
             frequency_types=pert_cfg.get("frequency_types"),
             severity_params=pert_cfg.get("severity_params"),
             seed=seed + idx,
+            overlay_options=overlay_options,
+            overlay_base_label=overlay_base_label,
+            overlay_seed=seed + idx,
         )
 
         if not perturbations:
@@ -561,6 +578,7 @@ def run_exp1(
             extract_vision_tokens=extract_vision_tokens,
             store_feature_delta_f=store_feature_delta_f,
             num_bands=num_bands,
+            suppress_dc=suppress_dc,
         )
         per_sample_results.append(record)
 

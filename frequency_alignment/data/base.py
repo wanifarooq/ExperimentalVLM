@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class GranularityLevel(IntEnum):
@@ -60,6 +60,20 @@ class GranularitySample:
         if required is None:
             required = list(GranularityLevel)
         return all(lvl in self.levels for lvl in required)
+
+    def reference_overlay_context(self) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+        """Return the finest available MCQ context for parent-style overlays.
+
+        The perturbation suite is built once per image and reused across levels,
+        so we pick a single reference level. Using the finest available level
+        preserves task-aware parent-repo overlays without changing the overall
+        experiment structure.
+        """
+        for level in sorted(self.levels.keys(), key=int, reverse=True):
+            level_data = self.levels.get(level)
+            if level_data and level_data.options:
+                return level_data.options, level_data.answer_label
+        return None, None
 
 
 @dataclass

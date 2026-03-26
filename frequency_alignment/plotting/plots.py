@@ -12,6 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from ..analysis.spectral import spectral_band_centers
 from ..perturbations.frequency_sweep import compute_critical_cutoff
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,65 @@ _LEVEL_LABELS = {
 }
 _LEVEL_ORDER = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
 _SEG_LEVEL_ORDER = ["L1_COARSE", "L2_MEDIUM", "L3_FINE"]
+_FILTER_ANALYSIS_ORDER = ["overall", "early", "mid", "late"]
+_FILTER_ANALYSIS_COLORS = ["#636363", "#9ecae1", "#fdae6b", "#9e9ac8"]
+_EXP2_CONTROL_COLORS = {
+    "task": "#222222",
+    "empty_language": "#7f7f7f",
+    "random_language": "#9467bd",
+}
+_EXP5_TARGET_LABELS = {
+    "accuracy_drop": "Observed Accuracy Drop",
+    "loglik_erosion": "Correct-Answer Log-Likelihood Erosion",
+    "net_drop": "Net Accuracy Change",
+    "relative_accuracy_drop": "Relative Accuracy Drop",
+}
+_DEFAULT_PLOT_PROFILE = "exhaustive"
+_FULL_PLOT_PROFILES = {"full", "exhaustive", "all"}
+_PLOT_MANIFEST: List[Dict[str, Any]] = []
+_DEFAULT_SUPPRESS_DC = True
+_LOG_FLOOR = 1e-10
+
+
+def _metadata_lines(*parts: Optional[str]) -> List[str]:
+    return [str(part) for part in parts if part]
+
+
+def _plot_metadata(
+    *,
+    experiment: Optional[str] = None,
+    what: Optional[str] = None,
+    aggregation: Optional[str] = None,
+    x: Optional[str] = None,
+    y: Optional[str] = None,
+    selection: Optional[str] = None,
+    note: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> List[str]:
+    return _metadata_lines(
+        f"Experiment={experiment}" if experiment else None,
+        f"What={what}" if what else None,
+        f"Aggregation={aggregation}" if aggregation else None,
+        f"X={x}" if x else None,
+        f"Y={y}" if y else None,
+        f"Selection={selection}" if selection else None,
+        f"Note={note}" if note else None,
+        f"PlotProfile={profile}" if profile else None,
+    )
+
+
+def _set_plot_metadata(fig: plt.Figure, lines: Optional[Sequence[str]]) -> None:
+    if not lines:
+        return
+    setattr(fig, "_fa_metadata_lines", [str(line) for line in lines if str(line).strip()])
+
+
+def _tight_layout(fig: plt.Figure, *, metadata_bottom: float = 0.08, top: float = 0.97) -> None:
+    metadata = getattr(fig, "_fa_metadata_lines", None)
+    if metadata:
+        fig.tight_layout(rect=(0, metadata_bottom, 1, top))
+    else:
+        fig.tight_layout()
 
 
 def _apply_style(ax: plt.Axes) -> None:
@@ -38,9 +98,45 @@ def _apply_style(ax: plt.Axes) -> None:
     ax.tick_params(labelsize=10)
 
 
+def _figure_title(fig: plt.Figure) -> str:
+    suptitle = getattr(fig, "_suptitle", None)
+    if suptitle is not None and suptitle.get_text():
+        return str(suptitle.get_text())
+    for axis in fig.axes:
+        title = axis.get_title()
+        if title:
+            return str(title)
+    return ""
+
+
 def _save_fig(fig: plt.Figure, path: Path, dpi: int = 250) -> None:
+    metadata = getattr(fig, "_fa_metadata_lines", None)
+    if metadata:
+        fig.text(
+            0.01,
+            0.012,
+            " | ".join(metadata),
+            ha="left",
+            va="bottom",
+            fontsize=8,
+            color="#555555",
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    png_metadata = {
+        "Title": _figure_title(fig) or path.stem,
+        "Description": " | ".join(metadata or []),
+        "Software": "frequency_alignment.plotting",
+    }
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white", metadata=png_metadata)
+    _PLOT_MANIFEST.append(
+        {
+            "filename": path.name,
+            "path": str(path),
+            "title": png_metadata["Title"],
+            "description": png_metadata["Description"],
+            "metadata_lines": list(metadata or []),
+        }
+    )
     plt.close(fig)
     logger.info("Saved plot: %s", path)
 
@@ -85,6 +181,86 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)[:80]
 
 
+def _exp5_target_label(target_key: str) -> str:
+    return _EXP5_TARGET_LABELS.get(target_key, target_key.replace("_", " ").title())
+
+
+def _exp5_source_label(source_name: str) -> str:
+    mapping = {
+        "image_space": "Image-space (relative)",
+        "image_space_raw": "Image-space (raw)",
+        "vision_feature_space": "Vision-feature (relative)",
+        "vision_feature_space_raw": "Vision-feature (raw)",
+    }
+    return mapping.get(source_name, source_name.replace("_", " ").title())
+
+
+def _exp2_control_label(control_name: str) -> str:
+    mapping = {
+        "empty_language": "Empty-language control",
+        "random_language": "Random-language control",
+    }
+    return mapping.get(control_name, control_name.replace("_", " ").title())
+
+
+def _plot_profile(config: Optional[Dict[str, Any]]) -> str:
+    if not config:
+        return _DEFAULT_PLOT_PROFILE
+    plotting = config.get("plotting", {}) if isinstance(config, dict) else {}
+    profile = str(plotting.get("profile", _DEFAULT_PLOT_PROFILE)).strip().lower()
+    return profile or _DEFAULT_PLOT_PROFILE
+
+
+def _is_exhaustive_profile(profile: str) -> bool:
+    return profile in _FULL_PLOT_PROFILES
+
+
+def _representative_sample_limit(config: Optional[Dict[str, Any]], profile: str) -> int:
+    plotting = config.get("plotting", {}) if isinstance(config, dict) else {}
+    raw_value = plotting.get("representative_samples")
+    if raw_value is not None:
+        try:
+            return max(1, int(raw_value))
+        except (TypeError, ValueError):
+            pass
+    return 3 if _is_exhaustive_profile(profile) else 2
+
+
+def _analysis_suppress_dc(config: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(config, dict):
+        return _DEFAULT_SUPPRESS_DC
+    return bool(config.get("analysis", {}).get("suppress_dc", _DEFAULT_SUPPRESS_DC))
+
+
+def _band_labels(length: int, suppress_dc: bool = _DEFAULT_SUPPRESS_DC) -> List[str]:
+    start = 1 if suppress_dc else 0
+    return [f"B{start + idx}" for idx in range(max(0, int(length)))]
+
+
+def _spectral_x_positions(length: int, suppress_dc: bool = _DEFAULT_SUPPRESS_DC) -> np.ndarray:
+    if length <= 0:
+        return np.zeros(0, dtype=np.float64)
+    total_bands = length + 1 if suppress_dc else length
+    centers = spectral_band_centers(total_bands, suppress_dc=suppress_dc)
+    if len(centers) != length:
+        centers = np.arange(1, length + 1, dtype=np.float64)
+    return np.clip(np.asarray(centers, dtype=np.float64), _LOG_FLOOR, None)
+
+
+def _clip_for_log(values: Sequence[float]) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    return np.clip(arr, _LOG_FLOOR, None)
+
+
+def _write_plot_manifest(plots_dir: Path, profile: str) -> None:
+    manifest = {
+        "profile": profile,
+        "num_plots": len(_PLOT_MANIFEST),
+        "plots": _PLOT_MANIFEST,
+    }
+    (plots_dir / "plot_manifest.json").write_text(json.dumps(manifest, indent=2))
+
+
 def _sort_metric_rows(
     row_labels: Sequence[str],
     matrix: np.ndarray,
@@ -109,6 +285,7 @@ def _plot_heatmap(
     annotate: bool = True,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
+    metadata: Optional[Sequence[str]] = None,
 ) -> None:
     if matrix.size == 0 or not row_labels or not col_labels:
         return
@@ -126,6 +303,16 @@ def _plot_heatmap(
     ax.set_yticklabels(row_labels, fontsize=9)
     ax.set_title(title, fontsize=13)
     _apply_style(ax)
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=heatmap",
+            f"Rows={len(row_labels)} groups",
+            f"Cols={len(col_labels)} bins",
+            f"Value={colorbar_label}",
+        ),
+    )
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.9)
     cbar.set_label(colorbar_label, fontsize=10)
@@ -141,7 +328,7 @@ def _plot_heatmap(
                 color = "white" if np.nan_to_num(value, nan=0.0) > mean_value else "black"
                 ax.text(col, row, f"{value:.2f}", ha="center", va="center", fontsize=7, color=color)
 
-    fig.tight_layout()
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
@@ -153,6 +340,7 @@ def _plot_grouped_bars(
     ylabel: str,
     colors: Optional[Sequence[str]] = None,
     ylim: Optional[Tuple[float, float]] = None,
+    metadata: Optional[Sequence[str]] = None,
 ) -> None:
     if not series or not x_labels:
         return
@@ -175,7 +363,17 @@ def _plot_grouped_bars(
         ax.set_ylim(*ylim)
     ax.legend(fontsize=9)
     _apply_style(ax)
-    fig.tight_layout()
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=grouped bars",
+            f"Categories={len(x_labels)}",
+            f"Series={len(series)}",
+            f"Y={ylabel}",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
@@ -184,6 +382,7 @@ def _plot_distribution_with_points(
     out_path: Path,
     title: str,
     ylabel: str,
+    metadata: Optional[Sequence[str]] = None,
 ) -> None:
     present = _ordered_levels(grouped_values.keys())
     if not present:
@@ -220,7 +419,17 @@ def _plot_distribution_with_points(
     ax.set_ylabel(ylabel, fontsize=11)
     ax.set_title(title, fontsize=13)
     _apply_style(ax)
-    fig.tight_layout()
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=distribution",
+            "Boxplots show within-run sample spread",
+            f"Levels={len(present)}",
+            f"Y={ylabel}",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
@@ -231,6 +440,8 @@ def _plot_sample_profile_grid(
     title: str,
     ylabel: str,
     overlay_by_level: Optional[Dict[str, Sequence[float]]] = None,
+    metadata: Optional[Sequence[str]] = None,
+    suppress_dc: bool = _DEFAULT_SUPPRESS_DC,
 ) -> None:
     present_levels = _ordered_levels(per_level_series.keys())
     if not present_levels:
@@ -254,9 +465,10 @@ def _plot_sample_profile_grid(
         cmap = plt.cm.get_cmap("tab20", max(1, len(labels)))
         for idx, label in enumerate(labels):
             values = np.asarray(series[label], dtype=float)
+            x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
             axis.plot(
-                np.arange(len(values)),
-                values,
+                x_values,
+                _clip_for_log(values),
                 linewidth=1.5,
                 alpha=0.9,
                 label=label,
@@ -266,9 +478,10 @@ def _plot_sample_profile_grid(
         overlay = None if overlay_by_level is None else overlay_by_level.get(level)
         if overlay is not None:
             overlay_values = np.asarray(overlay, dtype=float)
+            overlay_x = _spectral_x_positions(len(overlay_values), suppress_dc=suppress_dc)
             axis.plot(
-                np.arange(len(overlay_values)),
-                overlay_values,
+                overlay_x,
+                _clip_for_log(overlay_values),
                 linewidth=2.4,
                 linestyle="--",
                 color="black",
@@ -277,16 +490,28 @@ def _plot_sample_profile_grid(
             )
 
         axis.set_title(_level_label(level), fontsize=11)
-        axis.set_xlabel("Frequency Band", fontsize=10)
+        axis.set_xlabel("Normalized Frequency (log scale)", fontsize=10)
         axis.set_ylabel(ylabel, fontsize=10)
-        axis.grid(alpha=0.2, linewidth=0.6)
+        axis.set_xscale("log")
+        axis.set_yscale("log")
+        axis.grid(alpha=0.2, linewidth=0.6, which="both")
         _apply_style(axis)
 
     handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, loc="lower center", ncol=min(4, len(labels)), fontsize=8)
     fig.suptitle(f"{title}: {_short_sample_id(sample_id, 32)}", fontsize=14, y=0.995)
-    fig.tight_layout(rect=(0, 0.05, 1, 0.97))
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=sample profiles",
+            "Panels=task levels",
+            "Lines=perturbations for one image",
+            f"Y={ylabel}",
+        ),
+    )
+    _tight_layout(fig, metadata_bottom=0.07, top=0.97)
     _save_fig(fig, out_path)
 
 
@@ -333,7 +558,16 @@ def plot_granularity_curves(
     _apply_style(axes[1])
 
     fig.suptitle(title, fontsize=14)
-    fig.tight_layout()
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=1",
+            "Panels=clean vs perturbed accuracy; mean gated accuracy drop",
+            "Aggregation=level-wise average over all perturbation evaluations",
+            "Error bars=within-run std",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
@@ -341,6 +575,7 @@ def plot_attention_power_spectrum(
     summary: Dict[str, Any],
     out_path: Path,
     title: str = "Attention Power Spectrum by Granularity",
+    suppress_dc: bool = _DEFAULT_SUPPRESS_DC,
 ) -> None:
     per_level = summary.get("per_level", {})
     present = _ordered_levels(per_level.keys())
@@ -352,20 +587,32 @@ def plot_attention_power_spectrum(
         values = per_level[level].get("W_t_average", [])
         if not values:
             continue
+        x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
         ax.plot(
-            np.arange(len(values)),
-            values,
+            x_values,
+            _clip_for_log(values),
             marker="o",
             linewidth=2.0,
             color=_LEVEL_COLORS.get(level, "#999"),
             label=_level_label(level),
         )
-    ax.set_xlabel("Frequency Band (low to high)", fontsize=11)
+    ax.set_xlabel("Normalized Frequency (log scale)", fontsize=11)
     ax.set_ylabel("Normalized Attention Power", fontsize=11)
     ax.set_title(title, fontsize=13)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
     ax.legend(fontsize=9)
     _apply_style(ax)
-    fig.tight_layout()
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=2",
+            "Lines=mean W_t per level",
+            "Aggregation=sample average",
+            "X=radial frequency bands low→high",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
@@ -396,14 +643,24 @@ def plot_effective_bandwidth(
     ax.set_ylabel("Effective Bandwidth", fontsize=11)
     ax.set_title(title, fontsize=13)
     _apply_style(ax)
-    fig.tight_layout()
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=2",
+            "Bars=mean effective bandwidth G(t)",
+            "Aggregation=sample average by level",
+            "Error bars=within-run std",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
 def plot_amplification_heatmap(
     summary: Dict[str, Any],
     out_path: Path,
-    title: str = "Drift Amplification Ratio by Level",
+    title: str = "Mean Pre-Fusion Drift Spectrum by Level",
+    suppress_dc: bool = _DEFAULT_SUPPRESS_DC,
 ) -> None:
     per_level = summary.get("per_level", {})
     present = _ordered_levels(per_level.keys())
@@ -412,7 +669,7 @@ def plot_amplification_heatmap(
 
     matrix = []
     for level in present:
-        values = per_level[level].get("mean_amplification_ratio", [])
+        values = per_level[level].get("mean_pre_drift_bands", [])
         if values:
             matrix.append(values)
     if not matrix:
@@ -421,11 +678,11 @@ def plot_amplification_heatmap(
     _plot_heatmap(
         np.asarray(matrix, dtype=float),
         [_level_label(level) for level in present],
-        [f"B{i}" for i in range(len(matrix[0]))],
+        _band_labels(len(matrix[0]), suppress_dc=suppress_dc),
         out_path,
         title,
-        "Amplification Ratio",
-        cmap="YlOrRd",
+        "Mean Pre-Fusion Drift",
+        cmap="YlGnBu",
     )
 
 
@@ -472,7 +729,16 @@ def plot_frequency_threshold_curves(
     ax.set_title(f"{title} ({mode})", fontsize=13)
     ax.legend(fontsize=9)
     _apply_style(ax)
-    fig.tight_layout()
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=4",
+            f"Mode={mode}",
+            "Lines=mean accuracy by level across cutoff sweep",
+            "Vertical lines=critical cutoff estimate",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
@@ -483,6 +749,8 @@ def plot_overlap_scatter(
     title: str = "Predicted vs Actual Sensitivity",
     point_size: float = 40,
     alpha: float = 0.7,
+    y_label: str = "Observed Accuracy Drop",
+    metadata: Optional[Sequence[str]] = None,
 ) -> None:
     if not scatter_data:
         return
@@ -512,7 +780,7 @@ def plot_overlap_scatter(
         ax.plot(xs, curve(xs), "k--", linewidth=1.5, alpha=0.65)
 
     ax.set_xlabel("Predicted Sensitivity (spectral overlap)", fontsize=11)
-    ax.set_ylabel("Observed Accuracy Drop", fontsize=11)
+    ax.set_ylabel(y_label, fontsize=11)
     ax.set_title(f"{title} (r = {pearson_r:.3f})", fontsize=13)
 
     handles = [
@@ -521,7 +789,17 @@ def plot_overlap_scatter(
     ]
     ax.legend(handles=handles, fontsize=9, loc="upper left")
     _apply_style(ax)
-    fig.tight_layout()
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=scatter",
+            "X=predicted spectral overlap",
+            f"Y={y_label}",
+            f"Points={len(scatter_data)}",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
@@ -559,7 +837,16 @@ def plot_segmentation_granularity(
     ax.set_title(title, fontsize=13)
     ax.legend(fontsize=9)
     _apply_style(ax)
-    fig.tight_layout()
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=6",
+            "Bars=mean mIoU drop by hierarchy level",
+            "Series=segmentation models",
+            "Aggregation=sample average",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
@@ -618,6 +905,38 @@ def _exp1_sample_spectra(record: Dict[str, Any], key: str) -> Dict[str, Dict[str
     return spectra
 
 
+def _sample_perturbation_names(record: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    seen = set()
+    for level in _ordered_levels(record.get("levels", {}).keys()):
+        for perturbation in record.get("levels", {}).get(level, {}).get("perturbations", []):
+            name = str(perturbation.get("name") or perturbation.get("perturbation") or "unknown")
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
+def _exp1_sample_drop_matrix(record: Dict[str, Any]) -> Tuple[List[str], List[str], np.ndarray]:
+    return _exp1_sample_metric_matrix(record, "accuracy_drop")
+
+
+def _exp1_sample_metric_matrix(record: Dict[str, Any], key: str) -> Tuple[List[str], List[str], np.ndarray]:
+    levels = _ordered_levels(record.get("levels", {}).keys())
+    perturbations = _sample_perturbation_names(record)
+    matrix = np.full((len(levels), len(perturbations)), np.nan, dtype=float)
+    col_index = {name: idx for idx, name in enumerate(perturbations)}
+    for row, level in enumerate(levels):
+        for perturbation in record.get("levels", {}).get(level, {}).get("perturbations", []):
+            name = str(perturbation.get("name") or perturbation.get("perturbation") or "unknown")
+            if name not in col_index:
+                continue
+            value = perturbation.get(key)
+            if value is not None:
+                matrix[row, col_index[name]] = float(value)
+    return levels, perturbations, matrix
+
+
 def _exp2_bandwidth_values(records: List[Dict[str, Any]]) -> Dict[str, List[float]]:
     values: Dict[str, List[float]] = {level: [] for level in _LEVEL_ORDER}
     for record in records:
@@ -654,6 +973,37 @@ def _select_exp2_samples(records: List[Dict[str, Any]], max_samples: int = 3) ->
     return [record for _, record in scored[:max_samples]]
 
 
+def _exp2_sample_overall_wt(record: Optional[Dict[str, Any]]) -> Dict[str, Sequence[float]]:
+    if not record:
+        return {}
+    overlays: Dict[str, Sequence[float]] = {}
+    for level in _ordered_levels(record.get("levels", {}).keys()):
+        values = record.get("levels", {}).get(level, {}).get("W_t")
+        if values:
+            overlays[level] = values
+    return overlays
+
+
+def _exp2_sample_wt_series(record: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Sequence[float]]]:
+    if not record:
+        return {}
+    per_level: Dict[str, Dict[str, Sequence[float]]] = {}
+    for level in _ordered_levels(record.get("levels", {}).keys()):
+        level_data = record.get("levels", {}).get(level, {})
+        series: Dict[str, Sequence[float]] = {}
+        overall = level_data.get("W_t")
+        if overall:
+            series["Overall"] = overall
+        layer_groups = level_data.get("layer_groups", {})
+        for group_name in ("early", "mid", "late"):
+            values = layer_groups.get(group_name, {}).get("W_t")
+            if values:
+                series[group_name.capitalize()] = values
+        if series:
+            per_level[level] = series
+    return per_level
+
+
 def _exp3_level_perturbation_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str], List[str], np.ndarray]:
     levels = _LEVEL_ORDER
     perturbations = sorted(
@@ -671,7 +1021,9 @@ def _exp3_level_perturbation_matrix(records: List[Dict[str, Any]]) -> Tuple[List
             for record in records:
                 for item in record.get("levels", {}).get(level, {}).get("perturbations", []):
                     if item.get("perturbation") == perturbation:
-                        values.append(float(item.get("mean_amplification", 0.0)))
+                        value = item.get("post_drift_scalar_all")
+                        if value is not None:
+                            values.append(float(value))
             if values:
                 matrix[row, col] = float(np.mean(values))
     valid_rows = [idx for idx in range(len(levels)) if not np.all(np.isnan(matrix[idx]))]
@@ -686,8 +1038,9 @@ def _exp3_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str],
         row = []
         for level in _LEVEL_ORDER:
             values = [
-                float(item.get("mean_amplification", 0.0))
+                float(item.get("post_drift_scalar_all"))
                 for item in record.get("levels", {}).get(level, {}).get("perturbations", [])
+                if item.get("post_drift_scalar_all") is not None
             ]
             row.append(float(np.mean(values)) if values else np.nan)
         if not np.all(np.isnan(row)):
@@ -703,7 +1056,11 @@ def _select_exp3_samples(records: List[Dict[str, Any]], max_samples: int = 2) ->
     for record in records:
         values = []
         for level_data in record.get("levels", {}).values():
-            values.extend(float(item.get("mean_amplification", 0.0)) for item in level_data.get("perturbations", []))
+            values.extend(
+                float(item.get("post_drift_scalar_all"))
+                for item in level_data.get("perturbations", [])
+                if item.get("post_drift_scalar_all") is not None
+            )
         if values:
             scored.append((float(np.mean(values)), record))
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -717,11 +1074,11 @@ def _exp3_sample_profiles(record: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, S
         per_perturbation: Dict[str, Sequence[float]] = {}
         overlay: Optional[Sequence[float]] = None
         for item in record.get("levels", {}).get(level, {}).get("perturbations", []):
-            values = item.get("amplification_ratio")
+            values = item.get("pre_drift_bands")
             if values:
                 per_perturbation[str(item.get("perturbation", "unknown"))] = values
-            if overlay is None and item.get("W_t"):
-                overlay = item.get("W_t")
+            if overlay is None:
+                overlay = item.get("analysis_groups", {}).get("late", {}).get("W_t")
         if per_perturbation:
             profiles[level] = per_perturbation
         if overlay:
@@ -838,7 +1195,11 @@ def _exp6_sample_level_matrix(
     return sample_ids, _SEG_LEVEL_ORDER, np.asarray(rows, dtype=float)
 
 
-def _plot_exp2_level_band_heatmap(summary: Dict[str, Any], out_path: Path) -> None:
+def _plot_exp2_level_band_heatmap(
+    summary: Dict[str, Any],
+    out_path: Path,
+    suppress_dc: bool = _DEFAULT_SUPPRESS_DC,
+) -> None:
     per_level = summary.get("per_level", {})
     levels = _ordered_levels(per_level.keys())
     if not levels:
@@ -849,7 +1210,7 @@ def _plot_exp2_level_band_heatmap(summary: Dict[str, Any], out_path: Path) -> No
     _plot_heatmap(
         matrix,
         [_level_label(level) for level in levels],
-        [f"B{i}" for i in range(matrix.shape[1])],
+        _band_labels(matrix.shape[1], suppress_dc=suppress_dc),
         out_path,
         "Attention Filter W_t by Level and Band",
         "W_t(omega)",
@@ -857,8 +1218,100 @@ def _plot_exp2_level_band_heatmap(summary: Dict[str, Any], out_path: Path) -> No
     )
 
 
-def _plot_exp2_selected_samples(records: List[Dict[str, Any]], out_dir: Path) -> None:
-    selected = _select_exp2_samples(records)
+def _plot_exp2_group_spectra(
+    summary: Dict[str, Any],
+    out_path: Path,
+    suppress_dc: bool = _DEFAULT_SUPPRESS_DC,
+) -> None:
+    per_level = summary.get("per_level", {})
+    levels = _ordered_levels(per_level.keys())
+    if not levels:
+        return
+
+    group_order = summary.get("layer_groups", {}).get("order", ["early", "mid", "late"])
+    fig, axes = plt.subplots(1, len(group_order), figsize=(5.0 * len(group_order), 4.8), sharey=True)
+    axes_arr = np.atleast_1d(axes)
+
+    for axis, group_name in zip(axes_arr, group_order):
+        for level in levels:
+            values = per_level[level].get("layer_groups", {}).get(group_name, {}).get("W_t_average", [])
+            if not values:
+                continue
+            x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
+            axis.plot(
+                x_values,
+                _clip_for_log(values),
+                marker="o",
+                markersize=3.5,
+                linewidth=1.8,
+                color=_LEVEL_COLORS.get(level, "#999"),
+                label=_level_label(level),
+            )
+        axis.set_title(group_name.capitalize(), fontsize=12)
+        axis.set_xlabel("Normalized Frequency (log scale)", fontsize=10)
+        axis.set_xscale("log")
+        axis.set_yscale("log")
+        axis.grid(alpha=0.2, linewidth=0.6, which="both")
+        _apply_style(axis)
+    axes_arr[0].set_ylabel("W_t(omega)", fontsize=10)
+
+    handles, labels = axes_arr[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=8)
+    fig.suptitle("Layer-Group Attention Spectra", fontsize=14, y=0.99)
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=2",
+            "Panels=early/mid/late layer groups",
+            "Lines=mean W_t per level",
+            "Aggregation=sample average",
+        ),
+    )
+    _tight_layout(fig, metadata_bottom=0.07, top=0.96)
+    _save_fig(fig, out_path)
+
+
+def _plot_exp2_group_bandwidth(summary: Dict[str, Any], out_path: Path) -> None:
+    per_level = summary.get("per_level", {})
+    levels = _ordered_levels(per_level.keys())
+    if not levels:
+        return
+
+    group_order = summary.get("layer_groups", {}).get("order", ["early", "mid", "late"])
+    series = {
+        group_name.capitalize(): [
+            per_level[level].get("layer_groups", {}).get(group_name, {}).get("mean_bandwidth", np.nan)
+            for level in levels
+        ]
+        for group_name in group_order
+    }
+    _plot_grouped_bars(
+        series,
+        [_level_label(level) for level in levels],
+        out_path,
+        "Layer-Group Effective Bandwidth",
+        "Bandwidth",
+        colors=["#9ecae1", "#fdae6b", "#9e9ac8"][: len(series)],
+        metadata=_plot_metadata(
+            experiment="2",
+            what="Mean effective bandwidth by decoder layer group",
+            aggregation="sample average by level",
+            x="task level",
+            y="effective bandwidth G(t)",
+            note="Series compare early, mid, and late layer groups",
+        ),
+    )
+
+
+def _plot_exp2_selected_samples(
+    records: List[Dict[str, Any]],
+    out_dir: Path,
+    max_samples: int = 3,
+    profile: str = _DEFAULT_PLOT_PROFILE,
+    suppress_dc: bool = _DEFAULT_SUPPRESS_DC,
+) -> None:
+    selected = _select_exp2_samples(records, max_samples=max_samples)
     if not selected:
         return
 
@@ -875,9 +1328,10 @@ def _plot_exp2_selected_samples(records: List[Dict[str, Any]], out_dir: Path) ->
             values = record.get("levels", {}).get(level, {}).get("W_t")
             if not values:
                 continue
+            x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
             axis.plot(
-                np.arange(len(values)),
-                values,
+                x_values,
+                _clip_for_log(values),
                 linewidth=2.0,
                 marker="o",
                 markersize=3.5,
@@ -885,17 +1339,249 @@ def _plot_exp2_selected_samples(records: List[Dict[str, Any]], out_dir: Path) ->
                 label=_level_label(level),
             )
         axis.set_title(_short_sample_id(sample_id, 28), fontsize=11)
-        axis.set_xlabel("Frequency Band", fontsize=10)
+        axis.set_xlabel("Normalized Frequency (log scale)", fontsize=10)
         axis.set_ylabel("W_t(omega)", fontsize=10)
-        axis.grid(alpha=0.2, linewidth=0.6)
+        axis.set_xscale("log")
+        axis.set_yscale("log")
+        axis.grid(alpha=0.2, linewidth=0.6, which="both")
         _apply_style(axis)
 
     handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=8)
     fig.suptitle("Representative Sample Attention Spectra", fontsize=14, y=0.99)
-    fig.tight_layout(rect=(0, 0.05, 1, 0.97))
+    _set_plot_metadata(
+        fig,
+        _plot_metadata(
+            experiment="2",
+            what="Representative per-sample task filters W_t",
+            aggregation="one panel per selected image",
+            x="radial frequency band (low→high)",
+            y="W_t(omega)",
+            selection=f"top {len(selected)} images by mean bandwidth",
+            profile=profile,
+        ),
+    )
+    _tight_layout(fig, metadata_bottom=0.07, top=0.97)
     _save_fig(fig, out_dir / "exp2_sample_spectra.png")
+
+
+def _plot_exp2_matched_sample_group_comparison(
+    record: Dict[str, Any],
+    out_path: Path,
+    profile: str = _DEFAULT_PLOT_PROFILE,
+    suppress_dc: bool = _DEFAULT_SUPPRESS_DC,
+) -> None:
+    levels = _ordered_levels(record.get("levels", {}).keys())
+    if not levels:
+        return
+
+    sample_id = str(record.get("image_id"))
+    group_order = list(_FILTER_ANALYSIS_ORDER)
+    present_groups = []
+    for group_name in group_order:
+        has_group = False
+        for level in levels:
+            level_data = record.get("levels", {}).get(level, {})
+            values = level_data.get("W_t") if group_name == "overall" else level_data.get("layer_groups", {}).get(group_name, {}).get("W_t")
+            if values:
+                has_group = True
+                break
+        if has_group:
+            present_groups.append(group_name)
+    if not present_groups:
+        return
+
+    ncols = 2
+    nrows = int(np.ceil(len(present_groups) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(13, 4.3 * nrows), sharex=True, sharey=True)
+    axes_arr = np.atleast_1d(axes).reshape(nrows, ncols)
+
+    for axis in axes_arr.ravel()[len(present_groups):]:
+        axis.axis("off")
+
+    for axis, group_name in zip(axes_arr.ravel(), present_groups):
+        for level in levels:
+            level_data = record.get("levels", {}).get(level, {})
+            values = level_data.get("W_t") if group_name == "overall" else level_data.get("layer_groups", {}).get(group_name, {}).get("W_t")
+            if not values:
+                continue
+            x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
+            axis.plot(
+                x_values,
+                _clip_for_log(values),
+                linewidth=2.0,
+                marker="o",
+                markersize=3.5,
+                color=_LEVEL_COLORS.get(level, "#999"),
+                label=_level_label(level),
+            )
+        axis.set_title(group_name.capitalize(), fontsize=11)
+        axis.set_xlabel("Normalized Frequency (log scale)", fontsize=10)
+        axis.set_ylabel("W_t(omega)", fontsize=10)
+        axis.set_xscale("log")
+        axis.set_yscale("log")
+        axis.grid(alpha=0.2, linewidth=0.6, which="both")
+        _apply_style(axis)
+
+    handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=8)
+    fig.suptitle(f"Matched Sample W_t by Filter Group: {_short_sample_id(sample_id, 32)}", fontsize=14, y=0.995)
+    _set_plot_metadata(
+        fig,
+        _plot_metadata(
+            experiment="2",
+            what="Matched sample W_t comparison across filter groups",
+            aggregation="one panel per filter group; lines compare task levels for the same image",
+            x="frequency band (low→high)",
+            y="W_t(omega)",
+            selection="same representative high-drop image used for Exp 1 sample plots",
+            note="Panels are overall, early, mid, and late when available",
+            profile=profile,
+        ),
+    )
+    _tight_layout(fig, metadata_bottom=0.07, top=0.97)
+    _save_fig(fig, out_path)
+
+
+def _plot_exp2_control_bandwidth(summary: Dict[str, Any], out_path: Path) -> None:
+    per_level = summary.get("per_level", {})
+    levels = _ordered_levels(per_level.keys())
+    if not levels:
+        return
+    control_names = summary.get("prompt_controls", [])
+    if not control_names:
+        return
+
+    series: Dict[str, List[float]] = {
+        "Task prompt": [per_level[level].get("mean_bandwidth", np.nan) for level in levels]
+    }
+    colors = [_EXP2_CONTROL_COLORS["task"]]
+    for control_name in control_names:
+        if not any(control_name in per_level[level].get("controls", {}) for level in levels):
+            continue
+        series[_exp2_control_label(control_name)] = [
+            per_level[level].get("controls", {}).get(control_name, {}).get("mean_bandwidth", np.nan)
+            for level in levels
+        ]
+        colors.append(_EXP2_CONTROL_COLORS.get(control_name, None))
+
+    _plot_grouped_bars(
+        series,
+        [_level_label(level) for level in levels],
+        out_path,
+        "Task vs Control Bandwidth",
+        "Bandwidth",
+        colors=colors,
+        metadata=_plot_metadata(
+            experiment="2",
+            what="Task-prompt vs control-prompt effective bandwidth",
+            aggregation="sample average by level",
+            x="task level",
+            y="effective bandwidth G(t)",
+            note="Controls test whether language meaning changes the inferred task filter",
+        ),
+    )
+
+
+def _plot_exp2_control_divergence(summary: Dict[str, Any], out_path: Path) -> None:
+    per_level = summary.get("per_level", {})
+    levels = _ordered_levels(per_level.keys())
+    if not levels:
+        return
+    control_names = summary.get("prompt_controls", [])
+    if not control_names:
+        return
+
+    series: Dict[str, List[float]] = {}
+    colors: List[str] = []
+    for control_name in control_names:
+        if not any(control_name in per_level[level].get("controls", {}) for level in levels):
+            continue
+        series[_exp2_control_label(control_name)] = [
+            per_level[level].get("controls", {}).get(control_name, {}).get("mean_js_divergence_to_task", np.nan)
+            for level in levels
+        ]
+        colors.append(_EXP2_CONTROL_COLORS.get(control_name, None))
+
+    if not series:
+        return
+    _plot_grouped_bars(
+        series,
+        [_level_label(level) for level in levels],
+        out_path,
+        "Task vs Control Filter Divergence",
+        "Mean JS Divergence",
+        colors=colors,
+        metadata=_plot_metadata(
+            experiment="2",
+            what="Distance between task-prompt and control-prompt filters",
+            aggregation="sample average by level",
+            x="task level",
+            y="mean Jensen-Shannon divergence",
+            note="Higher values mean the control prompt produces a more different W_t",
+        ),
+    )
+
+
+def _plot_exp2_control_spectra(
+    summary: Dict[str, Any],
+    out_dir: Path,
+    suppress_dc: bool = _DEFAULT_SUPPRESS_DC,
+) -> None:
+    per_level = summary.get("per_level", {})
+    levels = _ordered_levels(per_level.keys())
+    control_names = summary.get("prompt_controls", [])
+    if not levels or not control_names:
+        return
+
+    for control_name in control_names:
+        if not any(control_name in per_level[level].get("controls", {}) for level in levels):
+            continue
+        fig, ax = plt.subplots(figsize=(8.8, 5.6))
+        for level in levels:
+            task_values = per_level[level].get("W_t_average", [])
+            control_values = per_level[level].get("controls", {}).get(control_name, {}).get("W_t_average", [])
+            if task_values:
+                x_values = _spectral_x_positions(len(task_values), suppress_dc=suppress_dc)
+                ax.plot(
+                    x_values,
+                    _clip_for_log(task_values),
+                    linewidth=2.0,
+                    color=_LEVEL_COLORS.get(level, "#999"),
+                    label=f"{_level_label(level)} task",
+                )
+            if control_values:
+                x_values = _spectral_x_positions(len(control_values), suppress_dc=suppress_dc)
+                ax.plot(
+                    x_values,
+                    _clip_for_log(control_values),
+                    linewidth=1.8,
+                    linestyle="--",
+                    color=_LEVEL_COLORS.get(level, "#999"),
+                    alpha=0.75,
+                    label=f"{_level_label(level)} control",
+                )
+        ax.set_xlabel("Normalized Frequency (log scale)", fontsize=11)
+        ax.set_ylabel("W_t(omega)", fontsize=11)
+        ax.set_title(f"Task vs {_exp2_control_label(control_name)} Spectra", fontsize=13)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.grid(alpha=0.2, linewidth=0.6, which="both")
+        _apply_style(ax)
+        ax.legend(fontsize=8, ncol=2)
+        _set_plot_metadata(
+            fig,
+            _metadata_lines(
+                "Experiment=2",
+                f"Control={control_name}",
+                "Solid=task prompt; dashed=control prompt",
+                "Lines are level-wise mean W_t",
+            ),
+        )
+        _tight_layout(fig)
+        _save_fig(fig, out_dir / f"exp2_control_spectra_{control_name}.png")
 
 
 def _plot_exp3_pre_post(summary: Dict[str, Any], out_path: Path) -> None:
@@ -903,16 +1589,163 @@ def _plot_exp3_pre_post(summary: Dict[str, Any], out_path: Path) -> None:
     levels = _ordered_levels(per_level.keys())
     if not levels:
         return
+    series = {
+        "Pre-fusion": [per_level[level].get("mean_pre_drift", 0.0) for level in levels],
+        "Post-fusion (all tokens)": [per_level[level].get("mean_post_drift_all", 0.0) for level in levels],
+    }
+    if any(per_level[level].get("mean_post_drift_vision") is not None for level in levels):
+        series["Post-fusion (vision only)"] = [
+            per_level[level].get("mean_post_drift_vision", np.nan) for level in levels
+        ]
+    _plot_grouped_bars(
+        series,
+        [_level_label(level) for level in levels],
+        out_path,
+        "Pre-Fusion Drift vs Post-Fusion Response by Level",
+        "Mean Drift",
+        colors=["#6baed6", "#fb6a4a", "#9e9ac8"][: len(series)],
+        metadata=_metadata_lines(
+            "Experiment=3",
+            "Bars=level-wise mean drift",
+            "Pre=vision-only controlled input",
+            "Post(all)=task-conditioned multimodal response",
+        ),
+    )
+
+
+def _plot_exp3_group_weighted_amplification(summary: Dict[str, Any], out_path: Path) -> None:
+    per_level = summary.get("per_level", {})
+    levels = _ordered_levels(per_level.keys())
+    if not levels:
+        return
+
+    group_order = summary.get("analysis_groups", {}).get("order", _FILTER_ANALYSIS_ORDER)
+    series = {
+        group_name.capitalize(): [
+            per_level[level].get("analysis_groups", {}).get(group_name, {}).get("mean_overlap_score", np.nan)
+            for level in levels
+        ]
+        for group_name in group_order
+        if any(
+            group_name in per_level[level].get("analysis_groups", {})
+            for level in levels
+        )
+    }
+    _plot_grouped_bars(
+        series,
+        [_level_label(level) for level in levels],
+        out_path,
+        "Mean Spectral Overlap by Filter Group",
+        "Mean Overlap Score",
+        colors=_FILTER_ANALYSIS_COLORS[: len(series)],
+        metadata=_metadata_lines(
+            "Experiment=3",
+            "Bars=mean overlap ∫W_t·ΔV by level",
+            "Series=filter groups overall/early/mid/late",
+            "Aggregation=sample average",
+        ),
+    )
+
+
+def _plot_exp3_group_correlations(tests: Dict[str, Any], out_path: Path) -> None:
+    levels = _LEVEL_ORDER
+    group_order = tests.get("analysis_groups", {}).get("order", _FILTER_ANALYSIS_ORDER)
+    group_order = [group_name for group_name in group_order if group_name]
+    correlation_map = tests.get("pearson_post_response_vs_overlap_by_level", {})
+    series = {}
+    for group_name in group_order:
+        values = []
+        has_value = False
+        for level in levels:
+            test = correlation_map.get(level, {}).get(group_name)
+            if test is None:
+                values.append(np.nan)
+                continue
+            has_value = True
+            values.append(test.get("controlled_r", np.nan))
+        if has_value:
+            series[group_name.capitalize()] = values
+    if not series:
+        return
+    _plot_grouped_bars(
+        series,
+        [_level_label(level) for level in levels],
+        out_path,
+        "Controlled Response vs Overlap Correlation by Filter Group",
+        "Pearson r",
+        colors=_FILTER_ANALYSIS_COLORS[: len(series)],
+        ylim=(-1.0, 1.0),
+        metadata=_metadata_lines(
+            "Experiment=3",
+            "Bars=controlled Pearson r(ΔZ_all, ∫W_t·ΔV)",
+            "Within-profile centering holds pre-drift profile approximately fixed",
+            "Series=filter groups",
+        ),
+    )
+
+
+def _plot_exp3_profile_groups(summary: Dict[str, Any], out_path: Path) -> None:
+    grouping = summary.get("profile_grouping", {}).get("groups", {})
+    if not grouping:
+        return
+
+    group_names = sorted(grouping.keys(), key=lambda name: int(str(name).split("_")[-1]))
+    levels = _ordered_levels({
+        level
+        for group_data in grouping.values()
+        for level in group_data.get("per_level", {})
+    })
+    if not levels:
+        return
+
+    matrix = np.full((len(group_names), len(levels)), np.nan, dtype=float)
+    for row, group_name in enumerate(group_names):
+        group_data = grouping.get(group_name, {})
+        per_level = group_data.get("per_level", {})
+        for col, level in enumerate(levels):
+            value = per_level.get(level, {}).get("mean_post_drift_scalar_all")
+            if value is not None:
+                matrix[row, col] = float(value)
+
+    _plot_heatmap(
+        matrix,
+        [group_name.replace("_", " ").title() for group_name in group_names],
+        [_level_label(level) for level in levels],
+        out_path,
+        "Post-Fusion Response by Pre-Drift Profile Group",
+        "Mean Post-Fusion Drift (all tokens)",
+        cmap="YlOrRd",
+        metadata=_metadata_lines(
+            "Experiment=3",
+            "Rows=matched pre-drift profile groups",
+            "Cols=task levels",
+            "Value=mean post-fusion drift on all tokens",
+        ),
+    )
+
+
+def _plot_exp3_response_amplification(summary: Dict[str, Any], out_path: Path) -> None:
+    per_level = summary.get("per_level", {})
+    levels = _ordered_levels(per_level.keys())
+    if not levels:
+        return
     _plot_grouped_bars(
         {
-            "Pre-fusion": [per_level[level].get("mean_pre_drift", 0.0) for level in levels],
-            "Post-fusion": [per_level[level].get("mean_post_drift", 0.0) for level in levels],
+            "Response amplification": [
+                per_level[level].get("mean_response_amplification", np.nan) for level in levels
+            ]
         },
         [_level_label(level) for level in levels],
         out_path,
-        "Pre- vs Post-Fusion Drift by Level",
-        "Mean Drift",
-        colors=["#6baed6", "#fb6a4a"],
+        "Mean Post-Fusion Response Amplification by Level",
+        "post_drift_all / pre_drift",
+        colors=["#7b3294"],
+        metadata=_metadata_lines(
+            "Experiment=3",
+            "Bars=mean scalar response amplification",
+            "Response=all-token post-fusion drift",
+            "Baseline=pre-fusion vision drift",
+        ),
     )
 
 
@@ -934,12 +1767,23 @@ def _plot_exp4_critical_cutoffs(summary: Dict[str, Any], out_path: Path) -> None
         "Critical Cutoff",
         colors=["#3182bd", "#e6550d"],
         ylim=(0.0, 0.55),
+        metadata=_metadata_lines(
+            "Experiment=4",
+            "Bars=critical cutoff ω* by level",
+            "Series=lowpass and highpass sweeps",
+            "Aggregation=sample average threshold crossing",
+        ),
     )
 
 
-def _plot_exp4_sample_curves(records: List[Dict[str, Any]], out_dir: Path) -> None:
+def _plot_exp4_sample_curves(
+    records: List[Dict[str, Any]],
+    out_dir: Path,
+    max_samples: int = 3,
+    profile: str = _DEFAULT_PLOT_PROFILE,
+) -> None:
     for mode in ("lowpass", "highpass"):
-        selected = _select_exp4_samples(records)
+        selected = _select_exp4_samples(records, max_samples=max_samples)
         if not selected:
             continue
         ncols = min(2, len(selected))
@@ -980,11 +1824,29 @@ def _plot_exp4_sample_curves(records: List[Dict[str, Any]], out_dir: Path) -> No
         if handles:
             fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=8)
         fig.suptitle(f"Sample Accuracy Curves ({mode})", fontsize=14, y=0.99)
-        fig.tight_layout(rect=(0, 0.05, 1, 0.97))
+        _set_plot_metadata(
+            fig,
+            _plot_metadata(
+                experiment="4",
+                what=f"Representative accuracy-vs-cutoff curves ({mode})",
+                aggregation="one panel per selected image",
+                x=f"{mode} cutoff",
+                y="binary accuracy across cutoff sweep",
+                selection=f"top {len(selected)} images by mean critical cutoff",
+                profile=profile,
+            ),
+        )
+        _tight_layout(fig, metadata_bottom=0.07, top=0.97)
         _save_fig(fig, out_dir / f"exp4_sample_curves_{mode}.png")
 
 
-def _plot_exp5_heatmaps(grouped_pairs: List[Dict[str, Any]], out_path: Path, title: str) -> None:
+def _plot_exp5_heatmaps(
+    grouped_pairs: List[Dict[str, Any]],
+    out_path: Path,
+    title: str,
+    actual_label: str = "Observed Drop",
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
     levels, perturbations, predicted = _exp5_heatmap_matrix(grouped_pairs, "predicted")
     _, _, actual = _exp5_heatmap_matrix(grouped_pairs, "actual")
     if predicted.size == 0 or actual.size == 0:
@@ -994,7 +1856,7 @@ def _plot_exp5_heatmaps(grouped_pairs: List[Dict[str, Any]], out_path: Path, tit
     fig, axes = plt.subplots(1, 3, figsize=(max(15.0, 6.0 + 0.7 * len(perturbations)), 5.3))
     panels = [
         (predicted, "Predicted Overlap", "magma"),
-        (actual, "Observed Drop", "viridis"),
+        (actual, actual_label, "viridis"),
         (residual, "Residual (actual - predicted)", "coolwarm"),
     ]
 
@@ -1010,13 +1872,23 @@ def _plot_exp5_heatmaps(grouped_pairs: List[Dict[str, Any]], out_path: Path, tit
         fig.colorbar(im, ax=axis, shrink=0.8)
 
     fig.suptitle(title, fontsize=14)
-    fig.tight_layout()
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "Experiment=5",
+            "Panels=predicted overlap, observed target, residual",
+            "Rows=levels, cols=perturbations",
+            f"Observed={actual_label}",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
 def _plot_exp5_per_level_corr(summary: Dict[str, Any], out_path: Path) -> None:
-    image_corr = summary.get("image_space", {}).get("per_level_correlation", {})
-    vision_corr = summary.get("vision_feature_space", {}).get("per_level_correlation", {})
+    image_corr = summary.get("image_space", {}).get("primary_group_summary", {}).get("per_level_correlation", {})
+    vision_corr = summary.get("vision_feature_space", {}).get("primary_group_summary", {}).get("per_level_correlation", {})
     levels = _ordered_levels(set(image_corr) | set(vision_corr))
     if not levels:
         return
@@ -1031,16 +1903,142 @@ def _plot_exp5_per_level_corr(summary: Dict[str, Any], out_path: Path) -> None:
         "Pearson r",
         colors=["#6baed6", "#fd8d3c"],
         ylim=(-1.0, 1.0),
+        metadata=_metadata_lines(
+            "Experiment=5",
+            f"Group={summary.get('primary_group', 'late')}",
+            "Target=accuracy drop",
+            "Bars=grouped Pearson r by level",
+        ),
     )
 
 
-def generate_all_plots(results_dir: Path) -> None:
+def _plot_exp5_group_correlation(summary: Dict[str, Any], out_path: Path) -> None:
+    sources = ("image_space", "vision_feature_space")
+    group_order = summary.get("analysis_groups", _FILTER_ANALYSIS_ORDER)
+    group_order = [group_name for group_name in group_order if group_name]
+    series = {}
+    for source_name in sources:
+        source_summary = summary.get(source_name, {})
+        grouped = source_summary.get("grouped_pearson_by_group", {})
+        if not grouped:
+            continue
+        label = _exp5_source_label(source_name)
+        series[label] = [grouped.get(group_name, np.nan) for group_name in group_order]
+    if not series:
+        return
+    _plot_grouped_bars(
+        series,
+        [group_name.capitalize() for group_name in group_order],
+        out_path,
+        "Grouped Pearson Correlation by Filter Group",
+        "Pearson r",
+        colors=["#6baed6", "#fd8d3c"],
+        ylim=(-1.0, 1.0),
+        metadata=_metadata_lines(
+            "Experiment=5",
+            "Bars=grouped Pearson r(predicted, actual)",
+            "Sources=image-space relative and vision-feature relative",
+            "Target=accuracy drop",
+        ),
+    )
+
+
+def _plot_exp5_target_correlation(summary: Dict[str, Any], out_path: Path) -> None:
+    target_order = summary.get(
+        "targets",
+        ["accuracy_drop", "loglik_erosion", "net_drop", "relative_accuracy_drop"],
+    )
+    series = {}
+    for source_name in ("image_space", "vision_feature_space"):
+        source_summary = summary.get(source_name, {})
+        primary_target_summaries = source_summary.get("primary_group_target_summaries", {})
+        if not primary_target_summaries:
+            continue
+        label = _exp5_source_label(source_name)
+        series[label] = [
+            primary_target_summaries.get(target_name, {}).get("pearson_r_grouped", np.nan)
+            for target_name in target_order
+        ]
+    if not series:
+        return
+    _plot_grouped_bars(
+        series,
+        [_exp5_target_label(target_name) for target_name in target_order],
+        out_path,
+        "Primary-Group Pearson Correlation by Target",
+        "Pearson r",
+        colors=["#6baed6", "#fd8d3c"],
+        ylim=(-1.0, 1.0),
+        metadata=_metadata_lines(
+            "Experiment=5",
+            f"Group={summary.get('primary_group', 'late')}",
+            "Bars=grouped Pearson r by observed target",
+            "Sources=image-space relative and vision-feature relative",
+        ),
+    )
+
+
+def _plot_exp5_per_level_corr_by_source(summary: Dict[str, Any], source_name: str, out_path: Path) -> None:
+    source_summary = summary.get(source_name, {})
+    group_summaries = source_summary.get("group_summaries", {})
+    if not group_summaries:
+        return
+
+    group_order = summary.get("analysis_groups", _FILTER_ANALYSIS_ORDER)
+    group_order = [group_name for group_name in group_order if group_name in group_summaries]
+    if not group_order:
+        return
+
+    levels = _LEVEL_ORDER
+    series = {
+        group_name.capitalize(): [
+            group_summaries[group_name].get("per_level_correlation", {}).get(level, {}).get("pearson_r", np.nan)
+            for level in levels
+        ]
+        for group_name in group_order
+    }
+    title_prefix = _exp5_source_label(source_name)
+    _plot_grouped_bars(
+        series,
+        [_level_label(level) for level in levels],
+        out_path,
+        f"{title_prefix} Per-Level Correlation by Filter Group",
+        "Pearson r",
+        colors=_FILTER_ANALYSIS_COLORS[: len(series)],
+        ylim=(-1.0, 1.0),
+        metadata=_metadata_lines(
+            "Experiment=5",
+            f"Source={title_prefix}",
+            "Bars=grouped Pearson r by level",
+            "Series=filter groups",
+        ),
+    )
+
+
+def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = None) -> None:
     plots_dir = results_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
+    _PLOT_MANIFEST.clear()
+    for existing in plots_dir.glob("*.png"):
+        existing.unlink(missing_ok=True)
+    (plots_dir / "plot_manifest.json").unlink(missing_ok=True)
+
+    profile = _plot_profile(config)
+    exhaustive = _is_exhaustive_profile(profile)
+    sample_limit = _representative_sample_limit(config, profile)
+    suppress_dc = _analysis_suppress_dc(config)
 
     exp1_summary = _load_json(results_dir / "exp1" / "summary.json")
     exp1_detail = _load_json(results_dir / "exp1" / "degradation_by_level.json")
     exp1_samples = _load_jsonl(results_dir / "exp1" / "per_sample.jsonl")
+    exp2_summary = _load_json(results_dir / "exp2" / "summary.json")
+    exp2_samples = _load_json(results_dir / "exp2" / "power_spectra.json")
+    exp2_by_id = {
+        str(record.get("image_id")): record
+        for record in (exp2_samples or [])
+        if record.get("image_id") is not None
+    }
+    selected_exp1_records = _select_exp1_samples(exp1_samples, max_samples=sample_limit) if exp1_samples else []
     if exp1_summary:
         plot_granularity_curves(exp1_summary, plots_dir / "exp1_granularity_curves.png")
     if exp1_detail:
@@ -1053,6 +2051,15 @@ def generate_all_plots(results_dir: Path) -> None:
             "Accuracy Drop by Level and Perturbation",
             "Mean Accuracy Drop",
             cmap="YlOrRd",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Mean gated accuracy drop across perturbations",
+                aggregation="level x perturbation average over samples",
+                x="perturbation type",
+                y="task level",
+                note="Higher values mean clean-correct answers became wrong more often",
+                profile=profile,
+            ),
         )
     if exp1_samples:
         sample_ids, levels, matrix = _exp1_sample_level_matrix(exp1_samples)
@@ -1065,9 +2072,19 @@ def generate_all_plots(results_dir: Path) -> None:
             "Per-Sample Mean Drop by Level",
             "Mean Accuracy Drop",
             cmap="YlGnBu",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Per-image mean gated accuracy drop",
+                aggregation="sample-wise average over perturbations",
+                x="task level",
+                y="selected images",
+                selection="top 10 images by average drop",
+                profile=profile,
+            ),
         )
-        for record in _select_exp1_samples(exp1_samples):
+        for record in selected_exp1_records:
             sample_id = str(record.get("image_id"))
+            matched_exp2 = exp2_by_id.get(sample_id)
             delta_f = _exp1_sample_spectra(record, "delta_f")
             if delta_f:
                 _plot_sample_profile_grid(
@@ -1076,6 +2093,16 @@ def generate_all_plots(results_dir: Path) -> None:
                     plots_dir / f"exp1_sample_delta_f_{_safe_name(sample_id)}.png",
                     "Image-Space delta_f by Perturbation",
                     "delta_f(omega)",
+                    suppress_dc=suppress_dc,
+                    metadata=_plot_metadata(
+                        experiment="1",
+                        what="Image-space perturbation spectra for one image",
+                        aggregation="per-level frequency profiles by perturbation",
+                        x="frequency band (low→high)",
+                        y="delta_f(omega)",
+                        selection="representative high-drop image",
+                        profile=profile,
+                    ),
                 )
             delta_f_vision = _exp1_sample_spectra(record, "delta_f_vision")
             if delta_f_vision:
@@ -1085,62 +2112,249 @@ def generate_all_plots(results_dir: Path) -> None:
                     plots_dir / f"exp1_sample_delta_f_vision_{_safe_name(sample_id)}.png",
                     "Vision-Feature delta_f by Perturbation",
                     "delta_f_vision(omega)",
+                    suppress_dc=suppress_dc,
+                    metadata=_plot_metadata(
+                        experiment="1",
+                        what="Vision-feature perturbation spectra for one image",
+                        aggregation="per-level frequency profiles by perturbation",
+                        x="frequency band (low→high)",
+                        y="delta_f_vision(omega)",
+                        selection="representative high-drop image",
+                        profile=profile,
+                    ),
+                )
+            levels, perturbations, matrix = _exp1_sample_drop_matrix(record)
+            if matrix.size and perturbations:
+                _plot_heatmap(
+                    matrix,
+                    [_level_label(level) for level in levels],
+                    perturbations,
+                    plots_dir / f"exp1_sample_drop_by_perturbation_{_safe_name(sample_id)}.png",
+                    f"Per-Perturbation Accuracy Drop: {_short_sample_id(sample_id, 28)}",
+                    "Accuracy Drop",
+                    cmap="YlOrRd",
+                    vmin=0.0,
+                    vmax=1.0,
+                    metadata=_plot_metadata(
+                        experiment="1",
+                        what="Perturbation-wise gated accuracy drop for one selected image",
+                        aggregation="rows are levels; columns are perturbation types for the same image",
+                        x="perturbation type",
+                        y="task level",
+                        selection="same representative high-drop image used for delta_f plots",
+                        note="1 means clean-correct became wrong; 0 means no gated drop",
+                        profile=profile,
+                    ),
+                )
+            levels, perturbations, matrix = _exp1_sample_metric_matrix(record, "loglik_drift")
+            if matrix.size and perturbations:
+                _plot_heatmap(
+                    matrix,
+                    [_level_label(level) for level in levels],
+                    perturbations,
+                    plots_dir / f"exp1_sample_loglik_drift_{_safe_name(sample_id)}.png",
+                    f"Per-Perturbation Log-Likelihood Drift: {_short_sample_id(sample_id, 28)}",
+                    "Log-Likelihood Drift",
+                    cmap="coolwarm",
+                    metadata=_plot_metadata(
+                        experiment="1",
+                        what="Perturbation-wise correct-answer log-likelihood drift for one selected image",
+                        aggregation="rows are levels; columns are perturbation types for the same image",
+                        x="perturbation type",
+                        y="task level",
+                        selection="same representative high-drop image used for other Exp 1 sample plots",
+                        note="Positive values mean the correct answer score fell under perturbation",
+                        profile=profile,
+                    ),
+                )
+            matched_wt_series = _exp2_sample_wt_series(matched_exp2)
+            if matched_wt_series:
+                _plot_sample_profile_grid(
+                    sample_id,
+                    matched_wt_series,
+                    plots_dir / f"exp2_matched_sample_wt_{_safe_name(sample_id)}.png",
+                    "Task Filters W_t for Matched Selected Sample",
+                    "W_t(omega)",
+                    suppress_dc=suppress_dc,
+                    metadata=_plot_metadata(
+                        experiment="2",
+                        what="Sample-specific task filters for the same image selected in Exp 1",
+                        aggregation="per-level W_t profiles; lines compare overall, early, mid, and late filters",
+                        x="frequency band (low→high)",
+                        y="W_t(omega)",
+                        selection="same representative high-drop image used for delta_f plots",
+                        profile=profile,
+                    ),
+                )
+                _plot_exp2_matched_sample_group_comparison(
+                    matched_exp2,
+                    plots_dir / f"exp2_matched_sample_wt_groups_{_safe_name(sample_id)}.png",
+                    profile=profile,
+                    suppress_dc=suppress_dc,
                 )
 
-    exp2_summary = _load_json(results_dir / "exp2" / "summary.json")
-    exp2_samples = _load_json(results_dir / "exp2" / "power_spectra.json")
     if exp2_summary:
-        plot_attention_power_spectrum(exp2_summary, plots_dir / "exp2_power_spectrum.png")
+        plot_attention_power_spectrum(
+            exp2_summary,
+            plots_dir / "exp2_power_spectrum.png",
+            suppress_dc=suppress_dc,
+        )
         plot_effective_bandwidth(exp2_summary, plots_dir / "exp2_bandwidth.png")
-        _plot_exp2_level_band_heatmap(exp2_summary, plots_dir / "exp2_band_heatmap.png")
+        _plot_exp2_group_spectra(
+            exp2_summary,
+            plots_dir / "exp2_group_spectra.png",
+            suppress_dc=suppress_dc,
+        )
+        _plot_exp2_group_bandwidth(exp2_summary, plots_dir / "exp2_group_bandwidth.png")
+        _plot_exp2_control_bandwidth(exp2_summary, plots_dir / "exp2_control_bandwidth.png")
+        _plot_exp2_control_divergence(exp2_summary, plots_dir / "exp2_control_divergence.png")
+        _plot_exp2_control_spectra(exp2_summary, plots_dir, suppress_dc=suppress_dc)
+        if exhaustive:
+            _plot_exp2_level_band_heatmap(
+                exp2_summary,
+                plots_dir / "exp2_band_heatmap.png",
+                suppress_dc=suppress_dc,
+            )
+            for group_name in exp2_summary.get("layer_groups", {}).get("order", ["early", "mid", "late"]):
+                levels = [
+                    level
+                    for level in _ordered_levels(exp2_summary.get("per_level", {}).keys())
+                    if exp2_summary.get("per_level", {}).get(level, {}).get("layer_groups", {}).get(group_name, {}).get("W_t_average")
+                ]
+                if not levels:
+                    continue
+                group_matrix = np.asarray(
+                    [
+                        exp2_summary.get("per_level", {}).get(level, {}).get("layer_groups", {}).get(group_name, {}).get("W_t_average", [])
+                        for level in levels
+                    ],
+                    dtype=float,
+                )
+                if group_matrix.size == 0 or not levels:
+                    continue
+                _plot_heatmap(
+                    group_matrix,
+                    [_level_label(level) for level in levels],
+                    _band_labels(group_matrix.shape[1], suppress_dc=suppress_dc),
+                    plots_dir / f"exp2_band_heatmap_{group_name}.png",
+                    f"Attention Filter W_t by Level and Band ({group_name})",
+                    "W_t(omega)",
+                    cmap="magma",
+                    metadata=_plot_metadata(
+                        experiment="2",
+                        what=f"Layer-group task filter W_t ({group_name})",
+                        aggregation="level-wise sample average",
+                        x="frequency band (low→high)",
+                        y="task level",
+                        profile=profile,
+                    ),
+                )
     if exp2_samples:
         _plot_distribution_with_points(
             _exp2_bandwidth_values(exp2_samples),
             plots_dir / "exp2_bandwidth_distribution.png",
             "Bandwidth Distribution Across Samples",
             "Bandwidth",
+            metadata=_plot_metadata(
+                experiment="2",
+                what="Within-run sample spread of effective bandwidth",
+                aggregation="per-sample values grouped by level",
+                x="task level",
+                y="effective bandwidth G(t)",
+                profile=profile,
+            ),
         )
-        sample_ids, levels, matrix = _exp2_sample_level_matrix(exp2_samples)
-        sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
-        _plot_heatmap(
-            matrix,
-            [_short_sample_id(sample_id) for sample_id in sample_ids],
-            [_level_label(level) for level in levels],
-            plots_dir / "exp2_sample_bandwidth.png",
-            "Per-Sample Bandwidth by Level",
-            "Bandwidth",
-            cmap="plasma",
+        _plot_exp2_selected_samples(
+            exp2_samples,
+            plots_dir,
+            max_samples=sample_limit,
+            profile=profile,
+            suppress_dc=suppress_dc,
         )
-        _plot_exp2_selected_samples(exp2_samples, plots_dir)
+        if exhaustive:
+            sample_ids, levels, matrix = _exp2_sample_level_matrix(exp2_samples)
+            sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
+            _plot_heatmap(
+                matrix,
+                [_short_sample_id(sample_id) for sample_id in sample_ids],
+                [_level_label(level) for level in levels],
+                plots_dir / "exp2_sample_bandwidth.png",
+                "Per-Sample Bandwidth by Level",
+                "Bandwidth",
+                cmap="plasma",
+                metadata=_plot_metadata(
+                    experiment="2",
+                    what="Per-image effective bandwidth",
+                    aggregation="one value per image and level",
+                    x="task level",
+                    y="selected images",
+                    selection="top 10 images by average bandwidth",
+                    profile=profile,
+                ),
+            )
 
     exp3_summary = _load_json(results_dir / "exp3" / "summary.json")
     exp3_samples = _load_json(results_dir / "exp3" / "amplification.json")
+    exp3_tests = _load_json(results_dir / "exp3" / "hypothesis_tests.json")
     if exp3_summary:
-        plot_amplification_heatmap(exp3_summary, plots_dir / "exp3_amplification.png")
+        _plot_exp3_response_amplification(exp3_summary, plots_dir / "exp3_amplification.png")
+        plot_amplification_heatmap(
+            exp3_summary,
+            plots_dir / "exp3_pre_drift_spectrum.png",
+            suppress_dc=suppress_dc,
+        )
         _plot_exp3_pre_post(exp3_summary, plots_dir / "exp3_pre_post_drift.png")
+        _plot_exp3_group_weighted_amplification(
+            exp3_summary,
+            plots_dir / "exp3_group_weighted_amplification.png",
+        )
+        _plot_exp3_profile_groups(
+            exp3_summary,
+            plots_dir / "exp3_profile_group_response.png",
+        )
+    if exp3_tests:
+        _plot_exp3_group_correlations(exp3_tests, plots_dir / "exp3_group_correlations.png")
     if exp3_samples:
-        levels, perturbations, matrix = _exp3_level_perturbation_matrix(exp3_samples)
-        _plot_heatmap(
-            matrix,
-            [_level_label(level) for level in levels],
-            perturbations,
-            plots_dir / "exp3_level_perturbation_amplification.png",
-            "Amplification by Level and Perturbation",
-            "Mean Amplification",
-            cmap="YlOrRd",
-        )
-        sample_ids, levels, matrix = _exp3_sample_level_matrix(exp3_samples)
-        sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
-        _plot_heatmap(
-            matrix,
-            [_short_sample_id(sample_id) for sample_id in sample_ids],
-            [_level_label(level) for level in levels],
-            plots_dir / "exp3_sample_amplification.png",
-            "Per-Sample Amplification by Level",
-            "Mean Amplification",
-            cmap="PuRd",
-        )
-        for record in _select_exp3_samples(exp3_samples):
+        if exhaustive:
+            levels, perturbations, matrix = _exp3_level_perturbation_matrix(exp3_samples)
+            _plot_heatmap(
+                matrix,
+                [_level_label(level) for level in levels],
+                perturbations,
+                plots_dir / "exp3_level_perturbation_amplification.png",
+                "Post-Fusion Response by Level and Perturbation",
+                "Mean Post-Fusion Drift (all tokens)",
+                cmap="magma",
+                metadata=_plot_metadata(
+                    experiment="3",
+                    what="Mean all-token post-fusion response",
+                    aggregation="level x perturbation average over samples",
+                    x="perturbation type",
+                    y="task level",
+                    profile=profile,
+                ),
+            )
+            sample_ids, levels, matrix = _exp3_sample_level_matrix(exp3_samples)
+            sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
+            _plot_heatmap(
+                matrix,
+                [_short_sample_id(sample_id) for sample_id in sample_ids],
+                [_level_label(level) for level in levels],
+                plots_dir / "exp3_sample_amplification.png",
+                "Per-Sample Post-Fusion Response by Level",
+                "Mean Post-Fusion Drift (all tokens)",
+                cmap="PuRd",
+                metadata=_plot_metadata(
+                    experiment="3",
+                    what="Per-image mean post-fusion response",
+                    aggregation="sample-wise average over perturbations",
+                    x="task level",
+                    y="selected images",
+                    selection="top 10 images by average post-fusion response",
+                    profile=profile,
+                ),
+            )
+        for record in _select_exp3_samples(exp3_samples, max_samples=sample_limit):
             sample_id = str(record.get("image_id"))
             profiles, overlays = _exp3_sample_profiles(record)
             if profiles:
@@ -1148,9 +2362,20 @@ def generate_all_plots(results_dir: Path) -> None:
                     sample_id,
                     profiles,
                     plots_dir / f"exp3_sample_profiles_{_safe_name(sample_id)}.png",
-                    "Amplification Ratio by Perturbation",
-                    "R(omega)",
+                    "Pre-Fusion Drift by Perturbation",
+                    "Pre-Fusion Drift",
                     overlay_by_level=overlays,
+                    suppress_dc=suppress_dc,
+                    metadata=_plot_metadata(
+                        experiment="3",
+                        what="Pre-fusion drift profiles with late W_t overlay",
+                        aggregation="per-level frequency profiles by perturbation",
+                        x="frequency band (low→high)",
+                        y="pre-fusion drift magnitude",
+                        selection="representative high-response image",
+                        note="Dashed line is late-group W_t",
+                        profile=profile,
+                    ),
                 )
 
     exp4_summary = _load_json(results_dir / "exp4" / "summary.json")
@@ -1166,74 +2391,313 @@ def generate_all_plots(results_dir: Path) -> None:
     if exp4_summary:
         _plot_exp4_critical_cutoffs(exp4_summary, plots_dir / "exp4_critical_cutoffs.png")
     if exp4_samples:
-        for mode, (sample_ids, levels, matrix) in _exp4_sample_cutoffs(exp4_samples).items():
-            sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
-            _plot_heatmap(
-                matrix,
-                [_short_sample_id(sample_id) for sample_id in sample_ids],
-                [_level_label(level) for level in levels],
-                plots_dir / f"exp4_sample_cutoffs_{mode}.png",
-                f"Per-Sample Critical Cutoff ({mode})",
-                "Critical Cutoff",
-                cmap="cividis",
-                vmin=0.0,
-                vmax=0.5,
-            )
-        _plot_exp4_sample_curves(exp4_samples, plots_dir)
+        _plot_exp4_sample_curves(exp4_samples, plots_dir, max_samples=sample_limit, profile=profile)
+        if exhaustive:
+            for mode, (sample_ids, levels, matrix) in _exp4_sample_cutoffs(exp4_samples).items():
+                sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
+                _plot_heatmap(
+                    matrix,
+                    [_short_sample_id(sample_id) for sample_id in sample_ids],
+                    [_level_label(level) for level in levels],
+                    plots_dir / f"exp4_sample_cutoffs_{mode}.png",
+                    f"Per-Sample Critical Cutoff ({mode})",
+                    "Critical Cutoff",
+                    cmap="cividis",
+                    vmin=0.0,
+                    vmax=0.5,
+                    metadata=_plot_metadata(
+                        experiment="4",
+                        what=f"Per-image critical cutoff ({mode})",
+                        aggregation="one value per image and level",
+                        x="task level",
+                        y="selected images",
+                        selection="top 10 images by average critical cutoff",
+                        profile=profile,
+                    ),
+                )
 
     exp5_summary = _load_json(results_dir / "exp5" / "summary.json")
     exp5_grouped = _load_json(results_dir / "exp5" / "scatter_data.json")
     exp5_samples = _load_json(results_dir / "exp5" / "sample_scatter_data.json")
     exp5_vision_grouped = _load_json(results_dir / "exp5" / "vision_scatter_data.json")
     exp5_vision_samples = _load_json(results_dir / "exp5" / "vision_sample_scatter_data.json")
+    exp5_grouped_by_group = _load_json(results_dir / "exp5" / "scatter_data_by_group.json")
+    exp5_sample_by_group = _load_json(results_dir / "exp5" / "sample_scatter_data_by_group.json")
+    exp5_grouped_by_group_and_target = _load_json(results_dir / "exp5" / "scatter_data_by_group_and_target.json")
+    exp5_sample_by_group_and_target = _load_json(results_dir / "exp5" / "sample_scatter_data_by_group_and_target.json")
     if exp5_grouped and exp5_summary:
-        image_summary = exp5_summary.get("image_space", exp5_summary)
+        image_summary = exp5_summary.get("image_space", {}).get("primary_group_summary", exp5_summary.get("image_space", exp5_summary))
         plot_overlap_scatter(
             exp5_grouped,
             image_summary.get("pearson_r_grouped", 0.0),
             plots_dir / "exp5_overlap_scatter.png",
-            title="Overlap vs Accuracy Drop (grouped, image-space)",
+            title=f"Overlap vs Accuracy Drop (grouped, {_exp5_source_label('image_space')})",
+            y_label=_exp5_target_label("accuracy_drop"),
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Predicted overlap vs observed accuracy drop",
+                aggregation="grouped by level and perturbation",
+                x="predicted spectral overlap S_pred",
+                y=_exp5_target_label("accuracy_drop"),
+                note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
         )
         _plot_exp5_heatmaps(
             exp5_grouped,
             plots_dir / "exp5_grouped_heatmap_image.png",
-            "Grouped Overlap vs Drop (image-space)",
-        )
-    if exp5_samples and exp5_summary:
-        image_summary = exp5_summary.get("image_space", exp5_summary)
-        plot_overlap_scatter(
-            exp5_samples,
-            image_summary.get("pearson_r_sample", 0.0),
-            plots_dir / "exp5_overlap_scatter_sample.png",
-            title="Overlap vs Accuracy Drop (per sample, image-space)",
-            point_size=20,
-            alpha=0.45,
+            f"Grouped Overlap vs Drop ({_exp5_source_label('image_space')})",
+            actual_label=_exp5_target_label("accuracy_drop"),
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Grouped predicted overlap, observed accuracy drop, and residual",
+                aggregation="level x perturbation average over samples",
+                x="perturbation type",
+                y="task level",
+                note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
         )
     if exp5_vision_grouped and exp5_summary:
-        vision_summary = exp5_summary.get("vision_feature_space", {})
+        vision_summary = exp5_summary.get("vision_feature_space", {}).get("primary_group_summary", exp5_summary.get("vision_feature_space", {}))
         plot_overlap_scatter(
             exp5_vision_grouped,
             vision_summary.get("pearson_r_grouped", 0.0),
             plots_dir / "exp5_overlap_scatter_vision.png",
-            title="Overlap vs Accuracy Drop (grouped, vision-feature)",
+            title=f"Overlap vs Accuracy Drop (grouped, {_exp5_source_label('vision_feature_space')})",
+            y_label=_exp5_target_label("accuracy_drop"),
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Predicted overlap vs observed accuracy drop",
+                aggregation="grouped by level and perturbation",
+                x="predicted spectral overlap S_pred",
+                y=_exp5_target_label("accuracy_drop"),
+                note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
         )
         _plot_exp5_heatmaps(
             exp5_vision_grouped,
             plots_dir / "exp5_grouped_heatmap_vision.png",
-            "Grouped Overlap vs Drop (vision-feature)",
+            f"Grouped Overlap vs Drop ({_exp5_source_label('vision_feature_space')})",
+            actual_label=_exp5_target_label("accuracy_drop"),
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Grouped predicted overlap, observed accuracy drop, and residual",
+                aggregation="level x perturbation average over samples",
+                x="perturbation type",
+                y="task level",
+                note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
         )
-    if exp5_vision_samples and exp5_summary:
-        vision_summary = exp5_summary.get("vision_feature_space", {})
+    if exp5_summary:
+        _plot_exp5_per_level_corr(exp5_summary, plots_dir / "exp5_per_level_correlation.png")
+        _plot_exp5_group_correlation(exp5_summary, plots_dir / "exp5_group_correlation.png")
+        _plot_exp5_target_correlation(exp5_summary, plots_dir / "exp5_target_correlation.png")
+        _plot_exp5_per_level_corr_by_source(
+            exp5_summary,
+            "image_space",
+            plots_dir / "exp5_per_level_correlation_image_groups.png",
+        )
+        _plot_exp5_per_level_corr_by_source(
+            exp5_summary,
+            "vision_feature_space",
+            plots_dir / "exp5_per_level_correlation_vision_groups.png",
+        )
+    if exhaustive and exp5_samples and exp5_summary:
+        image_summary = exp5_summary.get("image_space", {}).get("primary_group_summary", exp5_summary.get("image_space", exp5_summary))
+        plot_overlap_scatter(
+            exp5_samples,
+            image_summary.get("pearson_r_sample", 0.0),
+            plots_dir / "exp5_overlap_scatter_sample.png",
+            title=f"Overlap vs Accuracy Drop (per sample, {_exp5_source_label('image_space')})",
+            point_size=20,
+            alpha=0.45,
+            y_label=_exp5_target_label("accuracy_drop"),
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Predicted overlap vs observed accuracy drop",
+                aggregation="per sample",
+                x="predicted spectral overlap S_pred",
+                y=_exp5_target_label("accuracy_drop"),
+                note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
+        )
+    if exhaustive and exp5_vision_samples and exp5_summary:
+        vision_summary = exp5_summary.get("vision_feature_space", {}).get("primary_group_summary", exp5_summary.get("vision_feature_space", {}))
         plot_overlap_scatter(
             exp5_vision_samples,
             vision_summary.get("pearson_r_sample", 0.0),
             plots_dir / "exp5_overlap_scatter_vision_sample.png",
-            title="Overlap vs Accuracy Drop (per sample, vision-feature)",
+            title=f"Overlap vs Accuracy Drop (per sample, {_exp5_source_label('vision_feature_space')})",
             point_size=20,
             alpha=0.45,
+            y_label=_exp5_target_label("accuracy_drop"),
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Predicted overlap vs observed accuracy drop",
+                aggregation="per sample",
+                x="predicted spectral overlap S_pred",
+                y=_exp5_target_label("accuracy_drop"),
+                note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
         )
-    if exp5_summary:
-        _plot_exp5_per_level_corr(exp5_summary, plots_dir / "exp5_per_level_correlation.png")
+    if exhaustive and exp5_grouped_by_group and exp5_summary:
+        primary_group = exp5_summary.get("primary_group", "late")
+        for source_name, source_groups in exp5_grouped_by_group.items():
+            if source_name.endswith("_raw"):
+                continue
+            for group_name, grouped_pairs in source_groups.items():
+                if not grouped_pairs:
+                    continue
+                if source_name in {"image_space", "vision_feature_space"} and group_name == primary_group:
+                    continue
+                source_summary = exp5_summary.get(source_name, {}).get("group_summaries", {}).get(group_name, {})
+                plot_overlap_scatter(
+                    grouped_pairs,
+                    source_summary.get("pearson_r_grouped", 0.0),
+                    plots_dir / f"exp5_overlap_scatter_{source_name}_{group_name}.png",
+                    title=f"Overlap vs Accuracy Drop ({_exp5_source_label(source_name)}, {group_name})",
+                    y_label=_exp5_target_label("accuracy_drop"),
+                    metadata=_plot_metadata(
+                        experiment="5",
+                        what="Predicted overlap vs observed accuracy drop",
+                        aggregation="grouped by level and perturbation",
+                        x="predicted spectral overlap S_pred",
+                        y=_exp5_target_label("accuracy_drop"),
+                        note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
+                        profile=profile,
+                    ),
+                )
+                _plot_exp5_heatmaps(
+                    grouped_pairs,
+                    plots_dir / f"exp5_grouped_heatmap_{source_name}_{group_name}.png",
+                    f"Grouped Overlap vs Drop ({_exp5_source_label(source_name)}, {group_name})",
+                    actual_label=_exp5_target_label("accuracy_drop"),
+                    metadata=_plot_metadata(
+                        experiment="5",
+                        what="Grouped predicted overlap, observed accuracy drop, and residual",
+                        aggregation="level x perturbation average over samples",
+                        x="perturbation type",
+                        y="task level",
+                        note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
+                        profile=profile,
+                    ),
+                )
+    if exhaustive and exp5_sample_by_group and exp5_summary:
+        analysis_groups = exp5_summary.get("analysis_groups", _FILTER_ANALYSIS_ORDER)
+        primary_group = exp5_summary.get("primary_group", "late")
+        for source_name, source_groups in exp5_sample_by_group.items():
+            if source_name.endswith("_raw"):
+                continue
+            for group_name in analysis_groups:
+                sample_pairs = source_groups.get(group_name)
+                if not sample_pairs:
+                    continue
+                if source_name in {"image_space", "vision_feature_space"} and group_name == primary_group:
+                    continue
+                source_summary = exp5_summary.get(source_name, {}).get("group_summaries", {}).get(group_name, {})
+                plot_overlap_scatter(
+                    sample_pairs,
+                    source_summary.get("pearson_r_sample", 0.0),
+                    plots_dir / f"exp5_overlap_scatter_{source_name}_{group_name}_sample.png",
+                    title=f"Overlap vs Accuracy Drop ({_exp5_source_label(source_name)}, {group_name}, per sample)",
+                    point_size=20,
+                    alpha=0.45,
+                    y_label=_exp5_target_label("accuracy_drop"),
+                    metadata=_plot_metadata(
+                        experiment="5",
+                        what="Predicted overlap vs observed accuracy drop",
+                        aggregation="per sample",
+                        x="predicted spectral overlap S_pred",
+                        y=_exp5_target_label("accuracy_drop"),
+                        note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
+                        profile=profile,
+                    ),
+                )
+    if exhaustive and exp5_grouped_by_group_and_target and exp5_summary:
+        primary_group = exp5_summary.get("primary_group", "late")
+        extra_targets = [target for target in exp5_summary.get("targets", []) if target != "accuracy_drop"]
+        for source_name, source_groups in exp5_grouped_by_group_and_target.items():
+            if source_name.endswith("_raw"):
+                continue
+            primary_group_targets = source_groups.get(primary_group, {})
+            source_target_summaries = (
+                exp5_summary.get(source_name, {})
+                .get("primary_group_target_summaries", {})
+            )
+            for target_name in extra_targets:
+                grouped_pairs = primary_group_targets.get(target_name)
+                target_summary = source_target_summaries.get(target_name, {})
+                if grouped_pairs:
+                    plot_overlap_scatter(
+                        grouped_pairs,
+                        target_summary.get("pearson_r_grouped", 0.0),
+                        plots_dir / f"exp5_overlap_scatter_{source_name}_{primary_group}_{target_name}.png",
+                        title=f"Overlap vs {_exp5_target_label(target_name)} ({_exp5_source_label(source_name)}, {primary_group})",
+                        y_label=_exp5_target_label(target_name),
+                        metadata=_plot_metadata(
+                            experiment="5",
+                            what=f"Predicted overlap vs {_exp5_target_label(target_name)}",
+                            aggregation="grouped by level and perturbation",
+                            x="predicted spectral overlap S_pred",
+                            y=_exp5_target_label(target_name),
+                            note=f"Source={_exp5_source_label(source_name)}; group={primary_group}",
+                            profile=profile,
+                        ),
+                    )
+                    _plot_exp5_heatmaps(
+                        grouped_pairs,
+                        plots_dir / f"exp5_grouped_heatmap_{source_name}_{primary_group}_{target_name}.png",
+                        f"Grouped Overlap vs {_exp5_target_label(target_name)} ({_exp5_source_label(source_name)}, {primary_group})",
+                        actual_label=_exp5_target_label(target_name),
+                        metadata=_plot_metadata(
+                            experiment="5",
+                            what=f"Grouped predicted overlap, observed {_exp5_target_label(target_name)}, and residual",
+                            aggregation="level x perturbation average over samples",
+                            x="perturbation type",
+                            y="task level",
+                            note=f"Source={_exp5_source_label(source_name)}; group={primary_group}",
+                            profile=profile,
+                        ),
+                    )
+    if exhaustive and exp5_sample_by_group_and_target and exp5_summary:
+        primary_group = exp5_summary.get("primary_group", "late")
+        extra_targets = [target for target in exp5_summary.get("targets", []) if target != "accuracy_drop"]
+        for source_name, source_groups in exp5_sample_by_group_and_target.items():
+            if source_name.endswith("_raw"):
+                continue
+            primary_group_targets = source_groups.get(primary_group, {})
+            source_target_summaries = (
+                exp5_summary.get(source_name, {})
+                .get("primary_group_target_summaries", {})
+            )
+            for target_name in extra_targets:
+                sample_pairs = primary_group_targets.get(target_name)
+                target_summary = source_target_summaries.get(target_name, {})
+                if not sample_pairs or target_summary.get("pearson_r_sample") is None:
+                    continue
+                plot_overlap_scatter(
+                    sample_pairs,
+                    target_summary.get("pearson_r_sample", 0.0),
+                    plots_dir / f"exp5_overlap_scatter_{source_name}_{primary_group}_{target_name}_sample.png",
+                    title=f"Overlap vs {_exp5_target_label(target_name)} ({_exp5_source_label(source_name)}, {primary_group}, per sample)",
+                    point_size=20,
+                    alpha=0.45,
+                    y_label=_exp5_target_label(target_name),
+                    metadata=_plot_metadata(
+                        experiment="5",
+                        what=f"Predicted overlap vs {_exp5_target_label(target_name)}",
+                        aggregation="per sample",
+                        x="predicted spectral overlap S_pred",
+                        y=_exp5_target_label(target_name),
+                        note=f"Source={_exp5_source_label(source_name)}; group={primary_group}",
+                        profile=profile,
+                    ),
+                )
 
     exp6_summary = _load_json(results_dir / "exp6" / "summary.json")
     exp6_samples = _load_jsonl(results_dir / "exp6" / "per_sample.jsonl")
@@ -1251,18 +2715,37 @@ def generate_all_plots(results_dir: Path) -> None:
                     f"mIoU Drop by Level and Perturbation ({model_name})",
                     "Mean mIoU Drop",
                     cmap="YlOrRd",
+                    metadata=_plot_metadata(
+                        experiment="6",
+                        what=f"Mean mIoU drop by perturbation for {model_name}",
+                        aggregation="level x perturbation average over samples",
+                        x="perturbation type",
+                        y="segmentation hierarchy level",
+                        profile=profile,
+                    ),
                 )
-            sample_ids, levels, matrix = _exp6_sample_level_matrix(exp6_samples, model_name)
-            sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
-            if matrix.size:
-                _plot_heatmap(
-                    matrix,
-                    [_short_sample_id(sample_id) for sample_id in sample_ids],
-                    [_level_label(level) for level in levels],
-                    plots_dir / f"exp6_sample_level_{_safe_name(model_name)}.png",
-                    f"Per-Sample mIoU Drop ({model_name})",
-                    "Mean mIoU Drop",
-                    cmap="PuRd",
-                )
+            if exhaustive:
+                sample_ids, levels, matrix = _exp6_sample_level_matrix(exp6_samples, model_name)
+                sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
+                if matrix.size:
+                    _plot_heatmap(
+                        matrix,
+                        [_short_sample_id(sample_id) for sample_id in sample_ids],
+                        [_level_label(level) for level in levels],
+                        plots_dir / f"exp6_sample_level_{_safe_name(model_name)}.png",
+                        f"Per-Sample mIoU Drop ({model_name})",
+                        "Mean mIoU Drop",
+                        cmap="PuRd",
+                        metadata=_plot_metadata(
+                            experiment="6",
+                            what=f"Per-image mIoU drop for {model_name}",
+                            aggregation="sample-wise average over perturbations",
+                            x="segmentation hierarchy level",
+                            y="selected images",
+                            selection="top 10 images by average mIoU drop",
+                            profile=profile,
+                        ),
+                    )
 
-    logger.info("All plots generated in %s", plots_dir)
+    _write_plot_manifest(plots_dir, profile)
+    logger.info("All plots generated in %s (profile=%s, plots=%d)", plots_dir, profile, len(_PLOT_MANIFEST))

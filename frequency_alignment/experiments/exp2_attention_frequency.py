@@ -27,9 +27,11 @@ import numpy as np
 from PIL import Image
 
 from ..analysis.spectral import (
+    compare_spectral_filters,
     compute_attention_power_spectrum_multi,
     compute_effective_bandwidth,
     compute_filter_W_t,
+    spectral_vector_length,
 )
 from ..analysis.statistics import (
     one_way_anova,
@@ -40,9 +42,37 @@ from ..data.base import ExperimentResult, GranularityLevel
 from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
 from ..utils.device import select_device
+from ..utils.layer_groups import LAYER_GROUP_ORDER, layer_group_ranges, split_by_layer_group
 from ..utils.io import save_json
 
 logger = logging.getLogger(__name__)
+CONTROL_ORDER = ("empty_language", "random_language")
+
+
+def _build_random_prompt(reference_prompt: str, seed: int) -> str:
+    tokens = [token for token in reference_prompt.replace("\n", " ").split(" ") if token]
+    token_count = max(4, len(tokens))
+    rng = np.random.default_rng(seed)
+    vocab = [
+        "kava", "lorn", "mep", "silar", "torin", "vexa", "drim", "palo",
+        "nure", "cesta", "brin", "zalor", "tiven", "mora", "quess",
+    ]
+    generated = [str(rng.choice(vocab)) for _ in range(token_count)]
+    return " ".join(generated)
+
+
+def _build_control_prompts(
+    prompt: str,
+    control_names: List[str],
+    seed: int,
+) -> Dict[str, str]:
+    controls: Dict[str, str] = {}
+    for idx, control_name in enumerate(control_names):
+        if control_name == "empty_language":
+            controls[control_name] = "."
+        elif control_name == "random_language":
+            controls[control_name] = _build_random_prompt(prompt, seed + idx)
+    return controls
 
 
 def _extract_attention_for_prompt(
@@ -51,6 +81,8 @@ def _extract_attention_for_prompt(
     prompt: str,
     layer_stride: int = 4,
     num_bands: int = 10,
+    fft_window: str = "hann",
+    suppress_dc: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Extract attention maps and compute spectral analysis for one prompt.
 
@@ -86,26 +118,46 @@ def _extract_attention_for_prompt(
     if not attn_list:
         return None
 
-    # Compute power spectrum across all heads/layers
-    mean_radial, per_head_radials = compute_attention_power_spectrum_multi(
-        attn_list, internals.patch_grid, num_bands,
-    )
+    def _summarize_group(group_attn: List[np.ndarray], layer_indices: List[int]) -> Dict[str, Any]:
+        mean_radial, _ = compute_attention_power_spectrum_multi(
+            group_attn,
+            internals.patch_grid,
+            num_bands,
+            window=fft_window,
+            suppress_dc=suppress_dc,
+        )
+        bandwidth = compute_effective_bandwidth(mean_radial)
+        W_t = compute_filter_W_t(mean_radial)
+        return {
+            "radial_power": mean_radial,
+            "bandwidth": bandwidth,
+            "W_t": W_t,
+            "layer_indices": layer_indices,
+            "num_layers_extracted": len(group_attn),
+            "num_heads_total": sum(
+                a.shape[0] if a.ndim == 3 else 1 for a in group_attn
+            ),
+        }
 
-    # Effective bandwidth
-    bandwidth = compute_effective_bandwidth(mean_radial)
-
-    # Normalized filter
-    W_t = compute_filter_W_t(mean_radial)
+    layer_indices = list(internals.cross_attention_layer_indices or range(len(attn_list)))
+    total_layers = max(1, adapter.num_layers)
+    overall = _summarize_group(attn_list, layer_indices)
+    grouped_attn = split_by_layer_group(attn_list, layer_indices, total_layers)
+    group_stats: Dict[str, Any] = {}
+    for group_name in LAYER_GROUP_ORDER:
+        group_values = grouped_attn[group_name]["values"]
+        group_layer_indices = grouped_attn[group_name]["layer_indices"]
+        if not group_values:
+            continue
+        group_stats[group_name] = _summarize_group(group_values, group_layer_indices)
 
     return {
-        "radial_power": mean_radial,
-        "bandwidth": bandwidth,
-        "W_t": W_t,
+        **overall,
+        "layer_groups": group_stats,
+        "layer_group_ranges": layer_group_ranges(total_layers),
+        "total_model_layers": total_layers,
         "patch_grid": internals.patch_grid,
-        "num_layers_extracted": len(attn_list),
-        "num_heads_total": sum(
-            a.shape[0] if a.ndim == 3 else 1 for a in attn_list
-        ),
+        "fft_window": fft_window,
     }
 
 
@@ -127,7 +179,18 @@ def run_exp2(
     exp_cfg = cfg.get("experiments", {}).get("exp2", {})
     max_samples = exp_cfg.get("max_samples", 200)
     layer_stride = exp_cfg.get("layer_stride", 4)
+    fft_window = exp_cfg.get(
+        "fft_window",
+        cfg.get("analysis", {}).get("attention_fft_window", "hann"),
+    )
+    prompt_controls = [
+        name
+        for name in exp_cfg.get("prompt_controls", list(CONTROL_ORDER))
+        if name in CONTROL_ORDER
+    ]
     num_bands = cfg.get("analysis", {}).get("num_bands", 10)
+    suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
+    effective_band_count = spectral_vector_length(num_bands, suppress_dc=suppress_dc)
     seed = cfg.get("seed", 42)
 
     # --- Load model ---
@@ -175,6 +238,48 @@ def run_exp2(
     # Collect bandwidths grouped by level
     level_bandwidths: Dict[str, List[float]] = defaultdict(list)
     level_radials: Dict[str, List[np.ndarray]] = defaultdict(list)
+    level_group_bandwidths: Dict[str, Dict[str, List[float]]] = {
+        group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER
+    }
+    level_group_radials: Dict[str, Dict[str, List[np.ndarray]]] = {
+        group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER
+    }
+    level_control_bandwidths: Dict[str, Dict[str, List[float]]] = {
+        control_name: defaultdict(list) for control_name in prompt_controls
+    }
+    level_control_radials: Dict[str, Dict[str, List[np.ndarray]]] = {
+        control_name: defaultdict(list) for control_name in prompt_controls
+    }
+    level_control_divergences: Dict[str, Dict[str, Dict[str, List[float]]]] = {
+        control_name: {
+            "js_divergence": defaultdict(list),
+            "l2_distance": defaultdict(list),
+            "cosine_similarity": defaultdict(list),
+            "bandwidth_delta": defaultdict(list),
+        }
+        for control_name in prompt_controls
+    }
+    level_control_group_bandwidths: Dict[str, Dict[str, Dict[str, List[float]]]] = {
+        control_name: {group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER}
+        for control_name in prompt_controls
+    }
+    level_control_group_radials: Dict[str, Dict[str, Dict[str, List[np.ndarray]]]] = {
+        control_name: {group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER}
+        for control_name in prompt_controls
+    }
+    level_control_group_divergences: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = {
+        control_name: {
+            group_name: {
+                "js_divergence": defaultdict(list),
+                "l2_distance": defaultdict(list),
+                "cosine_similarity": defaultdict(list),
+                "bandwidth_delta": defaultdict(list),
+            }
+            for group_name in LAYER_GROUP_ORDER
+        }
+        for control_name in prompt_controls
+    }
+    layer_group_meta = layer_group_ranges(max(1, adapter.num_layers))
     t0 = time.time()
 
     for idx, sample in enumerate(samples):
@@ -208,7 +313,13 @@ def run_exp2(
                 prompt = f"{prompt} Options: {opts_str}"
 
             result = _extract_attention_for_prompt(
-                adapter, image, prompt, layer_stride, num_bands,
+                adapter,
+                image,
+                prompt,
+                layer_stride,
+                num_bands,
+                fft_window,
+                suppress_dc=suppress_dc,
             )
 
             if result is None:
@@ -221,6 +332,10 @@ def run_exp2(
                 "W_t": result["W_t"].tolist(),
                 "num_layers": result["num_layers_extracted"],
                 "num_heads": result["num_heads_total"],
+                "patch_grid": list(result["patch_grid"]) if result.get("patch_grid") else None,
+                "fft_window": result.get("fft_window"),
+                "layer_groups": {},
+                "controls": {},
             }
 
             # Accumulate for hypothesis testing
@@ -232,6 +347,102 @@ def run_exp2(
                 filters_dir / f"{sample.image_id}_{level_key}.npy",
                 result["W_t"],
             )
+
+            for group_name in LAYER_GROUP_ORDER:
+                group_result = result.get("layer_groups", {}).get(group_name)
+                if group_result is None:
+                    continue
+                sample_record["levels"][level_key]["layer_groups"][group_name] = {
+                    "bandwidth": group_result["bandwidth"],
+                    "radial_power": group_result["radial_power"].tolist(),
+                    "W_t": group_result["W_t"].tolist(),
+                    "layer_indices": group_result["layer_indices"],
+                    "num_layers": group_result["num_layers_extracted"],
+                    "num_heads": group_result["num_heads_total"],
+                }
+                level_group_bandwidths[group_name][level_key].append(group_result["bandwidth"])
+                level_group_radials[group_name][level_key].append(group_result["radial_power"])
+                np.save(
+                    filters_dir / f"{sample.image_id}_{level_key}_{group_name}.npy",
+                    group_result["W_t"],
+                )
+
+            control_prompts = _build_control_prompts(prompt, prompt_controls, seed + idx * 997 + level.value)
+            for control_name, control_prompt in control_prompts.items():
+                control_result = _extract_attention_for_prompt(
+                    adapter,
+                    image,
+                    control_prompt,
+                    layer_stride,
+                    num_bands,
+                    fft_window,
+                    suppress_dc,
+                )
+                if control_result is None:
+                    continue
+
+                divergence = compare_spectral_filters(result["W_t"], control_result["W_t"])
+                control_record: Dict[str, Any] = {
+                    "prompt": control_prompt,
+                    "bandwidth": control_result["bandwidth"],
+                    "radial_power": control_result["radial_power"].tolist(),
+                    "W_t": control_result["W_t"].tolist(),
+                    "num_layers": control_result["num_layers_extracted"],
+                    "num_heads": control_result["num_heads_total"],
+                    **divergence,
+                    "bandwidth_delta_to_task": float(
+                        control_result["bandwidth"] - result["bandwidth"]
+                    ),
+                    "layer_groups": {},
+                }
+                sample_record["levels"][level_key]["controls"][control_name] = control_record
+                level_control_bandwidths[control_name][level_key].append(control_result["bandwidth"])
+                level_control_radials[control_name][level_key].append(control_result["radial_power"])
+                level_control_divergences[control_name]["js_divergence"][level_key].append(
+                    divergence["js_divergence"]
+                )
+                level_control_divergences[control_name]["l2_distance"][level_key].append(
+                    divergence["l2_distance"]
+                )
+                level_control_divergences[control_name]["cosine_similarity"][level_key].append(
+                    divergence["cosine_similarity"]
+                )
+                level_control_divergences[control_name]["bandwidth_delta"][level_key].append(
+                    control_record["bandwidth_delta_to_task"]
+                )
+
+                for group_name in LAYER_GROUP_ORDER:
+                    task_group = result.get("layer_groups", {}).get(group_name)
+                    control_group = control_result.get("layer_groups", {}).get(group_name)
+                    if task_group is None or control_group is None:
+                        continue
+                    group_divergence = compare_spectral_filters(
+                        task_group["W_t"],
+                        control_group["W_t"],
+                    )
+                    control_record["layer_groups"][group_name] = {
+                        "bandwidth": control_group["bandwidth"],
+                        "radial_power": control_group["radial_power"].tolist(),
+                        "W_t": control_group["W_t"].tolist(),
+                        "layer_indices": control_group["layer_indices"],
+                        "num_layers": control_group["num_layers_extracted"],
+                        "num_heads": control_group["num_heads_total"],
+                        **group_divergence,
+                        "bandwidth_delta_to_task": float(
+                            control_group["bandwidth"] - task_group["bandwidth"]
+                        ),
+                    }
+                    level_control_group_bandwidths[control_name][group_name][level_key].append(
+                        control_group["bandwidth"]
+                    )
+                    level_control_group_radials[control_name][group_name][level_key].append(
+                        control_group["radial_power"]
+                    )
+                    for metric_name in ("js_divergence", "l2_distance", "cosine_similarity", "bandwidth_delta"):
+                        value_key = metric_name if metric_name != "bandwidth_delta" else "bandwidth_delta_to_task"
+                        level_control_group_divergences[control_name][group_name][metric_name][level_key].append(
+                            control_record["layer_groups"][group_name][value_key]
+                        )
 
         per_sample.append(sample_record)
 
@@ -251,14 +462,32 @@ def run_exp2(
     )
 
     # --- Aggregate ---
-    agg: Dict[str, Any] = {"per_level": {}}
+    agg: Dict[str, Any] = {
+        "per_level": {},
+        "layer_groups": {
+            "order": list(LAYER_GROUP_ORDER),
+            "ranges": {
+                group_name: {"start": start, "end": end}
+                for group_name, (start, end) in layer_group_meta.items()
+            },
+        },
+        "fft_window": fft_window,
+        "suppress_dc": suppress_dc,
+        "requested_num_bands": int(num_bands),
+        "effective_num_bands": int(effective_band_count),
+        "prompt_controls": prompt_controls,
+    }
     level_order = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
     present_levels = [lk for lk in level_order if lk in level_bandwidths]
 
     for lk in present_levels:
         bws = level_bandwidths[lk]
         radials = level_radials[lk]
-        mean_radial = np.mean(np.stack(radials), axis=0) if radials else np.zeros(num_bands)
+        mean_radial = (
+            np.mean(np.stack(radials), axis=0)
+            if radials
+            else np.zeros(effective_band_count, dtype=np.float64)
+        )
         W_t_avg = compute_filter_W_t(mean_radial)
 
         agg["per_level"][lk] = {
@@ -268,12 +497,109 @@ def run_exp2(
             "mean_radial_power": mean_radial.tolist(),
             "W_t_average": W_t_avg.tolist(),
             "num_samples": len(bws),
+            "layer_groups": {},
         }
+
+        for group_name in LAYER_GROUP_ORDER:
+            group_bws = level_group_bandwidths[group_name].get(lk, [])
+            group_radials = level_group_radials[group_name].get(lk, [])
+            if not group_radials:
+                continue
+            group_mean_radial = np.mean(np.stack(group_radials), axis=0)
+            group_W_t = compute_filter_W_t(group_mean_radial)
+            agg["per_level"][lk]["layer_groups"][group_name] = {
+                "mean_bandwidth": float(np.mean(group_bws)),
+                "std_bandwidth": float(np.std(group_bws)),
+                "median_bandwidth": float(np.median(group_bws)),
+                "mean_radial_power": group_mean_radial.tolist(),
+                "W_t_average": group_W_t.tolist(),
+                "num_samples": len(group_bws),
+            }
+
+        agg["per_level"][lk]["controls"] = {}
+        for control_name in prompt_controls:
+            control_bws = level_control_bandwidths[control_name].get(lk, [])
+            control_radials = level_control_radials[control_name].get(lk, [])
+            if not control_radials:
+                continue
+            control_mean_radial = np.mean(np.stack(control_radials), axis=0)
+            control_W_t = compute_filter_W_t(control_mean_radial)
+            control_entry: Dict[str, Any] = {
+                "mean_bandwidth": float(np.mean(control_bws)),
+                "std_bandwidth": float(np.std(control_bws)),
+                "median_bandwidth": float(np.median(control_bws)),
+                "mean_radial_power": control_mean_radial.tolist(),
+                "W_t_average": control_W_t.tolist(),
+                "mean_js_divergence_to_task": float(
+                    np.mean(level_control_divergences[control_name]["js_divergence"][lk])
+                ),
+                "std_js_divergence_to_task": float(
+                    np.std(level_control_divergences[control_name]["js_divergence"][lk])
+                ),
+                "mean_l2_distance_to_task": float(
+                    np.mean(level_control_divergences[control_name]["l2_distance"][lk])
+                ),
+                "std_l2_distance_to_task": float(
+                    np.std(level_control_divergences[control_name]["l2_distance"][lk])
+                ),
+                "mean_cosine_similarity_to_task": float(
+                    np.mean(level_control_divergences[control_name]["cosine_similarity"][lk])
+                ),
+                "mean_bandwidth_delta_to_task": float(
+                    np.mean(level_control_divergences[control_name]["bandwidth_delta"][lk])
+                ),
+                "num_samples": len(control_bws),
+                "layer_groups": {},
+            }
+            for group_name in LAYER_GROUP_ORDER:
+                group_bws = level_control_group_bandwidths[control_name][group_name].get(lk, [])
+                group_radials = level_control_group_radials[control_name][group_name].get(lk, [])
+                if not group_radials:
+                    continue
+                group_mean_radial = np.mean(np.stack(group_radials), axis=0)
+                group_W_t = compute_filter_W_t(group_mean_radial)
+                control_entry["layer_groups"][group_name] = {
+                    "mean_bandwidth": float(np.mean(group_bws)),
+                    "std_bandwidth": float(np.std(group_bws)),
+                    "median_bandwidth": float(np.median(group_bws)),
+                    "mean_radial_power": group_mean_radial.tolist(),
+                    "W_t_average": group_W_t.tolist(),
+                    "mean_js_divergence_to_task": float(
+                        np.mean(
+                            level_control_group_divergences[control_name][group_name]["js_divergence"][lk]
+                        )
+                    ),
+                    "mean_l2_distance_to_task": float(
+                        np.mean(
+                            level_control_group_divergences[control_name][group_name]["l2_distance"][lk]
+                        )
+                    ),
+                    "mean_cosine_similarity_to_task": float(
+                        np.mean(
+                            level_control_group_divergences[control_name][group_name]["cosine_similarity"][lk]
+                        )
+                    ),
+                    "mean_bandwidth_delta_to_task": float(
+                        np.mean(
+                            level_control_group_divergences[control_name][group_name]["bandwidth_delta"][lk]
+                        )
+                    ),
+                    "num_samples": len(group_bws),
+                }
+            agg["per_level"][lk]["controls"][control_name] = control_entry
 
     # Save average W_t per level (critical for Exp 3 and Exp 5)
     for lk in present_levels:
         W_t_avg = np.array(agg["per_level"][lk]["W_t_average"])
         np.save(filters_dir / f"average_{lk}.npy", W_t_avg)
+        for group_name in LAYER_GROUP_ORDER:
+            group_stats = agg["per_level"][lk]["layer_groups"].get(group_name)
+            if group_stats is None:
+                continue
+            np.save(
+                filters_dir / f"average_{lk}_{group_name}.npy",
+                np.asarray(group_stats["W_t_average"], dtype=np.float64),
+            )
 
     # --- Hypothesis tests ---
     tests: Dict[str, Any] = {}
@@ -291,6 +617,23 @@ def run_exp2(
             "passed": rho > 0.8,
             "values": dict(zip(present_levels, mean_bws)),
         }
+
+        for group_name in LAYER_GROUP_ORDER:
+            group_present = [
+                lk for lk in present_levels if level_group_bandwidths[group_name].get(lk)
+            ]
+            if len(group_present) < 2:
+                continue
+            group_ranks = list(range(1, len(group_present) + 1))
+            group_means = [np.mean(level_group_bandwidths[group_name][lk]) for lk in group_present]
+            group_rho, group_p = spearman_correlation(group_ranks, group_means)
+            tests[f"spearman_bandwidth_vs_granularity_{group_name}"] = {
+                "rho": group_rho,
+                "p_value": group_p,
+                "target": "rho > 0.8",
+                "passed": group_rho > 0.8,
+                "values": dict(zip(group_present, group_means)),
+            }
 
     # H2: ANOVA on bandwidths across levels
     groups = [level_bandwidths[lk] for lk in present_levels if level_bandwidths[lk]]
@@ -316,7 +659,26 @@ def run_exp2(
             }
 
     # Summary
-    core_passed = tests.get("spearman_bandwidth_vs_granularity", {}).get("passed", False)
+    core_passed = tests.get("spearman_bandwidth_vs_granularity_late", {}).get(
+        "passed",
+        tests.get("spearman_bandwidth_vs_granularity", {}).get("passed", False),
+    )
+    tests["primary_group"] = "late"
+    tests["fft_window"] = fft_window
+    tests["prompt_controls"] = {}
+    for control_name in prompt_controls:
+        tests["prompt_controls"][control_name] = {
+            "mean_js_divergence_to_task": {
+                lk: agg["per_level"][lk]["controls"][control_name]["mean_js_divergence_to_task"]
+                for lk in present_levels
+                if control_name in agg["per_level"][lk].get("controls", {})
+            },
+            "mean_bandwidth_delta_to_task": {
+                lk: agg["per_level"][lk]["controls"][control_name]["mean_bandwidth_delta_to_task"]
+                for lk in present_levels
+                if control_name in agg["per_level"][lk].get("controls", {})
+            },
+        }
     tests["hypothesis_supported"] = core_passed
 
     # --- Log results ---
@@ -328,6 +690,29 @@ def run_exp2(
             "  %s: G(t)=%.2f +/- %.2f  (n=%d)",
             lk, stats["mean_bandwidth"], stats["std_bandwidth"], stats["num_samples"],
         )
+        for group_name in LAYER_GROUP_ORDER:
+            group_stats = stats.get("layer_groups", {}).get(group_name)
+            if group_stats is None:
+                continue
+            logger.info(
+                "    %s[%s]: G(t)=%.2f +/- %.2f",
+                lk,
+                group_name,
+                group_stats["mean_bandwidth"],
+                group_stats["std_bandwidth"],
+            )
+        for control_name in prompt_controls:
+            control_stats = stats.get("controls", {}).get(control_name)
+            if control_stats is None:
+                continue
+            logger.info(
+                "    %s[%s control]: G(t)=%.2f +/- %.2f  JS(task,control)=%.3f",
+                lk,
+                control_name,
+                control_stats["mean_bandwidth"],
+                control_stats["std_bandwidth"],
+                control_stats["mean_js_divergence_to_task"],
+            )
     sp = tests.get("spearman_bandwidth_vs_granularity", {})
     logger.info(
         "  Spearman(granularity, bandwidth): rho=%.3f, p=%.4f [%s]",
@@ -360,6 +745,15 @@ def run_exp2(
         "spearman_rho": sp.get("rho", 0),
         "spearman_p": sp.get("p_value", 1),
     }
+    for group_name in LAYER_GROUP_ORDER:
+        group_sp = tests.get(f"spearman_bandwidth_vs_granularity_{group_name}", {})
+        if group_sp:
+            metrics[f"spearman_rho_{group_name}"] = group_sp.get("rho", 0)
+            metrics[f"spearman_p_{group_name}"] = group_sp.get("p_value", 1)
+        for lk in present_levels:
+            group_stats = agg["per_level"][lk]["layer_groups"].get(group_name)
+            if group_stats is not None:
+                metrics[f"{lk}_mean_bandwidth_{group_name}"] = group_stats["mean_bandwidth"]
 
     return ExperimentResult(
         experiment_id=2,

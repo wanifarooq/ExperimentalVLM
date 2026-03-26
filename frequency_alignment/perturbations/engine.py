@@ -19,6 +19,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
+from ..analysis.spectral import compute_image_spectral_signature_stats
+
 logger = logging.getLogger(__name__)
 
 _PARENT_DIR = str(Path(__file__).resolve().parent.parent.parent)
@@ -48,6 +50,28 @@ def _import_parent_perturbations():
     }
 
 
+def _import_parent_overlay_utils():
+    """Lazy import overlay helpers from the main VLM driver."""
+    if _PARENT_DIR not in sys.path:
+        sys.path.insert(0, _PARENT_DIR)
+    from vlm_invariance_check import (
+        overlay_font_for_image,
+        overlay_box_for_text,
+        text_overlay_in_box,
+        text_overlay_phrases,
+        random_text_phrases,
+        box_overlay,
+    )
+    return {
+        "overlay_font_for_image": overlay_font_for_image,
+        "overlay_box_for_text": overlay_box_for_text,
+        "text_overlay_in_box": text_overlay_in_box,
+        "text_overlay_phrases": text_overlay_phrases,
+        "random_text_phrases": random_text_phrases,
+        "box_overlay": box_overlay,
+    }
+
+
 def _import_frequency_utils():
     """Lazy import FFT utilities from the frequency perturbation module."""
     if _PARENT_DIR not in sys.path:
@@ -73,19 +97,32 @@ class PerturbationResult:
     severity: int                      # 1, 2, or 3
     perturbed_image: Image.Image
     delta_f: np.ndarray                # |ΔF(ω)|², radially binned, shape (num_bands,)
+    delta_f_relative: Optional[np.ndarray] = None
     delta_f_2d: Optional[np.ndarray] = None  # full 2D spectral diff (optional)
+    clean_spectral_energy: Optional[float] = None
     mask_transform: Optional[Callable[[Image.Image], Image.Image]] = None
 
 
-# ---------------------------------------------------------------------------
-# Spectral signature computation
-# ---------------------------------------------------------------------------
+def compute_spectral_signature_stats(
+    clean: Image.Image,
+    perturbed: Image.Image,
+    num_bands: int = 10,
+    suppress_dc: bool = True,
+) -> Dict[str, Any]:
+    """Compute raw and relative image-space spectral signatures."""
+    return compute_image_spectral_signature_stats(
+        clean,
+        perturbed,
+        num_bands=num_bands,
+        suppress_dc=suppress_dc,
+    )
 
 
 def compute_spectral_signature(
     clean: Image.Image,
     perturbed: Image.Image,
     num_bands: int = 10,
+    suppress_dc: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Compute radially binned spectral difference |ΔF(ω)|².
 
@@ -98,44 +135,13 @@ def compute_spectral_signature(
         ``(radial_bins, delta_2d)`` where ``radial_bins`` has shape
         ``(num_bands,)`` and ``delta_2d`` has shape ``(H, W)``.
     """
-    # Convert to grayscale float arrays
-    c_arr = np.array(clean.convert("L"), dtype=np.float32) / 255.0
-    p_arr = np.array(perturbed.convert("L"), dtype=np.float32) / 255.0
-
-    # Resize to match if needed
-    if c_arr.shape != p_arr.shape:
-        h = min(c_arr.shape[0], p_arr.shape[0])
-        w = min(c_arr.shape[1], p_arr.shape[1])
-        c_arr = c_arr[:h, :w]
-        p_arr = p_arr[:h, :w]
-
-    # 2D FFT
-    fft_c = np.fft.fft2(c_arr)
-    fft_p = np.fft.fft2(p_arr)
-    delta = fft_p - fft_c
-
-    # 2D power difference
-    delta_power_2d = np.abs(delta) ** 2
-
-    # Radial binning
-    h, w = delta_power_2d.shape
-    cy, cx = h // 2, w // 2
-    y_grid, x_grid = np.ogrid[:h, :w]
-    # Distance from center (shift FFT center)
-    dist = np.sqrt((y_grid - cy) ** 2 + (x_grid - cx) ** 2)
-    max_dist = np.sqrt(cy ** 2 + cx ** 2)
-
-    delta_shifted = np.fft.fftshift(delta_power_2d)
-
-    edges = np.linspace(0, max_dist, num_bands + 1)
-    radial_bins = np.zeros(num_bands, dtype=np.float64)
-    for b in range(num_bands):
-        mask = (dist >= edges[b]) & (dist < edges[b + 1])
-        count = mask.sum()
-        if count > 0:
-            radial_bins[b] = delta_shifted[mask].sum() / count
-
-    return radial_bins, delta_power_2d
+    stats = compute_spectral_signature_stats(
+        clean,
+        perturbed,
+        num_bands=num_bands,
+        suppress_dc=suppress_dc,
+    )
+    return stats["delta_f"], stats["delta_2d"]
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +209,84 @@ def _identity_image(image: Image.Image) -> Image.Image:
     return image.copy()
 
 
+def _build_parent_style_overlay_specs(
+    image: Image.Image,
+    *,
+    enabled_natural: set[str],
+    overlay_options: Optional[Dict[str, str]],
+    overlay_base_label: Optional[str],
+    overlay_seed: int,
+    fallback_text: str = "SAMPLE TEXT",
+) -> List[Tuple[str, str, str, Callable[[Image.Image], Image.Image], Callable[[Image.Image], Image.Image]]]:
+    """Build parent-style overlay perturbations once per image.
+
+    The parent repository creates multiple overlay variants based on MCQ options
+    and does not tie these variants to severity. We mirror that behavior here.
+    """
+    overlay_utils = _import_parent_overlay_utils()
+    options = overlay_options or {}
+    phrases = overlay_utils["text_overlay_phrases"](options, overlay_base_label, limit=3)
+    if not phrases:
+        phrases = [fallback_text]
+    random_phrases = overlay_utils["random_text_phrases"](
+        overlay_seed,
+        count=len(phrases),
+    )
+    font = overlay_utils["overlay_font_for_image"](image)
+    boxes = [
+        overlay_utils["overlay_box_for_text"](image, phrase, font)
+        for phrase in phrases
+    ]
+
+    specs: List[
+        Tuple[str, str, str, Callable[[Image.Image], Image.Image], Callable[[Image.Image], Image.Image]]
+    ] = []
+
+    if not enabled_natural or "text_overlay" in enabled_natural:
+        for idx, phrase in enumerate(phrases):
+            box = boxes[idx]
+            specs.append(
+                (
+                    "text_overlay",
+                    f"TextOverlay({idx + 1})",
+                    "natural",
+                    lambda img, phrase=phrase, box=box, font=font: overlay_utils["text_overlay_in_box"](
+                        img, phrase, box, font
+                    ),
+                    _identity_image,
+                )
+            )
+
+    if not enabled_natural or "box_overlay" in enabled_natural:
+        for idx, box in enumerate(boxes):
+            specs.append(
+                (
+                    "box_overlay",
+                    f"BoxOverlay({idx + 1})",
+                    "natural",
+                    lambda img, box=box: overlay_utils["box_overlay"](img, [box]),
+                    _identity_image,
+                )
+            )
+
+    if not enabled_natural or "random_text" in enabled_natural:
+        for idx, phrase in enumerate(random_phrases[: len(boxes)]):
+            box = boxes[idx]
+            specs.append(
+                (
+                    "random_text",
+                    f"RandomText({idx + 1})",
+                    "natural",
+                    lambda img, phrase=phrase, box=box, font=font: overlay_utils["text_overlay_in_box"](
+                        img, phrase, box, font
+                    ),
+                    _identity_image,
+                )
+            )
+
+    return specs
+
+
 # ---------------------------------------------------------------------------
 # Build full perturbation suite
 # ---------------------------------------------------------------------------
@@ -224,10 +308,14 @@ def build_perturbation_suite(
     include_natural: bool = True,
     include_frequency: bool = True,
     num_bands: int = 10,
+    suppress_dc: bool = True,
     natural_types: List[str] | None = None,
     frequency_types: List[str] | None = None,
     severity_params: Dict[int, Dict[str, Any]] | None = None,
     seed: int = 42,
+    overlay_options: Optional[Dict[str, str]] = None,
+    overlay_base_label: Optional[str] = None,
+    overlay_seed: Optional[int] = None,
 ) -> List[PerturbationResult]:
     """Build all perturbations for one image with spectral signatures.
 
@@ -239,6 +327,9 @@ def build_perturbation_suite(
         num_bands: Number of radial bands for spectral signature.
         severity_params: Override severity parameters.
         seed: Random seed.
+        overlay_options: Optional MCQ options used to build parent-style overlay phrases.
+        overlay_base_label: Reference answer label excluded from parent-style overlay phrases.
+        overlay_seed: Seed for parent-style random text overlays.
 
     Returns:
         List of :class:`PerturbationResult`.
@@ -252,6 +343,17 @@ def build_perturbation_suite(
     enabled_frequency = {name.lower() for name in (frequency_types or [])}
 
     results: List[PerturbationResult] = []
+    static_overlay_specs: List[
+        Tuple[str, str, str, Callable[[Image.Image], Image.Image], Callable[[Image.Image], Image.Image]]
+    ] = []
+    if include_natural:
+        static_overlay_specs = _build_parent_style_overlay_specs(
+            image,
+            enabled_natural=enabled_natural,
+            overlay_options=overlay_options,
+            overlay_base_label=overlay_base_label,
+            overlay_seed=overlay_seed if overlay_seed is not None else seed,
+        )
 
     for sev in severity_levels:
         sp = params.get(sev, params.get(1, {}))
@@ -264,7 +366,6 @@ def build_perturbation_suite(
 
         # -- Natural perturbations --
         if include_natural:
-            random_text = str(rng.randint(0, 99999))
             natural_specs = [
                 (
                     "translation",
@@ -329,29 +430,6 @@ def build_perturbation_suite(
                     lambda img, a=rot: fns["rotate_image"](img, -a),
                     lambda img, a=rot: fns["rotate_image"](img, -a),
                 ),
-                (
-                    "text_overlay",
-                    "TextOverlay",
-                    "natural",
-                    lambda img: fns["text_overlay"](img, "SAMPLE TEXT"),
-                    _identity_image,
-                ),
-                (
-                    "box_overlay",
-                    "BoxOverlay",
-                    "natural",
-                    lambda img: fns["box_overlay"](
-                        img, [(10, 10, img.width // 3, img.height // 3)]
-                    ),
-                    _identity_image,
-                ),
-                (
-                    "random_text",
-                    "RandomText",
-                    "natural",
-                    lambda img, text=random_text: fns["text_overlay"](img, text),
-                    _identity_image,
-                ),
             ]
 
             for pert_type, name, family, fn, mask_fn in natural_specs:
@@ -359,16 +437,21 @@ def build_perturbation_suite(
                     continue
                 try:
                     perturbed = fn(image)
-                    delta_f, delta_2d = compute_spectral_signature(
-                        image, perturbed, num_bands
+                    spectral_stats = compute_spectral_signature_stats(
+                        image,
+                        perturbed,
+                        num_bands,
+                        suppress_dc=suppress_dc,
                     )
                     results.append(PerturbationResult(
                         name=f"{name}|sev{sev}",
                         family=family,
                         severity=sev,
                         perturbed_image=perturbed,
-                        delta_f=delta_f,
-                        delta_f_2d=delta_2d,
+                        delta_f=spectral_stats["delta_f"],
+                        delta_f_relative=spectral_stats["delta_f_relative"],
+                        delta_f_2d=spectral_stats["delta_2d"],
+                        clean_spectral_energy=spectral_stats["clean_spectral_energy"],
                         mask_transform=mask_fn,
                     ))
                 except Exception as e:
@@ -391,20 +474,52 @@ def build_perturbation_suite(
                     perturbed = _apply_frequency_perturbation(
                         image, mode, fc, fe, rng
                     )
-                    delta_f, delta_2d = compute_spectral_signature(
-                        image, perturbed, num_bands
+                    spectral_stats = compute_spectral_signature_stats(
+                        image,
+                        perturbed,
+                        num_bands,
+                        suppress_dc=suppress_dc,
                     )
                     results.append(PerturbationResult(
                         name=f"{name}|sev{sev}",
                         family=family,
                         severity=sev,
                         perturbed_image=perturbed,
-                        delta_f=delta_f,
-                        delta_f_2d=delta_2d,
+                        delta_f=spectral_stats["delta_f"],
+                        delta_f_relative=spectral_stats["delta_f_relative"],
+                        delta_f_2d=spectral_stats["delta_2d"],
+                        clean_spectral_energy=spectral_stats["clean_spectral_energy"],
                         mask_transform=_identity_image,
                     ))
                 except Exception as e:
                     logger.warning("Perturbation %s failed: %s", name, e)
+
+    if include_natural and static_overlay_specs:
+        overlay_severity = severity_levels[0] if severity_levels else 1
+        for pert_type, name, family, fn, mask_fn in static_overlay_specs:
+            if enabled_natural and pert_type not in enabled_natural:
+                continue
+            try:
+                perturbed = fn(image)
+                spectral_stats = compute_spectral_signature_stats(
+                    image,
+                    perturbed,
+                    num_bands,
+                    suppress_dc=suppress_dc,
+                )
+                results.append(PerturbationResult(
+                    name=name,
+                    family=family,
+                    severity=overlay_severity,
+                    perturbed_image=perturbed,
+                    delta_f=spectral_stats["delta_f"],
+                    delta_f_relative=spectral_stats["delta_f_relative"],
+                    delta_f_2d=spectral_stats["delta_2d"],
+                    clean_spectral_energy=spectral_stats["clean_spectral_energy"],
+                    mask_transform=mask_fn,
+                ))
+            except Exception as e:
+                logger.warning("Perturbation %s failed: %s", name, e)
 
     logger.debug(
         "Built %d perturbations across %d severity levels",

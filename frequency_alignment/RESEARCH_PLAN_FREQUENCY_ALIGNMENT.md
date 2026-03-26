@@ -2,7 +2,7 @@
 
 ## Building on: "Same Answer, Different Representations" (Paper 1)
 
-## Implementation Status (March 13, 2026)
+## Implementation Status (March 25, 2026)
 
 This file mixes long-horizon research goals with the current implementation. The code in `frequency_alignment/` now concretely implements the main pipeline on `GQA` for experiments `1-5` and `PartImageNet` for experiment `6`, with the authoritative operational behavior documented in `frequency_alignment/experiment_run.md`.
 
@@ -12,7 +12,11 @@ Current model profiles in code and configs:
 - Recent supported family alternatives: `llava-hf/llava-v1.6-mistral-7b-hf`, `OpenGVLab/InternVL3-8B-hf`
 
 Implementation clarifications that supersede older references below:
-- Experiment 5 now uses actual `delta_f` spectra from Experiment 1 plus real `W_t` filters from Experiment 2.
+- Experiment 1 now stores both raw and relative perturbation spectra in image space (`delta_f`, `delta_f_relative`) and, when enabled, the matching raw and relative vision-feature spectra (`delta_f_vision`, `delta_f_vision_relative`).
+- Experiment 2 does not rely on a named encoder-decoder cross-attention block. It derives the effective language-to-vision attention map from the self-attention slice, supports optional FFT windowing before the 2D FFT, and computes `W_t` separately for `overall`, `early`, `mid`, and `late` layer groups. The current configs default this windowing to `none`.
+- Experiment 2 also includes prompt-only controls (`empty_language`, `random_language`) so task-conditioned filters can be compared against semantically weak prompts.
+- Experiment 3 now uses a late decoder hidden state as the default post-fusion representation, treats pre-fusion band drift as the controlled perturbation input, and measures the task-conditioned post-fusion response with an all-token scalar drift. It then tests whether that response follows the overlap between `W_t` and the pre-fusion drift profile for `overall`, `early`, `mid`, and `late`, with `late` treated as the main post-fusion comparison.
+- Experiment 5 now runs overlap prediction on both image-space and vision-feature perturbation spectra, keeps both raw and relative normalization branches, and evaluates multiple targets: `accuracy_drop`, `loglik_erosion`, `net_drop`, and grouped `relative_accuracy_drop`.
 - Experiment 6 now evaluates clean and perturbed `mIoU` against GT PartImageNet masks and uses GT boxes for the SAM2 control.
 - Historical references below to older checkpoints such as `Qwen2.5-VL-7B`, `LLaVA-1.5-13B`, or placeholder segmentation logic should be read as research-history context, not the current code path.
 
@@ -220,21 +224,25 @@ For segmentation variant:
 **Goal**: Show that cross-attention maps have frequency-selective structure correlated with task granularity.
 
 **Design**:
-1. For each (image, text prompt) pair, extract cross-attention weights A from every layer
-2. Reshape attention to spatial grid: a_j(x, y)
-3. Compute 2D FFT: Â_j(ω_x, ω_y)
-4. Compute power spectrum: |Â_j|²
-5. Compute effective bandwidth G(t) using inverse participation ratio
-6. Average across layers and images
+1. For each `(image, text prompt)` pair, extract the effective language-to-vision attention map by slicing the model self-attention tensor into non-vision queries over vision tokens.
+2. Split the selected layers into `early`, `mid`, and `late` groups, and also keep an `overall` aggregate.
+3. Reshape each attention map to the vision patch grid `a_j(x, y)`.
+4. Optionally apply a configured 2D window before the FFT to reduce spectral leakage from patch-grid borders. The current configs default this to `none`.
+5. Compute the 2D FFT `Â_j(ω_x, ω_y)` and the radial power spectrum `|Â_j|²`.
+6. Normalize the spectrum to obtain `W_t(ω)` and compute the effective bandwidth `G(t)` with the inverse participation ratio.
+7. Repeat the same procedure for prompt controls (`empty_language`, `random_language`) to test whether the measured filter is language-meaning dependent rather than only image-content dependent.
+8. Aggregate the spectra over samples for each granularity level and for each layer group.
 
 **Analysis**:
-- Plot mean power spectrum |Â_j|² for L1 vs L2 vs L3 vs L4 prompts
-- Compute G(t) for each granularity level
-- Correlate G(t) with sensitivity from Experiment 1
+- Plot mean power spectrum `|Â_j|²` for `L1` vs `L2` vs `L3` vs `L4`
+- Plot `overall`, `early`, `mid`, and `late` `W_t(ω)` filters and their bandwidths
+- Compare task prompts to prompt-only controls using `L2`, cosine similarity, and Jensen-Shannon divergence between `W_t` distributions
+- Correlate `G(t)` with sensitivity from Experiment 1
 
 **Expected Result**:
 - L1 prompts: power concentrated at DC and low frequencies
 - L4 prompts: power spread across frequency spectrum
+- Control prompts should be closer to each other than to the real task prompts, especially for fine-grained levels
 - Strong positive correlation between G(t) and sensitivity
 
 **Models for extraction**: Qwen2.5-VL-7B (same as Paper 1), LLaVA-1.5-13B (for generalization)
@@ -242,21 +250,22 @@ For segmentation variant:
 ---
 
 ### Experiment 3: Pre-Fusion vs Post-Fusion Drift
-**Goal**: Show that language conditioning amplifies drift in attended bands and suppresses it in unattended bands.
+**Goal**: Show that the same pre-fusion perturbation spectrum can produce different post-fusion internal responses depending on the task, and that this difference follows the task filter `W_t`.
 
 **Design**:
-1. Extract vision features BEFORE cross-attention (pre-fusion): V
-2. Extract features AFTER cross-attention (post-fusion): Z
-3. For clean and perturbed image, compute:
-   - Pre-fusion drift: ΔV = V_perturbed - V_clean
-   - Post-fusion drift: ΔZ = Z_perturbed - Z_clean
-4. Decompose both into frequency bands (apply band-pass filters to the spatial arrangement of patches)
-5. Compute drift ratio per band: R(ω) = ||ΔZ(ω)|| / ||ΔV(ω)||
+1. Extract vision features BEFORE fusion (pre-fusion): `V`
+2. For each clean / perturbed image pair, compute the task-agnostic pre-fusion drift spectrum `ΔV(ω)` from vision features only.
+3. Extract a late language-conditioned hidden state `Z` from the decoder and measure post-fusion drift as an all-token scalar response:
+   - `ΔZ_all = scalar_drift(Z_perturbed, Z_clean)`
+4. Group perturbations with similar normalized `ΔV(ω)` profiles so the perturbation spectrum is approximately held fixed inside each group.
+5. For each task and filter group (`overall`, `early`, `mid`, `late`), compute the spectral overlap:
+   - `overlap(t, p) = ∫ W_t(ω) · ΔV_p(ω) dω`
+6. Test whether `ΔZ_all` correlates with this overlap, especially within the matched pre-drift profile groups.
 
 **Expected Result**:
-- R(ω) > 1 in bands where W_t(ω) is large (amplification in attended bands)
-- R(ω) < 1 in bands where W_t(ω) is small (suppression in unattended bands)
-- The amplification pattern differs between coarse and fine prompts
+- The same pre-fusion perturbation profile should induce different post-fusion responses for different tasks.
+- Tasks whose `W_t` overlaps more strongly with the pre-fusion drift profile should show larger `ΔZ_all`.
+- The clearest controlled effect should appear on the `late` filter group.
 
 **Models**: Qwen2.5-VL-7B (has accessible intermediate representations)
 
@@ -290,15 +299,23 @@ For segmentation variant:
 **Goal**: Show that Theorem 1 (sensitivity = spectral overlap) quantitatively predicts observed degradation.
 
 **Design**:
-1. From Experiment 2, measure W_t(ω) for each (image, prompt) pair
-2. For each perturbation type, compute ΔF(ω) (the spectral signature of the perturbation)
-3. Compute predicted sensitivity: S_pred = ∫ |W_t(ω)|² · |ΔF(ω)|² dω
-4. From Experiment 1, measure actual sensitivity: S_actual = accuracy/mIoU drop
-5. Compute correlation between S_pred and S_actual
+1. From Experiment 2, measure `W_t(ω)` for each `(image, prompt)` pair and for each filter group: `overall`, `early`, `mid`, `late`.
+2. From Experiment 1, load both image-space and vision-feature perturbation spectra, in both raw and relative-normalized form.
+3. Compute predicted sensitivity:
+   - raw branch: `S_pred = ∫ |W_t(ω)|² · |ΔF(ω)|² dω`
+   - relative branch: `S_pred^rel = ∫ |W_t(ω)|² · |ΔF_rel(ω)|² dω`
+4. Treat the `late` filter group as the primary hypothesis test, while `overall`, `early`, and `mid` remain control analyses.
+5. Compare `S_pred` against multiple observed targets from Experiment 1:
+   - `accuracy_drop`
+   - `loglik_erosion`
+   - `net_drop = (N_CI - N_IC) / N_total`
+   - grouped `relative_accuracy_drop = (Acc_clean - Acc_pert) / max(Acc_clean, ε)`
+6. Compute both grouped correlations over `(level, perturbation)` pairs and raw per-sample correlations.
 
 **Expected Result**:
-- Strong positive correlation (r > 0.7) between predicted and actual sensitivity
-- This validates the theoretical framework
+- Strong positive grouped correlation between predicted and actual sensitivity, with the cleanest signal typically appearing on the `late` branch
+- `loglik_erosion` should often be at least as informative as binary `accuracy_drop`, because perturbations can weaken the correct answer before they flip the final prediction
+- Relative-normalization should make cross-image comparisons more stable without eliminating the raw-overlap control view
 
 ---
 
@@ -431,38 +448,32 @@ For segmentation variant:
 - For 200 images × 4 prompts each, extract cross-attention maps from Qwen2.5-VL-7B
 - Implementation:
   ```python
-  # Hook into cross-attention layers
-  def attention_hook(module, input, output):
-      attention_weights = output[1]  # [batch, heads, lang_tokens, vis_patches]
-      store_attention(attention_weights)
-
-  # For each (image, prompt):
-  for layer in cross_attention_layers:
-      layer.register_forward_hook(attention_hook)
-
-  # Reshape attention to spatial grid
+  # Derive the language-to-vision slice from self-attention
   attn_spatial = attention.reshape(H_patches, W_patches)
 
-  # 2D FFT
-  attn_freq = np.fft.fft2(attn_spatial)
+  # Optionally apply a configured window before the FFT
+  attn_windowed = maybe_window(attn_spatial, fft_window)
+  attn_freq = np.fft.fft2(attn_windowed)
   power_spectrum = np.abs(attn_freq)**2
 
   # Compute effective bandwidth (inverse participation ratio)
   G = (np.sum(power_spectrum)**2) / np.sum(power_spectrum**2)
   ```
-- Plot: average power spectrum for L1, L2, L3, L4 prompts
-- Compute: G(t) for each granularity level
-- Statistical test: one-way ANOVA on G(t) across granularity levels
+- Also compute `overall`, `early`, `mid`, and `late` group filters plus prompt-only controls
+- Plot: average power spectrum for L1, L2, L3, L4 prompts and control divergences
+- Compute: G(t) for each granularity level and layer group
+- Statistical test: one-way ANOVA on G(t) across granularity levels, plus control-vs-task filter divergence summaries
 
 **Step 2.3: Experiment 3 -- Pre/Post Fusion Drift** (Week 6-7)
 - For 200 images × 4 prompts × 10 perturbations:
-  - Extract pre-fusion vision features (before cross-attention)
-  - Extract post-fusion features (after cross-attention)
-  - Compute drift at each stage
-  - Decompose drift into frequency bands (band-pass filter the patch grid)
-  - Compute amplification ratio R(ω) = ||ΔZ(ω)|| / ||ΔV(ω)||
-- Plot: R(ω) heatmaps for coarse vs fine prompts
-- Statistical test: paired t-test on R(ω) in high-frequency bands between L1 and L4 prompts
+  - Extract pre-fusion vision features once per perturbation
+  - Compute band-wise `ΔV(ω)` from the vision encoder
+  - Extract post-fusion hidden states from a late language-conditioned decoder layer
+  - Measure post-fusion drift as an all-token scalar `ΔZ_all`
+  - Group perturbations by similar normalized `ΔV(ω)` profiles
+  - Correlate `ΔZ_all` with `∫ W_t(ω) · ΔV(ω) dω` for `overall`, `early`, `mid`, and `late`
+- Plot: controlled overlap-vs-response correlations, profile-group response heatmaps, and sample-level `ΔV(ω)` profiles with `W_t` overlays
+- Statistical test: Pearson correlation between controlled post-fusion response and spectral overlap for each group, with `late` as the primary post-fusion test
 
 **Step 2.4: Experiment 4 -- Synthetic Frequency Ablation** (Week 7-8)
 - For 500 images, create frequency-swept versions:
@@ -485,10 +496,12 @@ For segmentation variant:
 ### Phase 3: Validation and Theory (Weeks 9-12)
 
 **Step 3.1: Experiment 5 -- Overlap Prediction** (Week 9)
-- Combine W_t(ω) from Experiment 2 with ΔF(ω) from perturbation analysis
-- Compute predicted sensitivity for each (task, perturbation) pair
-- Correlate with actual sensitivity from Experiment 1
-- Target: Pearson r > 0.7
+- Combine `W_t(ω)` from Experiment 2 with image-space and vision-feature perturbation spectra from Experiment 1
+- Run both raw and relative-normalized overlap calculations
+- Compute predicted sensitivity for `overall`, `early`, `mid`, and `late` filter groups
+- Correlate the predictions with `accuracy_drop`, `loglik_erosion`, `net_drop`, and grouped `relative_accuracy_drop`
+- Treat the `late` branch as the main test and the others as controls
+- Target: grouped Pearson `r > 0.7` on the primary branch, with consistent positive controls
 
 **Step 3.2: Generalization Check** (Week 10)
 - Repeat Experiment 1 (task granularity) on:
@@ -548,10 +561,11 @@ Structure:
 |------|--------|--------|------------|-----------------|
 | **Granularity scaling** | Perturbation severity | Accuracy/mIoU drop | One line per granularity level (L1-L4) | Lines fan out: L4 drops most, L1 drops least |
 | **Attention power spectrum** | Spatial frequency ω | Power |Â|² | One line per granularity level | L1 concentrated at low ω, L4 spread across all ω |
-| **Effective bandwidth** | Granularity level | G(t) | Bar chart | Monotonically increasing |
-| **Drift amplification** | Frequency band ω | Ratio R(ω) | Coarse vs Fine prompt | Fine prompt amplifies more in high-freq bands |
+| **Prompt-control divergence** | Granularity level | JS(W_task, W_control) | Empty vs random control | Divergence grows with task specificity |
+| **Effective bandwidth** | Granularity level | G(t) | Bar chart, split by overall/early/mid/late | Monotonically increasing |
+| **Controlled post-fusion response** | Filter group / profile group | Correlation or mean ΔZ_all | Coarse vs Fine prompt | Higher overlap predicts larger task-conditioned post-fusion response |
 | **Frequency threshold** | Cutoff frequency ω_c | Accuracy | One curve per granularity | Critical ω_c shifts right with granularity |
-| **Overlap prediction** | Predicted sensitivity | Actual sensitivity | Scatter plot | Strong linear correlation (r > 0.7) |
+| **Overlap prediction** | Predicted sensitivity | Actual sensitivity | Scatter plot by overall/early/mid/late and raw/relative branches | Strongest linear correlation on the primary late branch |
 | **Segmentation granularity** | Severity | mIoU drop | Whole object vs Part vs Subpart | Same fan-out pattern |
 
 ### Key Numbers to Report
@@ -560,8 +574,8 @@ Structure:
 |--------|---------------|-------------|
 | Spearman ρ(granularity, sensitivity) | H1c: monotonic scaling | ρ > 0.8, p < 0.001 |
 | ANOVA F-statistic on G(t) across levels | H1a: frequency-selective attention | F > 10, p < 0.001 |
-| Correlation(R(ω), W_t(ω)) per prompt | H1b: drift amplification in attended bands | r > 0.6 |
-| Pearson r(predicted, actual sensitivity) | H1d: spectral overlap prediction | r > 0.7 |
+| Correlation(ΔZ_all, ∫W_t·ΔV) per prompt and layer group | H1b: task-conditioned internal response follows the filter | r > 0.6 |
+| Pearson r(predicted, actual sensitivity) on primary late branch | H1d: spectral overlap prediction | r > 0.7 |
 | ω_c*(L4) / ω_c*(L1) ratio | Bandwidth scales with granularity | Ratio > 2.0 |
 | Robustness improvement from mitigation | Practical value | > 15% reduction in worst-case drop |
 

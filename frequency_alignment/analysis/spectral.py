@@ -13,11 +13,176 @@ Key functions:
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from PIL import Image
 
 logger = logging.getLogger(__name__)
+_EPS = 1e-8
+
+
+def spectral_vector_length(
+    num_bands: int,
+    suppress_dc: bool = False,
+) -> int:
+    bands = max(0, int(num_bands))
+    if suppress_dc:
+        bands = max(0, bands - 1)
+    return bands
+
+
+def spectral_band_centers(
+    num_bands: int,
+    suppress_dc: bool = False,
+) -> np.ndarray:
+    total_bands = max(0, int(num_bands))
+    if total_bands == 0:
+        return np.zeros(0, dtype=np.float64)
+    edges = np.linspace(0.0, 1.0, total_bands + 1, dtype=np.float64)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    if suppress_dc:
+        centers = centers[1:]
+    return centers
+
+
+def _normalize_window_name(window: Optional[str]) -> str:
+    if window is None:
+        return "none"
+    if isinstance(window, bool):
+        return "hann" if window else "none"
+
+    name = str(window).strip().lower()
+    if name in ("", "none", "off", "false", "0", "rect", "rectangular"):
+        return "none"
+    if name in ("on", "true", "1"):
+        return "hann"
+    return name
+
+
+def _window_1d(length: int, window: Optional[str]) -> np.ndarray:
+    if length <= 1:
+        return np.ones(max(1, length), dtype=np.float64)
+
+    name = _normalize_window_name(window)
+    if name == "none":
+        return np.ones(length, dtype=np.float64)
+    if name in ("hann", "hanning"):
+        return np.hanning(length).astype(np.float64)
+    if name == "hamming":
+        return np.hamming(length).astype(np.float64)
+    raise ValueError(f"Unsupported window: {window}")
+
+
+def build_window_2d(
+    shape: Tuple[int, int],
+    window: Optional[str] = "hann",
+) -> np.ndarray:
+    h, w = shape
+    wy = _window_1d(h, window)
+    wx = _window_1d(w, window)
+    return np.outer(wy, wx)
+
+
+def apply_window_2d(
+    array_2d: np.ndarray,
+    window: Optional[str] = "hann",
+) -> np.ndarray:
+    arr = np.asarray(array_2d, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D array for windowing, got shape {arr.shape}")
+    if _normalize_window_name(window) == "none":
+        return arr
+    return arr * build_window_2d((arr.shape[0], arr.shape[1]), window)
+
+
+def _radially_bin_power(
+    power_2d: np.ndarray,
+    num_bands: int,
+    suppress_dc: bool = False,
+) -> np.ndarray:
+    h, w = power_2d.shape
+    cy, cx = h // 2, w // 2
+    y_grid, x_grid = np.ogrid[:h, :w]
+    dist = np.sqrt((y_grid - cy) ** 2 + (x_grid - cx) ** 2)
+    max_dist = np.sqrt(cy ** 2 + cx ** 2)
+
+    edges = np.linspace(0, max_dist, num_bands + 1)
+    radial_power = np.zeros(num_bands, dtype=np.float64)
+    for band_idx in range(num_bands):
+        mask = (dist >= edges[band_idx]) & (dist < edges[band_idx + 1])
+        count = mask.sum()
+        if count > 0:
+            radial_power[band_idx] = power_2d[mask].mean()
+    if suppress_dc:
+        radial_power = radial_power[1:]
+    return radial_power
+
+
+def radially_bin_power(
+    power_2d: np.ndarray,
+    num_bands: int,
+    suppress_dc: bool = True,
+) -> np.ndarray:
+    return _radially_bin_power(power_2d, num_bands, suppress_dc=suppress_dc)
+
+
+def _distribution_cosine_similarity(p: np.ndarray, q: np.ndarray) -> float:
+    p = np.asarray(p, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+    usable = min(len(p), len(q))
+    if usable == 0:
+        return 0.0
+    p = p[:usable]
+    q = q[:usable]
+    denom = np.linalg.norm(p) * np.linalg.norm(q)
+    if denom <= _EPS:
+        return 0.0
+    return float(np.dot(p, q) / denom)
+
+
+def compute_distribution_js_divergence(
+    p: np.ndarray,
+    q: np.ndarray,
+    eps: float = _EPS,
+) -> float:
+    p_arr = np.asarray(p, dtype=np.float64)
+    q_arr = np.asarray(q, dtype=np.float64)
+    usable = min(len(p_arr), len(q_arr))
+    if usable == 0:
+        return 0.0
+    p_arr = p_arr[:usable]
+    q_arr = q_arr[:usable]
+    p_sum = p_arr.sum()
+    q_sum = q_arr.sum()
+    if p_sum <= eps or q_sum <= eps:
+        return 0.0
+    p_norm = np.clip(p_arr / p_sum, eps, None)
+    q_norm = np.clip(q_arr / q_sum, eps, None)
+    p_norm /= p_norm.sum()
+    q_norm /= q_norm.sum()
+    mean = 0.5 * (p_norm + q_norm)
+    kl_pm = np.sum(p_norm * np.log(p_norm / mean))
+    kl_qm = np.sum(q_norm * np.log(q_norm / mean))
+    return float(0.5 * (kl_pm + kl_qm))
+
+
+def compare_spectral_filters(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+) -> Dict[str, float]:
+    ref = np.asarray(reference, dtype=np.float64)
+    cand = np.asarray(candidate, dtype=np.float64)
+    usable = min(len(ref), len(cand))
+    if usable == 0:
+        return {"l2_distance": 0.0, "cosine_similarity": 0.0, "js_divergence": 0.0}
+    ref = ref[:usable]
+    cand = cand[:usable]
+    return {
+        "l2_distance": float(np.linalg.norm(ref - cand)),
+        "cosine_similarity": _distribution_cosine_similarity(ref, cand),
+        "js_divergence": compute_distribution_js_divergence(ref, cand),
+    }
 
 
 def _features_to_spatial_grid(
@@ -122,6 +287,8 @@ def attention_to_spatial_grid(
 def compute_attention_power_spectrum(
     attention_2d: np.ndarray,
     num_bands: int = 10,
+    window: Optional[str] = "hann",
+    suppress_dc: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Compute 2D FFT power spectrum of a spatial attention map.
 
@@ -136,26 +303,11 @@ def compute_attention_power_spectrum(
         is the full 2D power spectrum ``(H, W)``.
     """
     h, w = attention_2d.shape
-    # 2D FFT
-    fft = np.fft.fft2(attention_2d.astype(np.float64))
+    windowed = apply_window_2d(attention_2d, window=window)
+    fft = np.fft.fft2(windowed.astype(np.float64))
     fft_shifted = np.fft.fftshift(fft)
     power_2d = np.abs(fft_shifted) ** 2
-
-    # Radial binning
-    cy, cx = h // 2, w // 2
-    y_grid, x_grid = np.ogrid[:h, :w]
-    dist = np.sqrt((y_grid - cy) ** 2 + (x_grid - cx) ** 2)
-    max_dist = np.sqrt(cy ** 2 + cx ** 2)
-
-    edges = np.linspace(0, max_dist, num_bands + 1)
-    radial_power = np.zeros(num_bands, dtype=np.float64)
-
-    for b in range(num_bands):
-        mask = (dist >= edges[b]) & (dist < edges[b + 1])
-        count = mask.sum()
-        if count > 0:
-            radial_power[b] = power_2d[mask].mean()
-
+    radial_power = _radially_bin_power(power_2d, num_bands, suppress_dc=suppress_dc)
     return radial_power, power_2d
 
 
@@ -163,6 +315,8 @@ def compute_attention_power_spectrum_multi(
     attention_maps: List[np.ndarray],
     patch_grid: Tuple[int, int],
     num_bands: int = 10,
+    window: Optional[str] = "hann",
+    suppress_dc: bool = True,
 ) -> Tuple[np.ndarray, List[np.ndarray]]:
     """Compute and average power spectra across multiple attention heads/layers.
 
@@ -183,37 +337,53 @@ def compute_attention_power_spectrum_multi(
         if attn.ndim == 1:
             # Single vector -> reshape to spatial
             grid = attention_to_spatial_grid(attn, patch_grid)
-            radial, _ = compute_attention_power_spectrum(grid, num_bands)
+            radial, _ = compute_attention_power_spectrum(
+                grid,
+                num_bands,
+                window=window,
+                suppress_dc=suppress_dc,
+            )
             all_radials.append(radial)
         elif attn.ndim == 2:
             # (lang_tokens, vis_tokens) -> average over lang tokens first
             mean_attn = attn.mean(axis=0)
             grid = attention_to_spatial_grid(mean_attn, patch_grid)
-            radial, _ = compute_attention_power_spectrum(grid, num_bands)
+            radial, _ = compute_attention_power_spectrum(
+                grid,
+                num_bands,
+                window=window,
+                suppress_dc=suppress_dc,
+            )
             all_radials.append(radial)
         elif attn.ndim == 3:
             # (heads, lang_tokens, vis_tokens)
             for head_idx in range(attn.shape[0]):
                 mean_attn = attn[head_idx].mean(axis=0)  # avg over lang tokens
                 grid = attention_to_spatial_grid(mean_attn, patch_grid)
-                radial, _ = compute_attention_power_spectrum(grid, num_bands)
+                radial, _ = compute_attention_power_spectrum(
+                    grid,
+                    num_bands,
+                    window=window,
+                    suppress_dc=suppress_dc,
+                )
                 all_radials.append(radial)
 
     if not all_radials:
-        return np.zeros(num_bands), []
+        return np.zeros(spectral_vector_length(num_bands, suppress_dc=suppress_dc)), []
 
     stacked = np.stack(all_radials)
     return stacked.mean(axis=0), all_radials
 
 
-def compute_feature_spectral_signature(
+def compute_feature_spectral_signature_stats(
     clean_features: np.ndarray,
     perturbed_features: np.ndarray,
     num_bands: int = 10,
     clean_patch_grid: Optional[Tuple[int, int]] = None,
     perturbed_patch_grid: Optional[Tuple[int, int]] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute radially binned FFT-difference energy in feature space."""
+    suppress_dc: bool = True,
+) -> Dict[str, Any]:
+    """Compute raw and relative feature-space spectral signatures."""
     clean_grid, perturbed_grid = _align_feature_grids(
         clean_features,
         perturbed_features,
@@ -222,27 +392,89 @@ def compute_feature_spectral_signature(
     )
     clean_fft = np.fft.fft2(clean_grid, axes=(0, 1))
     perturbed_fft = np.fft.fft2(perturbed_grid, axes=(0, 1))
+    clean_total_energy = float(np.sum(np.abs(clean_fft) ** 2))
     delta_fft = perturbed_fft - clean_fft
     delta_power_2d = np.abs(delta_fft) ** 2
     if delta_power_2d.ndim == 3:
-        delta_power_2d = delta_power_2d.mean(axis=-1)
+        delta_power_for_bins = delta_power_2d.mean(axis=-1)
+    else:
+        delta_power_for_bins = delta_power_2d
 
-    h, w = delta_power_2d.shape
-    cy, cx = h // 2, w // 2
-    y_grid, x_grid = np.ogrid[:h, :w]
-    dist = np.sqrt((y_grid - cy) ** 2 + (x_grid - cx) ** 2)
-    max_dist = np.sqrt(cy ** 2 + cx ** 2)
+    delta_shifted = np.fft.fftshift(delta_power_for_bins)
+    radial_bins = _radially_bin_power(delta_shifted, num_bands, suppress_dc=suppress_dc)
+    radial_bins_relative = radial_bins / max(clean_total_energy, _EPS)
+    return {
+        "delta_f": radial_bins,
+        "delta_f_relative": radial_bins_relative,
+        "delta_power_2d": delta_power_for_bins,
+        "clean_total_energy": clean_total_energy,
+    }
+
+
+def compute_feature_spectral_signature(
+    clean_features: np.ndarray,
+    perturbed_features: np.ndarray,
+    num_bands: int = 10,
+    clean_patch_grid: Optional[Tuple[int, int]] = None,
+    perturbed_patch_grid: Optional[Tuple[int, int]] = None,
+    suppress_dc: bool = True,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute radially binned FFT-difference energy in feature space."""
+    stats = compute_feature_spectral_signature_stats(
+        clean_features,
+        perturbed_features,
+        num_bands=num_bands,
+        clean_patch_grid=clean_patch_grid,
+        perturbed_patch_grid=perturbed_patch_grid,
+        suppress_dc=suppress_dc,
+    )
+    return stats["delta_f"], stats["delta_power_2d"]
+
+
+def compute_image_spectral_signature_stats(
+    clean: Image.Image,
+    perturbed: Image.Image,
+    num_bands: int = 10,
+    suppress_dc: bool = True,
+) -> Dict[str, Any]:
+    c_arr = np.array(clean.convert("L"), dtype=np.float32) / 255.0
+    p_arr = np.array(perturbed.convert("L"), dtype=np.float32) / 255.0
+
+    if c_arr.shape != p_arr.shape:
+        h = min(c_arr.shape[0], p_arr.shape[0])
+        w = min(c_arr.shape[1], p_arr.shape[1])
+        c_arr = c_arr[:h, :w]
+        p_arr = p_arr[:h, :w]
+
+    fft_c = np.fft.fft2(c_arr)
+    fft_p = np.fft.fft2(p_arr)
+    clean_spectral_energy = float(np.sum(np.abs(fft_c) ** 2))
+    delta = fft_p - fft_c
+    delta_power_2d = np.abs(delta) ** 2
     delta_shifted = np.fft.fftshift(delta_power_2d)
+    radial_bins = _radially_bin_power(delta_shifted, num_bands, suppress_dc=suppress_dc)
+    radial_bins_relative = radial_bins / max(clean_spectral_energy, _EPS)
+    return {
+        "delta_f": radial_bins,
+        "delta_f_relative": radial_bins_relative,
+        "delta_2d": delta_power_2d,
+        "clean_spectral_energy": clean_spectral_energy,
+    }
 
-    edges = np.linspace(0, max_dist, num_bands + 1)
-    radial_bins = np.zeros(num_bands, dtype=np.float64)
-    for band_idx in range(num_bands):
-        mask = (dist >= edges[band_idx]) & (dist < edges[band_idx + 1])
-        count = mask.sum()
-        if count > 0:
-            radial_bins[band_idx] = delta_shifted[mask].mean()
 
-    return radial_bins, delta_power_2d
+def compute_image_spectral_signature(
+    clean: Image.Image,
+    perturbed: Image.Image,
+    num_bands: int = 10,
+    suppress_dc: bool = True,
+) -> Tuple[np.ndarray, np.ndarray]:
+    stats = compute_image_spectral_signature_stats(
+        clean,
+        perturbed,
+        num_bands=num_bands,
+        suppress_dc=suppress_dc,
+    )
+    return stats["delta_f"], stats["delta_2d"]
 
 
 def compute_effective_bandwidth(power_spectrum: np.ndarray) -> float:
@@ -263,6 +495,8 @@ def compute_effective_bandwidth(power_spectrum: np.ndarray) -> float:
         Effective bandwidth (1.0 = single-band, num_bands = uniform).
     """
     ps = np.asarray(power_spectrum, dtype=np.float64)
+    if ps.size == 0:
+        return 0.0
     if ps.sum() == 0:
         return 1.0
     # Normalize
@@ -290,6 +524,8 @@ def compute_filter_W_t(
         Normalized filter W_t(omega), shape ``(num_bands,)``, sums to 1.
     """
     rp = np.asarray(radial_power, dtype=np.float64)
+    if rp.size == 0:
+        return np.zeros(0, dtype=np.float64)
     total = rp.sum()
     if total == 0:
         return np.ones_like(rp) / len(rp)

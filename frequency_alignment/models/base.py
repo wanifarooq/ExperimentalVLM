@@ -21,9 +21,12 @@ class HookOutputs:
         pre_fusion_features: Vision encoder output *before* it enters the
             language model (i.e. before cross-modal attention).
             Shape ``(num_vis_tokens, hidden_dim)``.
-        post_fusion_features: Hidden states *after* the first decoder layers
-            where vision and text interact.
-            Shape ``(seq_len, hidden_dim)``.
+        post_fusion_features: Vision-token slice from the selected
+            post-fusion hidden state. Shape ``(num_vis_tokens, hidden_dim)``
+            when the vision-token range is known.
+        post_fusion_all_features: Full multimodal hidden state from the
+            selected post-fusion layer, including both language and vision
+            tokens. Shape ``(seq_len, hidden_dim)``.
         vision_tokens: Raw vision encoder output (same as pre_fusion but
             possibly un-projected).
         patch_grid: ``(H_patches, W_patches)`` so attention can be reshaped
@@ -33,8 +36,11 @@ class HookOutputs:
     """
 
     cross_attention_weights: Optional[List[torch.Tensor]] = None
+    cross_attention_layer_indices: Optional[List[int]] = None
     pre_fusion_features: Optional[torch.Tensor] = None
     post_fusion_features: Optional[torch.Tensor] = None
+    post_fusion_all_features: Optional[torch.Tensor] = None
+    post_fusion_layer_index: Optional[int] = None
     vision_tokens: Optional[torch.Tensor] = None
     patch_grid: Optional[Tuple[int, int]] = None
     vision_token_range: Optional[Tuple[int, int]] = None
@@ -109,6 +115,8 @@ class VLMAdapter(ABC):
         extract_pre_fusion: bool = True,
         extract_post_fusion: bool = True,
         layer_stride: int = 1,
+        post_fusion_layer_index: Optional[int] = None,
+        post_fusion_layer_fraction: float = 0.8,
     ) -> HookOutputs:
         """Run forward pass with hooks to extract internal representations.
 
@@ -121,6 +129,10 @@ class VLMAdapter(ABC):
             extract_pre_fusion: Capture vision features before fusion.
             extract_post_fusion: Capture features after fusion.
             layer_stride: Extract attention from every Nth layer (saves memory).
+            post_fusion_layer_index: Optional explicit hidden-state index to use
+                for post-fusion features.
+            post_fusion_layer_fraction: Default late-layer fraction used when
+                ``post_fusion_layer_index`` is not set.
 
         Returns:
             :class:`HookOutputs` with the requested tensors.

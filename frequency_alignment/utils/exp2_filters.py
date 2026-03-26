@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Tuple
+
+import numpy as np
+
+from .io import load_json
+from .layer_groups import LAYER_GROUP_ORDER
+
+
+def load_exp2_filter_bank(
+    exp2_out_dir: Path,
+) -> Tuple[
+    Dict[str, Dict[str, np.ndarray]],
+    Dict[str, Dict[Tuple[str, str], np.ndarray]],
+]:
+    average_filters: Dict[str, Dict[str, np.ndarray]] = {"overall": {}}
+    sample_filters: Dict[str, Dict[Tuple[str, str], np.ndarray]] = {"overall": {}}
+    for group_name in LAYER_GROUP_ORDER:
+        average_filters[group_name] = {}
+        sample_filters[group_name] = {}
+
+    filters_dir = exp2_out_dir / "filters"
+    level_keys = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
+    for level_key in level_keys:
+        overall_path = filters_dir / f"average_{level_key}.npy"
+        if overall_path.exists():
+            average_filters["overall"][level_key] = np.load(overall_path)
+        for group_name in LAYER_GROUP_ORDER:
+            group_path = filters_dir / f"average_{level_key}_{group_name}.npy"
+            if group_path.exists():
+                average_filters[group_name][level_key] = np.load(group_path)
+
+    power_path = exp2_out_dir / "power_spectra.json"
+    if not power_path.exists():
+        return average_filters, sample_filters
+
+    for record in load_json(power_path):
+        image_id = str(record.get("image_id"))
+        for level_key, level_data in record.get("levels", {}).items():
+            w_t = level_data.get("W_t")
+            if w_t:
+                sample_filters["overall"][(image_id, level_key)] = np.asarray(w_t, dtype=np.float64)
+            for group_name in LAYER_GROUP_ORDER:
+                group_w_t = level_data.get("layer_groups", {}).get(group_name, {}).get("W_t")
+                if group_w_t:
+                    sample_filters[group_name][(image_id, level_key)] = np.asarray(
+                        group_w_t,
+                        dtype=np.float64,
+                    )
+
+    return average_filters, sample_filters
