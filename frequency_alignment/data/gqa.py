@@ -46,6 +46,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 from .base import GranularityLevel, GranularitySample, LevelData
+from .complexity import build_semantic_complexity
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,7 @@ def build_l1_question(
         question = f"Is there a {name} in this image?"
         answer = "A"
         options = {"A": "yes", "B": "no"}
+        complexity = build_semantic_complexity(entity_names=[name], options=options)
     else:
         # Pick an absent object
         absent = list(all_object_names - {o.get("name", "") for o in sg.get("objects", {}).values()})
@@ -278,6 +280,7 @@ def build_l1_question(
         question = f"Is there a {absent_name} in this image?"
         answer = "B"
         options = {"A": "yes", "B": "no"}
+        complexity = build_semantic_complexity(entity_names=[absent_name], options=options)
 
     return LevelData(
         level=GranularityLevel.L1_COARSE,
@@ -285,6 +288,7 @@ def build_l1_question(
         options=options,
         answer_label=answer,
         question_type="object_presence",
+        **complexity,
     )
 
 
@@ -318,12 +322,18 @@ def build_l2_question(
     answer = next(l for l, v in options.items() if v == correct_val)
 
     question = f"What {cat} is the {name}?"
+    complexity = build_semantic_complexity(
+        entity_names=[name],
+        attribute_queries=[cat],
+        options=options,
+    )
     return LevelData(
         level=GranularityLevel.L2_MEDIUM,
         question=question,
         options=options,
         answer_label=answer,
         question_type=f"attribute_{cat}",
+        **complexity,
     )
 
 
@@ -365,14 +375,21 @@ def build_l3_question(
         wrong_rel = rng.choice(other_rels)
         question = f"Is the {name} {wrong_rel} the {target_name}?"
         answer = "B"
+        rel_name = wrong_rel
 
     options = {"A": "yes", "B": "no"}
+    complexity = build_semantic_complexity(
+        entity_names=[name, target_name],
+        relation_labels=[rel_name],
+        options=options,
+    )
     return LevelData(
         level=GranularityLevel.L3_FINE,
         question=question,
         options=options,
         answer_label=answer,
         question_type="spatial_relationship",
+        **complexity,
     )
 
 
@@ -428,12 +445,19 @@ def build_l4_question(
     question = (
         f"What {cat} is the {name} that is {rel_name} the {target_name}?"
     )
+    complexity = build_semantic_complexity(
+        entity_names=[name, target_name],
+        attribute_queries=[cat],
+        relation_labels=[rel_name],
+        options=options,
+    )
     return LevelData(
         level=GranularityLevel.L4_VERY_FINE,
         question=question,
         options=options,
         answer_label=answer,
         question_type=f"compositional_{cat}",
+        **complexity,
     )
 
 

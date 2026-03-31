@@ -30,8 +30,24 @@ data:
 perturbations:
   severity_levels:
     - 1
+  # Save clean + all perturbation images for the first N successful samples per experiment. Use 0 to disable.
+  export_num_images: 1
+  # Overlay families are task-agnostic by default so the same nuisance text/box perturbations
+  # are reused across L1-L4 without accidentally encoding answer labels.
+  overlay_mode: label_free
+  overlay_count: 3
   include_natural: true
   include_frequency: False
+  # natural_types:
+  #   - translation
+  #   - padcrop
+  #   - scale
+  #   - scalepad_black
+  #   - scalepad_white
+  #   - rotation
+  #   - text_overlay
+  #   - box_overlay
+  #   - random_text
   natural_types:
     - translation
     - padcrop
@@ -39,9 +55,9 @@ perturbations:
     - scalepad_black
     - scalepad_white
     - rotation
-    - text_overlay
-    - box_overlay
-    - random_text
+    # - text_overlay
+    # - box_overlay
+    # - random_text
   frequency_types:
     - lowpass_keep
     - highpass_keep
@@ -50,17 +66,27 @@ perturbations:
     - allband_noise
   severity_params:
     1:
-      translate: 4
-      padcrop: 4
+      translate: 8
+      padcrop: 8
       scale: 0.95
-      rotation: 10
+      rotation: 20
       freq_cutoff: 0.18
       freq_epsilon: 0.03137
       text_scale: 0.3
 
 analysis:
-  num_bands: 20
-  suppress_dc: true
+  # Fallback manual band count. In auto mode the runner probes a few real images,
+  # infers the model patch grid, and freezes one run-level count from the median grid.
+  num_bands: 12
+  num_bands_mode: auto
+  num_bands_auto:
+    probe_samples: 6
+    coefficient: 0.6
+    rounding: ceil
+    statistic: median
+    min_bands: 8
+    max_bands: 20
+  suppress_dc: false
   attention_layers: all
   # Set to hann / hamming to enable windowing, or none / off / false to disable it.
   attention_fft_window: none

@@ -32,6 +32,12 @@ class LevelData:
     segmentation: Any = None
     # Metadata:
     question_type: Optional[str] = None  # e.g. "object_presence", "attribute", etc.
+    semantic_atoms: List[str] = field(default_factory=list)
+    prompt_semantic_atoms: List[str] = field(default_factory=list)
+    semantic_atom_counts: Dict[str, int] = field(default_factory=dict)
+    question_complexity_score: float = 0.0
+    prompt_complexity_score: float = 0.0
+    complexity_score: float = 0.0
 
 
 @dataclass

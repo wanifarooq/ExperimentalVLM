@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from PIL import Image
 
+from ..analysis.continuous import summarize_by_score, summarize_linear_trend
 from ..analysis.spectral import compute_feature_spectral_signature_stats
 from ..analysis.statistics import (
     bootstrap_ci,
@@ -37,9 +38,14 @@ from ..data.base import (
     GranularityLevel,
     GranularitySample,
 )
+from ..data.complexity import ensure_level_complexity
 from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
-from ..perturbations import build_perturbation_suite, PerturbationResult
+from ..perturbations import (
+    PerturbationResult,
+    build_perturbation_suite,
+    export_perturbation_suite_images,
+)
 from ..utils.device import select_device
 from ..utils.io import save_json
 from ..utils.parent_bridge import dirichlet_energy_from_tokens
@@ -80,6 +86,67 @@ def _compute_cosine_drift(
         return 0.0
     cos_sim = np.dot(c, p) / (np.linalg.norm(c) * np.linalg.norm(p))
     return float(1.0 - cos_sim)
+
+
+def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    for record in per_sample:
+        image_id = str(record.get("image_id"))
+        for level_key, level_data in record.get("levels", {}).items():
+            perturbations = level_data.get("perturbations", [])
+            if not perturbations:
+                continue
+            drops = [float(item.get("accuracy_drop", 0.0)) for item in perturbations]
+            drifts = [
+                float(item.get("loglik_drift", 0.0))
+                for item in perturbations
+                if item.get("loglik_drift") is not None
+            ]
+            point = {
+                "image_id": image_id,
+                "level": level_key,
+                "question": level_data.get("question"),
+                "question_type": level_data.get("question_type"),
+                "complexity_score": float(level_data.get("complexity_score", 0.0) or 0.0),
+                "question_complexity_score": float(
+                    level_data.get("question_complexity_score", 0.0) or 0.0
+                ),
+                "prompt_complexity_score": float(
+                    level_data.get("prompt_complexity_score", 0.0) or 0.0
+                ),
+                "mean_accuracy_drop": float(np.mean(drops)) if drops else 0.0,
+                "mean_loglik_drift": float(np.mean(drifts)) if drifts else 0.0,
+                "num_perturbations": len(perturbations),
+            }
+            points.append(point)
+    return points
+
+
+def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not points:
+        return {}
+    complexity_values = [
+        float(point.get("complexity_score", 0.0))
+        for point in points
+        if point.get("complexity_score") is not None
+    ]
+    return {
+        "score_name": "complexity_score",
+        "score_definition": "semantic prompt atoms (question semantics plus non-boolean option semantics)",
+        "score_min": float(min(complexity_values)) if complexity_values else 0.0,
+        "score_max": float(max(complexity_values)) if complexity_values else 0.0,
+        "num_points": len(points),
+        "mean_accuracy_drop_by_score": summarize_by_score(
+            points,
+            score_key="complexity_score",
+            value_key="mean_accuracy_drop",
+        ),
+        "mean_loglik_drift_by_score": summarize_by_score(
+            points,
+            score_key="complexity_score",
+            value_key="mean_loglik_drift",
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +249,17 @@ def _evaluate_sample(
             continue
 
         level_key = level.name  # e.g. "L1_COARSE"
+        complexity = ensure_level_complexity(level_data)
         level_record: Dict[str, Any] = {
             "question": level_data.question,
+            "question_type": level_data.question_type,
             "answer_label": level_data.answer_label,
+            "complexity_score": complexity["complexity_score"],
+            "question_complexity_score": complexity["question_complexity_score"],
+            "prompt_complexity_score": complexity["prompt_complexity_score"],
+            "semantic_atoms": complexity["semantic_atoms"],
+            "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],
+            "semantic_atom_counts": complexity["semantic_atom_counts"],
             "clean": {},
             "perturbations": [],
         }
@@ -363,6 +438,7 @@ def _aggregate_results(
 
 def _run_hypothesis_tests(
     agg: Dict[str, Any],
+    complexity_points: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run statistical tests on aggregated results.
 
@@ -461,6 +537,20 @@ def _run_hypothesis_tests(
     tests["num_criteria_passed"] = sum(1 for t in core_tests if t)
     tests["num_criteria_total"] = len(core_tests)
 
+    if complexity_points:
+        tests["continuous_complexity"] = {
+            "mean_accuracy_drop_vs_complexity": summarize_linear_trend(
+                complexity_points,
+                x_key="complexity_score",
+                y_key="mean_accuracy_drop",
+            ),
+            "mean_loglik_drift_vs_complexity": summarize_linear_trend(
+                complexity_points,
+                x_key="complexity_score",
+                y_key="mean_loglik_drift",
+            ),
+        }
+
     return tests
 
 
@@ -530,6 +620,8 @@ def run_exp1(
     severity_levels = pert_cfg.get("severity_levels", [1, 2, 3])
     num_bands = cfg.get("analysis", {}).get("num_bands", 10)
     suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
+    export_num_images = max(0, int(pert_cfg.get("export_num_images", 1) or 0))
+    exported_examples = 0
 
     # Whether to extract vision tokens for cosine drift (slower)
     extract_vision_tokens = exp_cfg.get("extract_vision_tokens", False)
@@ -563,6 +655,8 @@ def run_exp1(
             frequency_types=pert_cfg.get("frequency_types"),
             severity_params=pert_cfg.get("severity_params"),
             seed=seed + idx,
+            overlay_mode=pert_cfg.get("overlay_mode", "label_free"),
+            overlay_count=int(pert_cfg.get("overlay_count", 3)),
             overlay_options=overlay_options,
             overlay_base_label=overlay_base_label,
             overlay_seed=seed + idx,
@@ -571,6 +665,23 @@ def run_exp1(
         if not perturbations:
             logger.warning("No perturbations for sample %s", sample.image_id)
             continue
+
+        if exported_examples < export_num_images:
+            try:
+                export_dir = out_dir / "perturbation_examples"
+                export_perturbation_suite_images(
+                    image,
+                    perturbations,
+                    export_dir,
+                    sample.image_id,
+                )
+                exported_examples += 1
+            except Exception as exc:
+                logger.warning(
+                    "Could not export perturbation images for %s: %s",
+                    sample.image_id,
+                    exc,
+                )
 
         # Evaluate across all levels and perturbations
         record = _evaluate_sample(
@@ -601,9 +712,11 @@ def run_exp1(
 
     # --- Aggregate results ---
     agg = _aggregate_results(per_sample_results)
+    complexity_points = _build_complexity_points(per_sample_results)
+    agg["complexity_analysis"] = _summarize_complexity(complexity_points)
 
     # --- Hypothesis testing ---
-    hypothesis_tests = _run_hypothesis_tests(agg)
+    hypothesis_tests = _run_hypothesis_tests(agg, complexity_points)
 
     # --- Log key results ---
     logger.info("-" * 40)
@@ -631,6 +744,7 @@ def run_exp1(
     # --- Save outputs ---
     save_json(agg, out_dir / "summary.json")
     save_json(hypothesis_tests, out_dir / "hypothesis_tests.json")
+    save_json(complexity_points, out_dir / "complexity_points.json")
 
     # Save per-sample as JSONL
     jsonl_path = out_dir / "per_sample.jsonl"
@@ -666,6 +780,9 @@ def run_exp1(
         },
         "spearman_rho": spearman.get("rho", 0),
         "spearman_p": spearman.get("p_value", 1),
+        "complexity_pearson_drop": hypothesis_tests.get("continuous_complexity", {})
+        .get("mean_accuracy_drop_vs_complexity", {})
+        .get("pearson_r", 0.0),
     }
 
     return ExperimentResult(

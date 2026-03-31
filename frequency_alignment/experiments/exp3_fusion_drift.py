@@ -40,7 +40,7 @@ from ..analysis.statistics import pearson_correlation, spearman_correlation
 from ..data.base import ExperimentResult, GranularityLevel
 from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
-from ..perturbations import build_perturbation_suite
+from ..perturbations import build_perturbation_suite, export_perturbation_suite_images
 from ..utils.device import select_device
 from ..utils.exp2_filters import load_exp2_filter_bank
 from ..utils.io import save_json
@@ -284,6 +284,8 @@ def run_exp3(
 
     pert_cfg_global = cfg.get("perturbations", {})
     severity_levels = pert_cfg_global.get("severity_levels", [1, 2, 3])
+    export_num_images = max(0, int(pert_cfg_global.get("export_num_images", 1) or 0))
+    exported_examples = 0
 
     per_sample: List[Dict[str, Any]] = []
     observations: List[Dict[str, Any]] = []
@@ -328,6 +330,8 @@ def run_exp3(
             frequency_types=pert_cfg_global.get("frequency_types"),
             severity_params=pert_cfg_global.get("severity_params"),
             seed=seed + idx,
+            overlay_mode=pert_cfg_global.get("overlay_mode", "label_free"),
+            overlay_count=int(pert_cfg_global.get("overlay_count", 3)),
             overlay_options=overlay_options,
             overlay_base_label=overlay_base_label,
             overlay_seed=seed + idx,
@@ -336,6 +340,23 @@ def run_exp3(
             perturbations = perturbations[:pert_subset]
         if not perturbations:
             continue
+
+        if exported_examples < export_num_images:
+            try:
+                export_dir = out_dir / "perturbation_examples"
+                export_perturbation_suite_images(
+                    image,
+                    perturbations,
+                    export_dir,
+                    sample.image_id,
+                )
+                exported_examples += 1
+            except Exception as exc:
+                logger.warning(
+                    "Could not export perturbation images for %s: %s",
+                    sample.image_id,
+                    exc,
+                )
 
         sample_record: Dict[str, Any] = {
             "image_id": sample.image_id,

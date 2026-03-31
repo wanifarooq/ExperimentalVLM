@@ -17,7 +17,7 @@ from ..data.base import ExperimentResult, GranularityLevel, LevelData
 from ..data.loaders import load_segmentation_dataset
 from ..data.partimagenet import mask_to_box, segmentation_to_mask
 from ..models.sam_adapters import SegmentationAdapter, mask_iou
-from ..perturbations import build_perturbation_suite
+from ..perturbations import build_perturbation_suite, export_perturbation_suite_images
 from ..utils.io import save_json
 
 logger = logging.getLogger(__name__)
@@ -129,6 +129,8 @@ def run_exp6(
 
     pert_cfg = cfg.get("perturbations", {})
     severity_levels = pert_cfg.get("severity_levels", [1, 2, 3])
+    export_num_images = max(0, int(pert_cfg.get("export_num_images", 1) or 0))
+    exported_examples = 0
 
     per_sample: List[Dict[str, Any]] = []
     model_level_drops: Dict[str, Dict[str, List[float]]] = {
@@ -159,10 +161,29 @@ def run_exp6(
             frequency_types=pert_cfg.get("frequency_types"),
             severity_params=pert_cfg.get("severity_params"),
             seed=seed + idx,
+            overlay_mode=pert_cfg.get("overlay_mode", "label_free"),
+            overlay_count=int(pert_cfg.get("overlay_count", 3)),
             overlay_options=overlay_options,
             overlay_base_label=overlay_base_label,
             overlay_seed=seed + idx,
         )
+        eval_perturbations = perturbations[:10]
+        if exported_examples < export_num_images and eval_perturbations:
+            try:
+                export_dir = out_dir / "perturbation_examples"
+                export_perturbation_suite_images(
+                    image,
+                    eval_perturbations,
+                    export_dir,
+                    sample.image_id,
+                )
+                exported_examples += 1
+            except Exception as exc:
+                logger.warning(
+                    "Could not export perturbation images for %s: %s",
+                    sample.image_id,
+                    exc,
+                )
 
         sample_record: Dict[str, Any] = {"image_id": sample.image_id, "models": {}}
         for model_name, adapter in models_to_eval.items():
@@ -195,7 +216,7 @@ def run_exp6(
 
                 model_level_clean[model_name][level_key].append(clean_iou)
                 pert_records = []
-                for perturbation in perturbations[:10]:
+                for perturbation in eval_perturbations:
                     pert_gt_mask = _transform_mask(
                         gt_mask,
                         perturbation.perturbed_image.size,

@@ -17,6 +17,7 @@ from typing import Dict, List
 
 from .utils.io import load_yaml, merge_configs, save_json, ensure_dir
 from .utils.device import select_device, get_dtype, gpu_memory_gb
+from .utils.band_selection import resolve_num_bands_config
 from .data.base import ExperimentResult
 
 logger = logging.getLogger("frequency_alignment")
@@ -167,12 +168,22 @@ def main() -> None:
         return
 
     exp_ids = resolve_experiments(args.experiment)
+    cfg = resolve_num_bands_config(cfg, exp_ids)
 
     # Device info
     device = select_device(cfg.get("device", "auto"))
     dtype = get_dtype(device)
     vram = gpu_memory_gb(device)
     logger.info("Device: %s  dtype: %s  VRAM: %.1f GB", device, dtype, vram)
+    num_bands_resolution = cfg.get("analysis", {}).get("num_bands_resolution", {})
+    if num_bands_resolution:
+        logger.info(
+            "Spectral bins: requested=%s resolved=%s mode=%s status=%s",
+            num_bands_resolution.get("requested_num_bands", cfg.get("analysis", {}).get("num_bands")),
+            num_bands_resolution.get("resolved_num_bands", cfg.get("analysis", {}).get("num_bands")),
+            num_bands_resolution.get("mode", cfg.get("analysis", {}).get("num_bands_mode", "fixed")),
+            num_bands_resolution.get("status", "unknown"),
+        )
 
     # Output directory
     out_dir = ensure_dir(cfg.get("out_dir", "frequency_alignment_outputs"))

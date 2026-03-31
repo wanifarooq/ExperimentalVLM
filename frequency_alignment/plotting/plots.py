@@ -49,6 +49,7 @@ _FULL_PLOT_PROFILES = {"full", "exhaustive", "all"}
 _PLOT_MANIFEST: List[Dict[str, Any]] = []
 _DEFAULT_SUPPRESS_DC = True
 _LOG_FLOOR = 1e-10
+_DEFAULT_SPECTRAL_LOG_AXES = True
 
 
 def _metadata_lines(*parts: Optional[str]) -> List[str]:
@@ -96,6 +97,33 @@ def _apply_style(ax: plt.Axes) -> None:
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=10)
+
+
+def _spectral_plot_values(values: Sequence[float]) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    return np.clip(arr, _LOG_FLOOR, None)
+
+
+def _apply_spectral_axis_scale(
+    ax: plt.Axes,
+    *,
+    use_log_axes: bool = _DEFAULT_SPECTRAL_LOG_AXES,
+) -> None:
+    if not use_log_axes:
+        return
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+
+
+def _zscore_for_plot(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return arr
+    mean = float(np.mean(arr))
+    std = float(np.std(arr))
+    if std <= _LOG_FLOOR:
+        return arr - mean
+    return (arr - mean) / std
 
 
 def _figure_title(fig: plt.Figure) -> str:
@@ -247,11 +275,6 @@ def _spectral_x_positions(length: int, suppress_dc: bool = _DEFAULT_SUPPRESS_DC)
     return np.clip(np.asarray(centers, dtype=np.float64), _LOG_FLOOR, None)
 
 
-def _clip_for_log(values: Sequence[float]) -> np.ndarray:
-    arr = np.asarray(values, dtype=np.float64)
-    return np.clip(arr, _LOG_FLOOR, None)
-
-
 def _write_plot_manifest(plots_dir: Path, profile: str) -> None:
     manifest = {
         "profile": profile,
@@ -272,6 +295,54 @@ def _sort_metric_rows(
     order = np.argsort(np.nan_to_num(scores, nan=-np.inf))[::-1]
     order = order[: min(max_rows, len(order))]
     return [row_labels[idx] for idx in order], matrix[order]
+
+
+def _record_image_id(record: Dict[str, Any]) -> Optional[str]:
+    image_id = record.get("image_id")
+    if image_id is None:
+        return None
+    return str(image_id)
+
+
+def _select_records_by_preferred_ids(
+    records: List[Dict[str, Any]],
+    preferred_ids: Optional[Sequence[str]],
+    *,
+    max_samples: int,
+    fallback_selector,
+) -> List[Dict[str, Any]]:
+    if max_samples <= 0:
+        return []
+
+    selected: List[Dict[str, Any]] = []
+    seen_ids = set()
+    records_by_id: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        image_id = _record_image_id(record)
+        if image_id is None or image_id in records_by_id:
+            continue
+        records_by_id[image_id] = record
+
+    for image_id in preferred_ids or []:
+        image_id = str(image_id)
+        record = records_by_id.get(image_id)
+        if record is None or image_id in seen_ids:
+            continue
+        selected.append(record)
+        seen_ids.add(image_id)
+        if len(selected) >= max_samples:
+            return selected
+
+    for record in fallback_selector(records, max_samples=max_samples):
+        image_id = _record_image_id(record)
+        if image_id is None or image_id in seen_ids:
+            continue
+        selected.append(record)
+        seen_ids.add(image_id)
+        if len(selected) >= max_samples:
+            break
+
+    return selected
 
 
 def _plot_heatmap(
@@ -464,11 +535,11 @@ def _plot_sample_profile_grid(
         labels = list(series.keys())
         cmap = plt.cm.get_cmap("tab20", max(1, len(labels)))
         for idx, label in enumerate(labels):
-            values = np.asarray(series[label], dtype=float)
+            values = _spectral_plot_values(series[label])
             x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
             axis.plot(
                 x_values,
-                _clip_for_log(values),
+                values,
                 linewidth=1.5,
                 alpha=0.9,
                 label=label,
@@ -477,11 +548,11 @@ def _plot_sample_profile_grid(
 
         overlay = None if overlay_by_level is None else overlay_by_level.get(level)
         if overlay is not None:
-            overlay_values = np.asarray(overlay, dtype=float)
+            overlay_values = _spectral_plot_values(overlay)
             overlay_x = _spectral_x_positions(len(overlay_values), suppress_dc=suppress_dc)
             axis.plot(
                 overlay_x,
-                _clip_for_log(overlay_values),
+                overlay_values,
                 linewidth=2.4,
                 linestyle="--",
                 color="black",
@@ -490,11 +561,10 @@ def _plot_sample_profile_grid(
             )
 
         axis.set_title(_level_label(level), fontsize=11)
-        axis.set_xlabel("Normalized Frequency (log scale)", fontsize=10)
+        axis.set_xlabel("Normalized Frequency", fontsize=10)
         axis.set_ylabel(ylabel, fontsize=10)
-        axis.set_xscale("log")
-        axis.set_yscale("log")
-        axis.grid(alpha=0.2, linewidth=0.6, which="both")
+        axis.grid(alpha=0.2, linewidth=0.6)
+        _apply_spectral_axis_scale(axis)
         _apply_style(axis)
 
     handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
@@ -590,18 +660,17 @@ def plot_attention_power_spectrum(
         x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
         ax.plot(
             x_values,
-            _clip_for_log(values),
+            _spectral_plot_values(values),
             marker="o",
             linewidth=2.0,
             color=_LEVEL_COLORS.get(level, "#999"),
             label=_level_label(level),
         )
-    ax.set_xlabel("Normalized Frequency (log scale)", fontsize=11)
+    ax.set_xlabel("Normalized Frequency", fontsize=11)
     ax.set_ylabel("Normalized Attention Power", fontsize=11)
     ax.set_title(title, fontsize=13)
-    ax.set_xscale("log")
-    ax.set_yscale("log")
     ax.legend(fontsize=9)
+    _apply_spectral_axis_scale(ax)
     _apply_style(ax)
     _set_plot_metadata(
         fig,
@@ -750,20 +819,35 @@ def plot_overlap_scatter(
     point_size: float = 40,
     alpha: float = 0.7,
     y_label: str = "Observed Accuracy Drop",
+    scale_mode: str = "raw",
     metadata: Optional[Sequence[str]] = None,
 ) -> None:
     if not scatter_data:
         return
 
+    preds = np.asarray([item["predicted"] for item in scatter_data], dtype=float)
+    actuals = np.asarray([item["actual"] for item in scatter_data], dtype=float)
+    plot_x = preds
+    plot_y = actuals
+    x_label = "Predicted Sensitivity (spectral overlap)"
+    displayed_y_label = y_label
+    scale_note = None
+    if str(scale_mode).strip().lower() == "zscore":
+        plot_x = _zscore_for_plot(preds)
+        plot_y = _zscore_for_plot(actuals)
+        x_label = "Predicted Sensitivity (z-score)"
+        displayed_y_label = f"{y_label} (z-score)"
+        scale_note = "Axes are z-scored for visualization only; correlation uses raw values"
+
     fig, ax = plt.subplots(figsize=(7.1, 6.0))
-    for item in scatter_data:
+    for idx, item in enumerate(scatter_data):
         level = item.get("level")
         if level is None:
             label = item.get("label", "")
             level = label.split("|", 1)[0] if "|" in label else "unknown"
         ax.scatter(
-            item["predicted"],
-            item["actual"],
+            plot_x[idx],
+            plot_y[idx],
             s=point_size,
             alpha=alpha,
             color=_LEVEL_COLORS.get(level, "#999"),
@@ -771,16 +855,14 @@ def plot_overlap_scatter(
             linewidth=0.5,
         )
 
-    preds = np.asarray([item["predicted"] for item in scatter_data], dtype=float)
-    actuals = np.asarray([item["actual"] for item in scatter_data], dtype=float)
-    if len(preds) > 2 and np.unique(preds).size > 1:
-        fit = np.polyfit(preds, actuals, 1)
+    if len(plot_x) > 2 and np.unique(plot_x).size > 1:
+        fit = np.polyfit(plot_x, plot_y, 1)
         curve = np.poly1d(fit)
-        xs = np.linspace(preds.min(), preds.max(), 100)
+        xs = np.linspace(plot_x.min(), plot_x.max(), 100)
         ax.plot(xs, curve(xs), "k--", linewidth=1.5, alpha=0.65)
 
-    ax.set_xlabel("Predicted Sensitivity (spectral overlap)", fontsize=11)
-    ax.set_ylabel(y_label, fontsize=11)
+    ax.set_xlabel(x_label, fontsize=11)
+    ax.set_ylabel(displayed_y_label, fontsize=11)
     ax.set_title(f"{title} (r = {pearson_r:.3f})", fontsize=13)
 
     handles = [
@@ -794,12 +876,241 @@ def plot_overlap_scatter(
         metadata
         or _metadata_lines(
             "View=scatter",
-            "X=predicted spectral overlap",
-            f"Y={y_label}",
+            f"X={x_label}",
+            f"Y={displayed_y_label}",
             f"Points={len(scatter_data)}",
+            scale_note,
         ),
     )
     _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def _complexity_valid_points(
+    points: Sequence[Dict[str, Any]],
+    *,
+    x_key: str,
+    y_key: str,
+) -> List[Dict[str, Any]]:
+    valid: List[Dict[str, Any]] = []
+    for point in points:
+        x_val = point.get(x_key)
+        y_val = point.get(y_key)
+        if x_val is None or y_val is None:
+            continue
+        x_float = float(x_val)
+        y_float = float(y_val)
+        if not np.isfinite(x_float) or not np.isfinite(y_float):
+            continue
+        valid.append(point)
+    return valid
+
+
+def _plot_complexity_scatter_on_axis(
+    ax: plt.Axes,
+    points: Sequence[Dict[str, Any]],
+    *,
+    x_key: str = "complexity_score",
+    y_key: str,
+    y_label: str,
+    title: str,
+) -> None:
+    valid = _complexity_valid_points(points, x_key=x_key, y_key=y_key)
+    if not valid:
+        ax.axis("off")
+        return
+
+    levels = _ordered_levels({point.get("level") for point in valid if point.get("level")})
+    for level in levels:
+        level_points = [point for point in valid if point.get("level") == level]
+        xs = np.asarray([float(point[x_key]) for point in level_points], dtype=float)
+        ys = np.asarray([float(point[y_key]) for point in level_points], dtype=float)
+        ax.scatter(
+            xs,
+            ys,
+            s=36,
+            alpha=0.68,
+            color=_LEVEL_COLORS.get(level, "#999999"),
+            edgecolors="white",
+            linewidth=0.4,
+            label=_level_label(level),
+        )
+
+    grouped: Dict[float, List[float]] = {}
+    for point in valid:
+        grouped.setdefault(float(point[x_key]), []).append(float(point[y_key]))
+    mean_x = np.asarray(sorted(grouped), dtype=float)
+    mean_y = np.asarray([float(np.mean(grouped[x])) for x in mean_x], dtype=float)
+    ax.plot(
+        mean_x,
+        mean_y,
+        color="black",
+        linewidth=1.8,
+        marker="o",
+        markersize=4.5,
+        alpha=0.85,
+        label="Mean by score",
+    )
+
+    raw_x = np.asarray([float(point[x_key]) for point in valid], dtype=float)
+    raw_y = np.asarray([float(point[y_key]) for point in valid], dtype=float)
+    if raw_x.size >= 3 and np.unique(raw_x).size > 1:
+        slope, intercept = np.polyfit(raw_x, raw_y, 1)
+        grid_x = np.linspace(raw_x.min(), raw_x.max(), 100)
+        ax.plot(
+            grid_x,
+            slope * grid_x + intercept,
+            linestyle="--",
+            color="#222222",
+            linewidth=1.5,
+            alpha=0.7,
+            label="Linear fit",
+        )
+
+    ax.set_xlabel("Semantic Complexity Score", fontsize=10)
+    ax.set_ylabel(y_label, fontsize=10)
+    ax.set_title(title, fontsize=12)
+    ax.grid(alpha=0.2, linewidth=0.6)
+    _apply_style(ax)
+
+
+def plot_complexity_scatter(
+    points: Sequence[Dict[str, Any]],
+    *,
+    y_key: str,
+    y_label: str,
+    out_path: Path,
+    title: str,
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    valid = _complexity_valid_points(points, x_key="complexity_score", y_key=y_key)
+    if not valid:
+        return
+    fig, ax = plt.subplots(figsize=(7.8, 5.6))
+    _plot_complexity_scatter_on_axis(
+        ax,
+        valid,
+        y_key=y_key,
+        y_label=y_label,
+        title=title,
+    )
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(fontsize=8, loc="best")
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=scatter",
+            "X=semantic complexity score",
+            f"Y={y_label}",
+            "Points=per-image per-level summaries",
+            "Black line=mean by exact score; dashed line=linear fit",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def _plot_exp2_complexity_groups(
+    points: Sequence[Dict[str, Any]],
+    out_path: Path,
+    profile: str = _DEFAULT_PLOT_PROFILE,
+) -> None:
+    panels = [
+        ("overall", "bandwidth", "Overall"),
+        ("early", "bandwidth_early", "Early"),
+        ("mid", "bandwidth_mid", "Mid"),
+        ("late", "bandwidth_late", "Late"),
+    ]
+    valid_panels = [
+        (group_name, y_key, title)
+        for group_name, y_key, title in panels
+        if _complexity_valid_points(points, x_key="complexity_score", y_key=y_key)
+    ]
+    if not valid_panels:
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(12.8, 9.0), sharex=True)
+    axes_arr = np.atleast_1d(axes).reshape(2, 2)
+    for axis in axes_arr.ravel()[len(valid_panels):]:
+        axis.axis("off")
+
+    for axis, (_, y_key, panel_title) in zip(axes_arr.ravel(), valid_panels):
+        _plot_complexity_scatter_on_axis(
+            axis,
+            points,
+            y_key=y_key,
+            y_label="Effective Bandwidth G(t)",
+            title=panel_title,
+        )
+
+    handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8)
+    fig.suptitle("Bandwidth vs Semantic Complexity by Layer Group", fontsize=14, y=0.99)
+    _set_plot_metadata(
+        fig,
+        _plot_metadata(
+            experiment="2",
+            what="Continuous semantic complexity vs effective bandwidth",
+            aggregation="per-image per-level points",
+            x="semantic complexity score",
+            y="effective bandwidth G(t)",
+            note="Black line is mean by exact score; dashed line is linear fit",
+            profile=profile,
+        ),
+    )
+    _tight_layout(fig, metadata_bottom=0.07, top=0.96)
+    _save_fig(fig, out_path)
+
+
+def _plot_exp4_complexity_modes(
+    points: Sequence[Dict[str, Any]],
+    out_path: Path,
+    profile: str = _DEFAULT_PLOT_PROFILE,
+) -> None:
+    mode_order = ["lowpass", "highpass"]
+    valid_modes = [
+        mode for mode in mode_order
+        if _complexity_valid_points(
+            [point for point in points if point.get("mode") == mode],
+            x_key="complexity_score",
+            y_key="critical_cutoff",
+        )
+    ]
+    if not valid_modes:
+        return
+
+    fig, axes = plt.subplots(1, len(valid_modes), figsize=(6.4 * len(valid_modes), 5.1), sharey=True)
+    axes_arr = np.atleast_1d(axes)
+    for axis, mode in zip(axes_arr, valid_modes):
+        mode_points = [point for point in points if point.get("mode") == mode]
+        _plot_complexity_scatter_on_axis(
+            axis,
+            mode_points,
+            y_key="critical_cutoff",
+            y_label="Critical Cutoff",
+            title=mode.capitalize(),
+        )
+
+    handles, labels = axes_arr[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8)
+    fig.suptitle("Critical Cutoff vs Semantic Complexity", fontsize=14, y=0.99)
+    _set_plot_metadata(
+        fig,
+        _plot_metadata(
+            experiment="4",
+            what="Continuous semantic complexity vs critical cutoff",
+            aggregation="per-image per-level points",
+            x="semantic complexity score",
+            y="critical cutoff",
+            note="Black line is mean by exact score; dashed line is linear fit",
+            profile=profile,
+        ),
+    )
+    _tight_layout(fig, metadata_bottom=0.07, top=0.96)
     _save_fig(fig, out_path)
 
 
@@ -1240,7 +1551,7 @@ def _plot_exp2_group_spectra(
             x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
             axis.plot(
                 x_values,
-                _clip_for_log(values),
+                _spectral_plot_values(values),
                 marker="o",
                 markersize=3.5,
                 linewidth=1.8,
@@ -1248,10 +1559,9 @@ def _plot_exp2_group_spectra(
                 label=_level_label(level),
             )
         axis.set_title(group_name.capitalize(), fontsize=12)
-        axis.set_xlabel("Normalized Frequency (log scale)", fontsize=10)
-        axis.set_xscale("log")
-        axis.set_yscale("log")
-        axis.grid(alpha=0.2, linewidth=0.6, which="both")
+        axis.set_xlabel("Normalized Frequency", fontsize=10)
+        axis.grid(alpha=0.2, linewidth=0.6)
+        _apply_spectral_axis_scale(axis)
         _apply_style(axis)
     axes_arr[0].set_ylabel("W_t(omega)", fontsize=10)
 
@@ -1308,10 +1618,16 @@ def _plot_exp2_selected_samples(
     records: List[Dict[str, Any]],
     out_dir: Path,
     max_samples: int = 3,
+    preferred_sample_ids: Optional[Sequence[str]] = None,
     profile: str = _DEFAULT_PLOT_PROFILE,
     suppress_dc: bool = _DEFAULT_SUPPRESS_DC,
 ) -> None:
-    selected = _select_exp2_samples(records, max_samples=max_samples)
+    selected = _select_records_by_preferred_ids(
+        records,
+        preferred_sample_ids,
+        max_samples=max_samples,
+        fallback_selector=_select_exp2_samples,
+    )
     if not selected:
         return
 
@@ -1331,7 +1647,7 @@ def _plot_exp2_selected_samples(
             x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
             axis.plot(
                 x_values,
-                _clip_for_log(values),
+                _spectral_plot_values(values),
                 linewidth=2.0,
                 marker="o",
                 markersize=3.5,
@@ -1339,11 +1655,10 @@ def _plot_exp2_selected_samples(
                 label=_level_label(level),
             )
         axis.set_title(_short_sample_id(sample_id, 28), fontsize=11)
-        axis.set_xlabel("Normalized Frequency (log scale)", fontsize=10)
+        axis.set_xlabel("Normalized Frequency", fontsize=10)
         axis.set_ylabel("W_t(omega)", fontsize=10)
-        axis.set_xscale("log")
-        axis.set_yscale("log")
-        axis.grid(alpha=0.2, linewidth=0.6, which="both")
+        axis.grid(alpha=0.2, linewidth=0.6)
+        _apply_spectral_axis_scale(axis)
         _apply_style(axis)
 
     handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
@@ -1358,7 +1673,7 @@ def _plot_exp2_selected_samples(
             aggregation="one panel per selected image",
             x="radial frequency band (low→high)",
             y="W_t(omega)",
-            selection=f"top {len(selected)} images by mean bandwidth",
+            selection="preferred Exp 1 representative images when available; otherwise top images by mean bandwidth",
             profile=profile,
         ),
     )
@@ -1409,7 +1724,7 @@ def _plot_exp2_matched_sample_group_comparison(
             x_values = _spectral_x_positions(len(values), suppress_dc=suppress_dc)
             axis.plot(
                 x_values,
-                _clip_for_log(values),
+                _spectral_plot_values(values),
                 linewidth=2.0,
                 marker="o",
                 markersize=3.5,
@@ -1417,11 +1732,10 @@ def _plot_exp2_matched_sample_group_comparison(
                 label=_level_label(level),
             )
         axis.set_title(group_name.capitalize(), fontsize=11)
-        axis.set_xlabel("Normalized Frequency (log scale)", fontsize=10)
+        axis.set_xlabel("Normalized Frequency", fontsize=10)
         axis.set_ylabel("W_t(omega)", fontsize=10)
-        axis.set_xscale("log")
-        axis.set_yscale("log")
-        axis.grid(alpha=0.2, linewidth=0.6, which="both")
+        axis.grid(alpha=0.2, linewidth=0.6)
+        _apply_spectral_axis_scale(axis)
         _apply_style(axis)
 
     handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
@@ -1547,7 +1861,7 @@ def _plot_exp2_control_spectra(
                 x_values = _spectral_x_positions(len(task_values), suppress_dc=suppress_dc)
                 ax.plot(
                     x_values,
-                    _clip_for_log(task_values),
+                    _spectral_plot_values(task_values),
                     linewidth=2.0,
                     color=_LEVEL_COLORS.get(level, "#999"),
                     label=f"{_level_label(level)} task",
@@ -1556,19 +1870,18 @@ def _plot_exp2_control_spectra(
                 x_values = _spectral_x_positions(len(control_values), suppress_dc=suppress_dc)
                 ax.plot(
                     x_values,
-                    _clip_for_log(control_values),
+                    _spectral_plot_values(control_values),
                     linewidth=1.8,
                     linestyle="--",
                     color=_LEVEL_COLORS.get(level, "#999"),
                     alpha=0.75,
                     label=f"{_level_label(level)} control",
                 )
-        ax.set_xlabel("Normalized Frequency (log scale)", fontsize=11)
+        ax.set_xlabel("Normalized Frequency", fontsize=11)
         ax.set_ylabel("W_t(omega)", fontsize=11)
         ax.set_title(f"Task vs {_exp2_control_label(control_name)} Spectra", fontsize=13)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        ax.grid(alpha=0.2, linewidth=0.6, which="both")
+        ax.grid(alpha=0.2, linewidth=0.6)
+        _apply_spectral_axis_scale(ax)
         _apply_style(ax)
         ax.legend(fontsize=8, ncol=2)
         _set_plot_metadata(
@@ -1780,10 +2093,16 @@ def _plot_exp4_sample_curves(
     records: List[Dict[str, Any]],
     out_dir: Path,
     max_samples: int = 3,
+    preferred_sample_ids: Optional[Sequence[str]] = None,
     profile: str = _DEFAULT_PLOT_PROFILE,
 ) -> None:
     for mode in ("lowpass", "highpass"):
-        selected = _select_exp4_samples(records, max_samples=max_samples)
+        selected = _select_records_by_preferred_ids(
+            records,
+            preferred_sample_ids,
+            max_samples=max_samples,
+            fallback_selector=_select_exp4_samples,
+        )
         if not selected:
             continue
         ncols = min(2, len(selected))
@@ -1832,7 +2151,7 @@ def _plot_exp4_sample_curves(
                 aggregation="one panel per selected image",
                 x=f"{mode} cutoff",
                 y="binary accuracy across cutoff sweep",
-                selection=f"top {len(selected)} images by mean critical cutoff",
+                selection="preferred Exp 1 representative images when available; otherwise top images by mean critical cutoff",
                 profile=profile,
             ),
         )
@@ -2031,16 +2350,56 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     exp1_summary = _load_json(results_dir / "exp1" / "summary.json")
     exp1_detail = _load_json(results_dir / "exp1" / "degradation_by_level.json")
     exp1_samples = _load_jsonl(results_dir / "exp1" / "per_sample.jsonl")
+    exp1_complexity = _load_json(results_dir / "exp1" / "complexity_points.json")
     exp2_summary = _load_json(results_dir / "exp2" / "summary.json")
     exp2_samples = _load_json(results_dir / "exp2" / "power_spectra.json")
+    exp2_complexity = _load_json(results_dir / "exp2" / "complexity_points.json")
     exp2_by_id = {
         str(record.get("image_id")): record
         for record in (exp2_samples or [])
         if record.get("image_id") is not None
     }
     selected_exp1_records = _select_exp1_samples(exp1_samples, max_samples=sample_limit) if exp1_samples else []
+    preferred_sample_ids = [
+        image_id
+        for image_id in (_record_image_id(record) for record in selected_exp1_records)
+        if image_id is not None
+    ]
     if exp1_summary:
         plot_granularity_curves(exp1_summary, plots_dir / "exp1_granularity_curves.png")
+    if exp1_complexity:
+        plot_complexity_scatter(
+            exp1_complexity,
+            y_key="mean_accuracy_drop",
+            y_label="Mean Accuracy Drop",
+            out_path=plots_dir / "exp1_complexity_accuracy_drop.png",
+            title="Mean Accuracy Drop vs Semantic Complexity",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Continuous semantic complexity vs robustness degradation",
+                aggregation="per-image per-level average over perturbations",
+                x="semantic complexity score",
+                y="mean gated accuracy drop",
+                note="Black line is mean by exact score; dashed line is linear fit",
+                profile=profile,
+            ),
+        )
+        plot_complexity_scatter(
+            exp1_complexity,
+            y_key="mean_loglik_drift",
+            y_label="Mean Log-Likelihood Drift",
+            out_path=plots_dir / "exp1_complexity_loglik_drift.png",
+            title="Log-Likelihood Drift vs Semantic Complexity",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Continuous semantic complexity vs confidence erosion",
+                aggregation="per-image per-level average over perturbations",
+                x="semantic complexity score",
+                y="mean correct-answer log-likelihood drift",
+                note="Black line is mean by exact score; dashed line is linear fit",
+                profile=profile,
+            ),
+        )
     if exp1_detail:
         levels, perturbations, matrix = _exp1_level_perturbation_matrix(exp1_detail)
         _plot_heatmap(
@@ -2209,6 +2568,12 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         _plot_exp2_control_bandwidth(exp2_summary, plots_dir / "exp2_control_bandwidth.png")
         _plot_exp2_control_divergence(exp2_summary, plots_dir / "exp2_control_divergence.png")
         _plot_exp2_control_spectra(exp2_summary, plots_dir, suppress_dc=suppress_dc)
+        if exp2_complexity:
+            _plot_exp2_complexity_groups(
+                exp2_complexity,
+                plots_dir / "exp2_complexity_bandwidth.png",
+                profile=profile,
+            )
         if exhaustive:
             _plot_exp2_level_band_heatmap(
                 exp2_summary,
@@ -2268,6 +2633,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp2_samples,
             plots_dir,
             max_samples=sample_limit,
+            preferred_sample_ids=preferred_sample_ids,
             profile=profile,
             suppress_dc=suppress_dc,
         )
@@ -2354,7 +2720,12 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     profile=profile,
                 ),
             )
-        for record in _select_exp3_samples(exp3_samples, max_samples=sample_limit):
+        for record in _select_records_by_preferred_ids(
+            exp3_samples,
+            preferred_sample_ids,
+            max_samples=sample_limit,
+            fallback_selector=_select_exp3_samples,
+        ):
             sample_id = str(record.get("image_id"))
             profiles, overlays = _exp3_sample_profiles(record)
             if profiles:
@@ -2372,7 +2743,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         aggregation="per-level frequency profiles by perturbation",
                         x="frequency band (low→high)",
                         y="pre-fusion drift magnitude",
-                        selection="representative high-response image",
+                        selection="preferred Exp 1 representative image when available; otherwise representative high-response image",
                         note="Dashed line is late-group W_t",
                         profile=profile,
                     ),
@@ -2381,6 +2752,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     exp4_summary = _load_json(results_dir / "exp4" / "summary.json")
     exp4_curves = _load_json(results_dir / "exp4" / "accuracy_curves.json")
     exp4_samples = _load_json(results_dir / "exp4" / "per_sample.json")
+    exp4_complexity = _load_json(results_dir / "exp4" / "complexity_points.json")
     if exp4_curves:
         for mode in ("lowpass", "highpass"):
             plot_frequency_threshold_curves(
@@ -2390,8 +2762,20 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             )
     if exp4_summary:
         _plot_exp4_critical_cutoffs(exp4_summary, plots_dir / "exp4_critical_cutoffs.png")
+    if exp4_complexity:
+        _plot_exp4_complexity_modes(
+            exp4_complexity,
+            plots_dir / "exp4_complexity_cutoff.png",
+            profile=profile,
+        )
     if exp4_samples:
-        _plot_exp4_sample_curves(exp4_samples, plots_dir, max_samples=sample_limit, profile=profile)
+        _plot_exp4_sample_curves(
+            exp4_samples,
+            plots_dir,
+            max_samples=sample_limit,
+            preferred_sample_ids=preferred_sample_ids,
+            profile=profile,
+        )
         if exhaustive:
             for mode, (sample_ids, levels, matrix) in _exp4_sample_cutoffs(exp4_samples).items():
                 sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
@@ -2639,13 +3023,19 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         plots_dir / f"exp5_overlap_scatter_{source_name}_{primary_group}_{target_name}.png",
                         title=f"Overlap vs {_exp5_target_label(target_name)} ({_exp5_source_label(source_name)}, {primary_group})",
                         y_label=_exp5_target_label(target_name),
+                        scale_mode="zscore" if target_name == "loglik_erosion" else "raw",
                         metadata=_plot_metadata(
                             experiment="5",
                             what=f"Predicted overlap vs {_exp5_target_label(target_name)}",
                             aggregation="grouped by level and perturbation",
                             x="predicted spectral overlap S_pred",
                             y=_exp5_target_label(target_name),
-                            note=f"Source={_exp5_source_label(source_name)}; group={primary_group}",
+                            note=(
+                                f"Source={_exp5_source_label(source_name)}; group={primary_group}; "
+                                "axes z-scored for display only"
+                                if target_name == "loglik_erosion"
+                                else f"Source={_exp5_source_label(source_name)}; group={primary_group}"
+                            ),
                             profile=profile,
                         ),
                     )
@@ -2688,13 +3078,19 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     point_size=20,
                     alpha=0.45,
                     y_label=_exp5_target_label(target_name),
+                    scale_mode="zscore" if target_name == "loglik_erosion" else "raw",
                     metadata=_plot_metadata(
                         experiment="5",
                         what=f"Predicted overlap vs {_exp5_target_label(target_name)}",
                         aggregation="per sample",
                         x="predicted spectral overlap S_pred",
                         y=_exp5_target_label(target_name),
-                        note=f"Source={_exp5_source_label(source_name)}; group={primary_group}",
+                        note=(
+                            f"Source={_exp5_source_label(source_name)}; group={primary_group}; "
+                            "axes z-scored for display only"
+                            if target_name == "loglik_erosion"
+                            else f"Source={_exp5_source_label(source_name)}; group={primary_group}"
+                        ),
                         profile=profile,
                     ),
                 )

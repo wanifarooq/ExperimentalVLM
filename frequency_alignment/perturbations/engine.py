@@ -8,16 +8,19 @@ to validate Theorem 1.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import random as _random
+import re
+import string
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from ..analysis.spectral import compute_image_spectral_signature_stats
 
@@ -101,6 +104,50 @@ class PerturbationResult:
     delta_f_2d: Optional[np.ndarray] = None  # full 2D spectral diff (optional)
     clean_spectral_energy: Optional[float] = None
     mask_transform: Optional[Callable[[Image.Image], Image.Image]] = None
+
+
+def _safe_filename(value: str, max_chars: int = 120) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")
+    if not cleaned:
+        cleaned = "item"
+    return cleaned[:max_chars]
+
+
+def export_perturbation_suite_images(
+    clean_image: Image.Image,
+    perturbations: List[PerturbationResult],
+    out_dir: Path,
+    image_id: str,
+) -> Path:
+    """Save clean + perturbed images for one sample to disk."""
+    sample_dir = Path(out_dir) / _safe_filename(image_id)
+    sample_dir.mkdir(parents=True, exist_ok=True)
+
+    clean_filename = "clean.png"
+    clean_image.save(sample_dir / clean_filename)
+
+    manifest: Dict[str, Any] = {
+        "image_id": str(image_id),
+        "clean_image": clean_filename,
+        "num_perturbations": len(perturbations),
+        "perturbations": [],
+    }
+
+    for idx, perturbation in enumerate(perturbations):
+        filename = f"{idx:03d}_{_safe_filename(perturbation.name)}.png"
+        perturbation.perturbed_image.save(sample_dir / filename)
+        manifest["perturbations"].append(
+            {
+                "filename": filename,
+                "name": perturbation.name,
+                "family": perturbation.family,
+                "severity": perturbation.severity,
+            }
+        )
+
+    with open(sample_dir / "manifest.json", "w") as handle:
+        json.dump(manifest, handle, indent=2)
+    return sample_dir
 
 
 def compute_spectral_signature_stats(
@@ -209,34 +256,100 @@ def _identity_image(image: Image.Image) -> Image.Image:
     return image.copy()
 
 
-def _build_parent_style_overlay_specs(
+def _centered_box_from_size(
+    image: Image.Image,
+    width: int,
+    height: int,
+    pad: int = 4,
+) -> Tuple[int, int, int, int]:
+    w, h = image.size
+    x = max(0, (w - width) // 2)
+    y = max(0, (h - height) // 2)
+    return (x - pad, y - pad, x + width + pad, y + height + pad)
+
+
+def _label_free_overlay_phrases(count: int) -> List[str]:
+    base = [
+        "NOTICE",
+        "GENERAL NOTE",
+        "TEXT INSERT",
+    ]
+    if count <= len(base):
+        return base[:count]
+    phrases = list(base)
+    for idx in range(len(base), count):
+        phrases.append(f"GENERIC TEXT {idx + 1}")
+    return phrases
+
+
+def _random_text_phrases_like(
+    seed: int,
+    reference_phrases: List[str],
+) -> List[str]:
+    rng = _random.Random(seed)
+    alphabet = string.ascii_uppercase + string.digits
+    phrases: List[str] = []
+    for ref in reference_phrases:
+        target_len = max(6, len(ref.replace(" ", "")))
+        phrases.append("".join(rng.choice(alphabet) for _ in range(target_len)))
+    return phrases
+
+
+def _paired_overlay_boxes(
+    image: Image.Image,
+    font,
+    phrases: List[str],
+    random_phrases: List[str],
+) -> List[Tuple[int, int, int, int]]:
+    draw = ImageDraw.Draw(image)
+    boxes: List[Tuple[int, int, int, int]] = []
+    for phrase, random_phrase in zip(phrases, random_phrases):
+        text_bbox = draw.textbbox((0, 0), phrase, font=font)
+        rand_bbox = draw.textbbox((0, 0), random_phrase, font=font)
+        width = max(text_bbox[2] - text_bbox[0], rand_bbox[2] - rand_bbox[0])
+        height = max(text_bbox[3] - text_bbox[1], rand_bbox[3] - rand_bbox[1])
+        boxes.append(_centered_box_from_size(image, width, height))
+    return boxes
+
+
+def _build_overlay_specs(
     image: Image.Image,
     *,
     enabled_natural: set[str],
+    overlay_mode: str,
+    overlay_count: int,
     overlay_options: Optional[Dict[str, str]],
     overlay_base_label: Optional[str],
     overlay_seed: int,
     fallback_text: str = "SAMPLE TEXT",
 ) -> List[Tuple[str, str, str, Callable[[Image.Image], Image.Image], Callable[[Image.Image], Image.Image]]]:
-    """Build parent-style overlay perturbations once per image.
+    """Build task-agnostic or answer-conditioned overlay perturbations once per image.
 
-    The parent repository creates multiple overlay variants based on MCQ options
-    and does not tie these variants to severity. We mirror that behavior here.
+    Overlay perturbations are created once per image and reused across levels, so
+    the default mode is task-agnostic ``label_free``. The legacy
+    ``answer_conditioned`` mode remains available for controlled ablations.
     """
     overlay_utils = _import_parent_overlay_utils()
-    options = overlay_options or {}
-    phrases = overlay_utils["text_overlay_phrases"](options, overlay_base_label, limit=3)
-    if not phrases:
-        phrases = [fallback_text]
-    random_phrases = overlay_utils["random_text_phrases"](
-        overlay_seed,
-        count=len(phrases),
-    )
+    mode = (overlay_mode or "label_free").strip().lower()
+    count = max(1, int(overlay_count))
+    if mode == "label_free":
+        phrases = _label_free_overlay_phrases(count)
+        random_phrases = _random_text_phrases_like(overlay_seed, phrases)
+    elif mode == "answer_conditioned":
+        options = overlay_options or {}
+        phrases = overlay_utils["text_overlay_phrases"](
+            options,
+            overlay_base_label,
+            limit=count,
+        )
+        if not phrases:
+            phrases = [fallback_text]
+        random_phrases = _random_text_phrases_like(overlay_seed, phrases)
+    else:
+        raise ValueError(f"Unknown overlay_mode: {overlay_mode}")
+
     font = overlay_utils["overlay_font_for_image"](image)
-    boxes = [
-        overlay_utils["overlay_box_for_text"](image, phrase, font)
-        for phrase in phrases
-    ]
+    boxes = _paired_overlay_boxes(image, font, phrases, random_phrases)
 
     specs: List[
         Tuple[str, str, str, Callable[[Image.Image], Image.Image], Callable[[Image.Image], Image.Image]]
@@ -313,6 +426,8 @@ def build_perturbation_suite(
     frequency_types: List[str] | None = None,
     severity_params: Dict[int, Dict[str, Any]] | None = None,
     seed: int = 42,
+    overlay_mode: str = "label_free",
+    overlay_count: int = 3,
     overlay_options: Optional[Dict[str, str]] = None,
     overlay_base_label: Optional[str] = None,
     overlay_seed: Optional[int] = None,
@@ -327,9 +442,13 @@ def build_perturbation_suite(
         num_bands: Number of radial bands for spectral signature.
         severity_params: Override severity parameters.
         seed: Random seed.
-        overlay_options: Optional MCQ options used to build parent-style overlay phrases.
-        overlay_base_label: Reference answer label excluded from parent-style overlay phrases.
-        overlay_seed: Seed for parent-style random text overlays.
+        overlay_mode: ``label_free`` for task-agnostic overlays, or
+            ``answer_conditioned`` for legacy MCQ-conditioned overlays.
+        overlay_count: Number of static overlay variants to generate per family.
+        overlay_options: Optional MCQ options used only in ``answer_conditioned`` mode.
+        overlay_base_label: Reference answer label excluded only in
+            ``answer_conditioned`` mode.
+        overlay_seed: Seed for random-text overlays.
 
     Returns:
         List of :class:`PerturbationResult`.
@@ -347,9 +466,11 @@ def build_perturbation_suite(
         Tuple[str, str, str, Callable[[Image.Image], Image.Image], Callable[[Image.Image], Image.Image]]
     ] = []
     if include_natural:
-        static_overlay_specs = _build_parent_style_overlay_specs(
+        static_overlay_specs = _build_overlay_specs(
             image,
             enabled_natural=enabled_natural,
+            overlay_mode=overlay_mode,
+            overlay_count=overlay_count,
             overlay_options=overlay_options,
             overlay_base_label=overlay_base_label,
             overlay_seed=overlay_seed if overlay_seed is not None else seed,

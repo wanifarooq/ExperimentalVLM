@@ -27,11 +27,13 @@ from typing import Any, Dict, List
 import numpy as np
 from PIL import Image
 
+from ..analysis.continuous import summarize_by_score, summarize_linear_trend
 from ..analysis.statistics import (
     monotonicity_test,
     spearman_correlation,
 )
 from ..data.base import ExperimentResult, GranularityLevel
+from ..data.complexity import ensure_level_complexity
 from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
 from ..perturbations.frequency_sweep import compute_critical_cutoff, frequency_sweep
@@ -39,6 +41,77 @@ from ..utils.device import select_device
 from ..utils.io import save_json
 
 logger = logging.getLogger(__name__)
+
+
+def _build_complexity_points(
+    per_sample: List[Dict[str, Any]],
+    threshold: float,
+) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    for record in per_sample:
+        image_id = str(record.get("image_id"))
+        for mode, mode_data in record.get("modes", {}).items():
+            cutoffs = mode_data.get("cutoffs", [])
+            if not cutoffs:
+                continue
+            for level_key, level_data in mode_data.get("levels", {}).items():
+                correct = level_data.get("correct_at_cutoff", [])
+                if not correct:
+                    continue
+                accuracy = [1.0 if value else 0.0 for value in correct]
+                points.append(
+                    {
+                        "image_id": image_id,
+                        "mode": mode,
+                        "level": level_key,
+                        "question": level_data.get("question"),
+                        "question_type": level_data.get("question_type"),
+                        "complexity_score": float(
+                            level_data.get("complexity_score", 0.0) or 0.0
+                        ),
+                        "question_complexity_score": float(
+                            level_data.get("question_complexity_score", 0.0) or 0.0
+                        ),
+                        "prompt_complexity_score": float(
+                            level_data.get("prompt_complexity_score", 0.0) or 0.0
+                        ),
+                        "critical_cutoff": float(
+                            compute_critical_cutoff(accuracy, cutoffs, threshold=threshold)
+                        ),
+                    }
+                )
+    return points
+
+
+def _summarize_complexity(
+    points: List[Dict[str, Any]],
+    sweep_modes: List[str],
+) -> Dict[str, Any]:
+    if not points:
+        return {}
+    complexity_values = [
+        float(point.get("complexity_score", 0.0))
+        for point in points
+        if point.get("complexity_score") is not None
+    ]
+    summary: Dict[str, Any] = {
+        "score_name": "complexity_score",
+        "score_definition": "semantic prompt atoms (question semantics plus non-boolean option semantics)",
+        "score_min": float(min(complexity_values)) if complexity_values else 0.0,
+        "score_max": float(max(complexity_values)) if complexity_values else 0.0,
+        "num_points": len(points),
+        "per_mode": {},
+    }
+    for mode in sweep_modes:
+        mode_points = [point for point in points if point.get("mode") == mode]
+        summary["per_mode"][mode] = {
+            "mean_critical_cutoff_by_score": summarize_by_score(
+                mode_points,
+                score_key="complexity_score",
+                value_key="critical_cutoff",
+            )
+        }
+    return summary
 
 
 def run_exp4(
@@ -135,6 +208,7 @@ def run_exp4(
                 if level_data is None:
                     continue
                 level_key = level.name
+                complexity = ensure_level_complexity(level_data)
 
                 # Score at each cutoff
                 accuracies_at_cutoff: List[bool] = []
@@ -152,6 +226,14 @@ def run_exp4(
                     accuracy_data[mode][level_key][ci].append(correct)
 
                 mode_record["levels"][level_key] = {
+                    "question": level_data.question,
+                    "question_type": level_data.question_type,
+                    "complexity_score": complexity["complexity_score"],
+                    "question_complexity_score": complexity["question_complexity_score"],
+                    "prompt_complexity_score": complexity["prompt_complexity_score"],
+                    "semantic_atoms": complexity["semantic_atoms"],
+                    "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],
+                    "semantic_atom_counts": complexity["semantic_atom_counts"],
                     "correct_at_cutoff": accuracies_at_cutoff,
                 }
 
@@ -200,6 +282,9 @@ def run_exp4(
             }
             critical_cutoffs[mode][lk] = omega_c
 
+    complexity_points = _build_complexity_points(per_sample, accuracy_threshold)
+    agg["complexity_analysis"] = _summarize_complexity(complexity_points, sweep_modes)
+
     # --- Hypothesis tests ---
     tests: Dict[str, Any] = {}
 
@@ -229,6 +314,15 @@ def run_exp4(
             "values": dict(zip(present_levels, cutoff_values)),
         }
 
+    tests["continuous_complexity"] = {}
+    for mode in sweep_modes:
+        mode_points = [point for point in complexity_points if point.get("mode") == mode]
+        tests["continuous_complexity"][mode] = summarize_linear_trend(
+            mode_points,
+            x_key="complexity_score",
+            y_key="critical_cutoff",
+        )
+
     # Summary: lowpass is the main test
     lp_mono = tests.get("monotonicity_lowpass", {}).get("passed", False)
     lp_spear = tests.get("spearman_cutoff_vs_granularity_lowpass", {}).get("passed", False)
@@ -252,6 +346,7 @@ def run_exp4(
     # --- Save ---
     save_json(agg, out_dir / "summary.json")
     save_json(tests, out_dir / "hypothesis_tests.json")
+    save_json(complexity_points, out_dir / "complexity_points.json")
     save_json(
         {"cutoffs": reference_cutoffs, "data": agg["per_mode"]},
         out_dir / "accuracy_curves.json",

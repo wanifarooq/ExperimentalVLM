@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from PIL import Image
 
+from ..analysis.continuous import summarize_by_score, summarize_linear_trend
 from ..analysis.spectral import (
     compare_spectral_filters,
     compute_attention_power_spectrum_multi,
@@ -39,6 +40,7 @@ from ..analysis.statistics import (
     bootstrap_ci,
 )
 from ..data.base import ExperimentResult, GranularityLevel
+from ..data.complexity import ensure_level_complexity
 from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
 from ..utils.device import select_device
@@ -47,6 +49,71 @@ from ..utils.io import save_json
 
 logger = logging.getLogger(__name__)
 CONTROL_ORDER = ("empty_language", "random_language")
+
+
+def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    for record in per_sample:
+        image_id = str(record.get("image_id"))
+        for level_key, level_data in record.get("levels", {}).items():
+            point = {
+                "image_id": image_id,
+                "level": level_key,
+                "question": level_data.get("question"),
+                "question_type": level_data.get("question_type"),
+                "complexity_score": float(level_data.get("complexity_score", 0.0) or 0.0),
+                "question_complexity_score": float(
+                    level_data.get("question_complexity_score", 0.0) or 0.0
+                ),
+                "prompt_complexity_score": float(
+                    level_data.get("prompt_complexity_score", 0.0) or 0.0
+                ),
+                "bandwidth": float(level_data.get("bandwidth", 0.0) or 0.0),
+            }
+            for group_name in LAYER_GROUP_ORDER:
+                group_bandwidth = (
+                    level_data.get("layer_groups", {})
+                    .get(group_name, {})
+                    .get("bandwidth")
+                )
+                if group_bandwidth is not None:
+                    point[f"bandwidth_{group_name}"] = float(group_bandwidth)
+            points.append(point)
+    return points
+
+
+def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not points:
+        return {}
+    complexity_values = [
+        float(point.get("complexity_score", 0.0))
+        for point in points
+        if point.get("complexity_score") is not None
+    ]
+    summary: Dict[str, Any] = {
+        "score_name": "complexity_score",
+        "score_definition": "semantic prompt atoms (question semantics plus non-boolean option semantics)",
+        "score_min": float(min(complexity_values)) if complexity_values else 0.0,
+        "score_max": float(max(complexity_values)) if complexity_values else 0.0,
+        "num_points": len(points),
+        "mean_bandwidth_by_score": summarize_by_score(
+            points,
+            score_key="complexity_score",
+            value_key="bandwidth",
+        ),
+        "layer_groups": {},
+    }
+    for group_name in LAYER_GROUP_ORDER:
+        value_key = f"bandwidth_{group_name}"
+        if any(point.get(value_key) is not None for point in points):
+            summary["layer_groups"][group_name] = {
+                "mean_bandwidth_by_score": summarize_by_score(
+                    points,
+                    score_key="complexity_score",
+                    value_key=value_key,
+                )
+            }
+    return summary
 
 
 def _build_random_prompt(reference_prompt: str, seed: int) -> str:
@@ -304,6 +371,7 @@ def run_exp2(
                 continue
 
             level_key = level.name
+            complexity = ensure_level_complexity(level_data)
             # Build prompt from question + options
             prompt = level_data.question
             if level_data.options:
@@ -327,6 +395,14 @@ def run_exp2(
 
             # Store per-sample result
             sample_record["levels"][level_key] = {
+                "question": level_data.question,
+                "question_type": level_data.question_type,
+                "complexity_score": complexity["complexity_score"],
+                "question_complexity_score": complexity["question_complexity_score"],
+                "prompt_complexity_score": complexity["prompt_complexity_score"],
+                "semantic_atoms": complexity["semantic_atoms"],
+                "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],
+                "semantic_atom_counts": complexity["semantic_atom_counts"],
                 "bandwidth": result["bandwidth"],
                 "radial_power": result["radial_power"].tolist(),
                 "W_t": result["W_t"].tolist(),
@@ -588,6 +664,9 @@ def run_exp2(
                 }
             agg["per_level"][lk]["controls"][control_name] = control_entry
 
+    complexity_points = _build_complexity_points(per_sample)
+    agg["complexity_analysis"] = _summarize_complexity(complexity_points)
+
     # Save average W_t per level (critical for Exp 3 and Exp 5)
     for lk in present_levels:
         W_t_avg = np.array(agg["per_level"][lk]["W_t_average"])
@@ -679,6 +758,23 @@ def run_exp2(
                 if control_name in agg["per_level"][lk].get("controls", {})
             },
         }
+    tests["continuous_complexity"] = {
+        "bandwidth_vs_complexity_overall": summarize_linear_trend(
+            complexity_points,
+            x_key="complexity_score",
+            y_key="bandwidth",
+        )
+    }
+    for group_name in LAYER_GROUP_ORDER:
+        value_key = f"bandwidth_{group_name}"
+        if any(point.get(value_key) is not None for point in complexity_points):
+            tests["continuous_complexity"][f"bandwidth_vs_complexity_{group_name}"] = (
+                summarize_linear_trend(
+                    complexity_points,
+                    x_key="complexity_score",
+                    y_key=value_key,
+                )
+            )
     tests["hypothesis_supported"] = core_passed
 
     # --- Log results ---
@@ -724,6 +820,7 @@ def run_exp2(
     # --- Save outputs ---
     save_json(agg, out_dir / "summary.json")
     save_json(tests, out_dir / "hypothesis_tests.json")
+    save_json(complexity_points, out_dir / "complexity_points.json")
     save_json(
         [r for r in per_sample if r.get("levels")],
         out_dir / "power_spectra.json",
@@ -744,6 +841,9 @@ def run_exp2(
         },
         "spearman_rho": sp.get("rho", 0),
         "spearman_p": sp.get("p_value", 1),
+        "complexity_pearson_bandwidth": tests.get("continuous_complexity", {})
+        .get("bandwidth_vs_complexity_overall", {})
+        .get("pearson_r", 0.0),
     }
     for group_name in LAYER_GROUP_ORDER:
         group_sp = tests.get(f"spearman_bandwidth_vs_granularity_{group_name}", {})

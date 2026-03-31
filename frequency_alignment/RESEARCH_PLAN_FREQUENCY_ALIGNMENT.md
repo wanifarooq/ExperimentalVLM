@@ -13,6 +13,7 @@ Current model profiles in code and configs:
 
 Implementation clarifications that supersede older references below:
 - Experiment 1 now stores both raw and relative perturbation spectra in image space (`delta_f`, `delta_f_relative`) and, when enabled, the matching raw and relative vision-feature spectra (`delta_f_vision`, `delta_f_vision_relative`).
+- Experiments `1`, `2`, and `4` now keep the original discrete `L1-L4` labels but also attach a continuous semantic complexity score to each task, based on prompt atoms (question semantics plus non-boolean option semantics). This supports scatter / trend analyses alongside the older level-wise bar summaries.
 - Experiment 2 does not rely on a named encoder-decoder cross-attention block. It derives the effective language-to-vision attention map from the self-attention slice, supports optional FFT windowing before the 2D FFT, and computes `W_t` separately for `overall`, `early`, `mid`, and `late` layer groups. The current configs default this windowing to `none`.
 - Experiment 2 also includes prompt-only controls (`empty_language`, `random_language`) so task-conditioned filters can be compared against semantically weak prompts.
 - Experiment 3 now uses a late decoder hidden state as the default post-fusion representation, treats pre-fusion band drift as the controlled perturbation input, and measures the task-conditioned post-fusion response with an all-token scalar drift. It then tests whether that response follows the overlap between `W_t` and the pre-fusion drift profile for `overall`, `early`, `mid`, and `late`, with `late` treated as the main post-fusion comparison.
@@ -213,6 +214,14 @@ For segmentation variant:
 - Representation drift (cosine distance of vision tokens from clean baseline)
 - Dirichlet energy change (from Paper 1)
 
+**Continuous view**:
+- In addition to `L1-L4`, assign each prompt a semantic complexity score by counting prompt atoms:
+  - noun atoms from referenced entities
+  - attribute-query atoms
+  - relation atoms
+  - non-boolean option atoms
+- Analyze degradation as a function of this continuous score so the robustness trend can be tested as a slope, not only as four discrete bins.
+
 **Expected Result**: Monotonic increase in all degradation metrics as granularity increases, for every perturbation type.
 
 **Dataset**: COCO + VQAv2 annotations (provides images with objects, attributes, spatial relationships)
@@ -236,12 +245,14 @@ For segmentation variant:
 **Analysis**:
 - Plot mean power spectrum `|Â_j|²` for `L1` vs `L2` vs `L3` vs `L4`
 - Plot `overall`, `early`, `mid`, and `late` `W_t(ω)` filters and their bandwidths
+- Plot effective bandwidth against continuous semantic complexity to test whether each additional prompt atom broadens the task filter
 - Compare task prompts to prompt-only controls using `L2`, cosine similarity, and Jensen-Shannon divergence between `W_t` distributions
 - Correlate `G(t)` with sensitivity from Experiment 1
 
 **Expected Result**:
 - L1 prompts: power concentrated at DC and low frequencies
 - L4 prompts: power spread across frequency spectrum
+- Effective bandwidth should rise smoothly with semantic complexity, not only when moving between coarse discrete level labels
 - Control prompts should be closer to each other than to the real task prompts, especially for fine-grained levels
 - Strong positive correlation between G(t) and sensitivity
 
@@ -290,6 +301,7 @@ For segmentation variant:
 - Fine tasks require higher ω_c (need more frequency content)
 - The critical cutoff ω_c* where accuracy drops below 50% shifts to higher frequencies as granularity increases
 - This directly measures the "bandwidth" of the effective filter W_t
+- The same cutoff should also increase smoothly with the continuous semantic complexity score
 
 **Dataset**: 500 COCO images with multi-granularity annotations
 

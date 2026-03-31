@@ -63,18 +63,22 @@ python3 -m frequency_alignment.run_experiment \
 ### Experiment 1
 
 - Uses the configured VQA dataset. For the main research path this should be `gqa`.
+- Keeps the original same-image `L1-L4` labels, and also stores a continuous semantic complexity score per task based on prompt atoms (question semantics plus non-boolean option semantics).
 - Scores MCQ options with the parent repository’s assistant-continuation log-likelihood routine.
 - Stores raw and relative image-space perturbation spectra: `delta_f`, `delta_f_relative`.
 - When vision-token extraction is enabled, also stores raw and relative feature-space perturbation spectra: `delta_f_vision`, `delta_f_vision_relative`.
 - Stores the correct-option score change used downstream as `loglik_drift`, plus optional cosine drift and Dirichlet deltas.
+- Saves `complexity_points.json` so degradation can be analyzed as a continuous function of semantic complexity, not only as four discrete level averages.
 
 ### Experiment 2
 
 - Extracts the effective language-to-vision attention map from the self-attention slice returned by the model.
+- Keeps the original level-wise summaries, and also stores a continuous semantic complexity score for each `(image, level)` task.
 - Applies the configured attention FFT window before the 2D FFT to reduce spectral leakage from patch-grid borders. Supported values are `hann`, `hamming`, and the off modes `none` / `off` / `false`. The current configs default this to `none`.
 - Computes radial power spectra, `W_t`, and bandwidth for `overall`, `early`, `mid`, and `late` layer groups.
 - Runs prompt-only controls (`empty_language`, `random_language`) on the same images and stores divergence-to-task statistics.
 - Saves both per-sample and average filters for downstream experiments.
+- Saves `complexity_points.json` so effective bandwidth can be plotted against continuous semantic complexity.
 
 ### Experiment 3
 
@@ -88,6 +92,7 @@ python3 -m frequency_alignment.run_experiment \
 
 - Runs the low-pass / high-pass sweep on the same multilevel GQA samples.
 - Reports the critical cutoff where accuracy crosses the configured threshold.
+- Saves `complexity_points.json` so critical cutoffs can be analyzed against continuous semantic complexity, not only discrete level labels.
 
 ### Experiment 5
 
@@ -179,14 +184,17 @@ frequency_alignment_outputs/
   exp1/summary.json
   exp1/hypothesis_tests.json
   exp1/per_sample.jsonl
+  exp1/complexity_points.json
   exp2/summary.json
   exp2/hypothesis_tests.json
   exp2/power_spectra.json
+  exp2/complexity_points.json
   exp3/summary.json
   exp3/hypothesis_tests.json
   exp3/amplification.json
   exp4/summary.json
   exp4/accuracy_curves.json
+  exp4/complexity_points.json
   exp5/summary.json
   exp5/hypothesis_tests.json
   exp5/scatter_data.json
