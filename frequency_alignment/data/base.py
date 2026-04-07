@@ -34,10 +34,12 @@ class LevelData:
     question_type: Optional[str] = None  # e.g. "object_presence", "attribute", etc.
     semantic_atoms: List[str] = field(default_factory=list)
     prompt_semantic_atoms: List[str] = field(default_factory=list)
-    semantic_atom_counts: Dict[str, int] = field(default_factory=dict)
+    semantic_atom_counts: Dict[str, Any] = field(default_factory=dict)
     question_complexity_score: float = 0.0
     prompt_complexity_score: float = 0.0
     complexity_score: float = 0.0
+    option_hardness_score: float = 0.0
+    option_hardness_components: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -68,12 +70,12 @@ class GranularitySample:
         return all(lvl in self.levels for lvl in required)
 
     def reference_overlay_context(self) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
-        """Return the finest available MCQ context for parent-style overlays.
+        """Return the finest available MCQ context for legacy answer-conditioned overlays.
 
         The perturbation suite is built once per image and reused across levels,
-        so we pick a single reference level. Using the finest available level
-        preserves task-aware parent-repo overlays without changing the overall
-        experiment structure.
+        so the legacy answer-conditioned overlay mode still needs one reference
+        MCQ context. The default overlay mode is label-free, so this fallback
+        is only used when that legacy mode is explicitly enabled.
         """
         for level in sorted(self.levels.keys(), key=int, reverse=True):
             level_data = self.levels.get(level)

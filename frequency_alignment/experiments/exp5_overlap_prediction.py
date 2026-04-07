@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from ..analysis.continuous import summarize_fixed_effects_trend, summarize_linear_trend
 from ..analysis.spectral import compute_spectral_overlap
 from ..analysis.statistics import bootstrap_ci, pearson_correlation, spearman_correlation
 from ..data.base import ExperimentResult
@@ -128,6 +129,9 @@ def _build_overlap_pairs(
             W_t = sample_filters.get((image_id, level_key), average_filters.get(level_key))
             if W_t is None:
                 continue
+            complexity_score = float(level_data.get("complexity_score", 0.0) or 0.0)
+            prompt_complexity_score = float(level_data.get("prompt_complexity_score", 0.0) or 0.0)
+            option_hardness_score = float(level_data.get("option_hardness_score", 0.0) or 0.0)
 
             clean_correct = float(bool(level_data.get("clean", {}).get("correct", False)))
             for perturbation in level_data.get("perturbations", []):
@@ -157,6 +161,9 @@ def _build_overlap_pairs(
                     "perturbed_correct": perturbed_correct,
                     "ci": ci,
                     "ic": ic,
+                    "complexity_score": complexity_score,
+                    "prompt_complexity_score": prompt_complexity_score,
+                    "option_hardness_score": option_hardness_score,
                 }
                 sample_pairs.append(pair)
 
@@ -234,6 +241,97 @@ def _correlate(
     return predicted, actual
 
 
+def _zscore_array(values: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return arr, 0.0, 0.0
+    mean = float(np.mean(arr))
+    std = float(np.std(arr))
+    if std <= _EPS:
+        return arr - mean, mean, std
+    return (arr - mean) / std, mean, std
+
+
+def _attach_standardized_bridge(
+    pairs: List[Dict[str, Any]],
+    *,
+    actual_key: str = "actual",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if not pairs:
+        return pairs, {
+            "n": 0,
+            "x_transform": "zscore(log1p(predicted))",
+            "y_transform": f"zscore({actual_key})",
+        }
+
+    pred_arr, actual_arr = _correlate(pairs, actual_key=actual_key)
+    pred_log = np.log1p(np.clip(pred_arr, 0.0, None))
+    pred_z, pred_log_mean, pred_log_std = _zscore_array(pred_log)
+    actual_z, actual_mean, actual_std = _zscore_array(actual_arr)
+
+    if len(pairs) >= 2 and np.unique(pred_z).size > 1:
+        slope, intercept = np.polyfit(pred_z, actual_z, 1)
+        pearson_r, pearson_p = pearson_correlation(pred_z, actual_z)
+        spearman_rho, spearman_p = spearman_correlation(pred_z, actual_z)
+    else:
+        slope = 0.0
+        intercept = float(np.mean(actual_z)) if len(actual_z) else 0.0
+        pearson_r, pearson_p = 0.0, 1.0
+        spearman_rho, spearman_p = 0.0, 1.0
+
+    annotated: List[Dict[str, Any]] = []
+    for idx, pair in enumerate(pairs):
+        pair_copy = dict(pair)
+        pair_copy["predicted_log1p"] = float(pred_log[idx])
+        pair_copy["predicted_bridge_z"] = float(pred_z[idx])
+        pair_copy["actual_bridge_z"] = float(actual_z[idx])
+        annotated.append(pair_copy)
+
+    summary = {
+        "n": len(pairs),
+        "x_transform": "zscore(log1p(predicted))",
+        "y_transform": f"zscore({actual_key})",
+        "pearson_r": float(pearson_r),
+        "pearson_p_value": float(pearson_p),
+        "spearman_rho": float(spearman_rho),
+        "spearman_p_value": float(spearman_p),
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "predicted_log_mean": float(pred_log_mean),
+        "predicted_log_std": float(pred_log_std),
+        "actual_mean": float(actual_mean),
+        "actual_std": float(actual_std),
+    }
+    return annotated, summary
+
+
+def _attach_prediction_error(
+    pairs: List[Dict[str, Any]],
+    *,
+    actual_key: str = "actual",
+) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    if not pairs:
+        return pairs, {"slope": 0.0, "intercept": 0.0}
+
+    pred_arr, actual_arr = _correlate(pairs, actual_key=actual_key)
+    if len(pairs) >= 2 and np.unique(pred_arr).size > 1:
+        slope, intercept = np.polyfit(pred_arr, actual_arr, 1)
+    else:
+        slope = 0.0
+        intercept = float(np.mean(actual_arr)) if len(actual_arr) else 0.0
+
+    annotated: List[Dict[str, Any]] = []
+    for pair in pairs:
+        pair_copy = dict(pair)
+        calibrated_prediction = float(intercept + slope * float(pair["predicted"]))
+        prediction_residual = float(pair_copy[actual_key] - calibrated_prediction)
+        pair_copy["calibrated_prediction"] = calibrated_prediction
+        pair_copy["prediction_residual"] = prediction_residual
+        pair_copy["absolute_prediction_error"] = abs(prediction_residual)
+        annotated.append(pair_copy)
+    return annotated, {"slope": float(slope), "intercept": float(intercept)}
+
+
 def _summarize_target(
     sample_pairs: List[Dict[str, Any]],
     grouped_pairs: List[Dict[str, Any]],
@@ -243,18 +341,24 @@ def _summarize_target(
     grouped_target_pairs = _materialize_target_pairs(grouped_pairs, target_spec.get("grouped_key"))
     if len(grouped_target_pairs) < 3:
         return None
+    grouped_target_pairs, grouped_bridge = _attach_standardized_bridge(grouped_target_pairs)
+    grouped_target_pairs, grouped_error_model = _attach_prediction_error(grouped_target_pairs)
 
     pred_arr, actual_arr = _correlate(grouped_target_pairs)
     r_pearson, p_pearson = pearson_correlation(pred_arr, actual_arr)
     rho_spearman, p_spearman = spearman_correlation(pred_arr, actual_arr)
 
     sample_target_pairs: List[Dict[str, Any]] = []
+    sample_error_model = None
     sample_r = None
     sample_r_p = None
+    sample_bridge = None
     supports_sample = bool(target_spec.get("supports_sample")) and target_spec.get("sample_key") is not None
     if supports_sample:
         sample_target_pairs = _materialize_target_pairs(sample_pairs, target_spec["sample_key"])
         if len(sample_target_pairs) >= 3:
+            sample_target_pairs, sample_bridge = _attach_standardized_bridge(sample_target_pairs)
+            sample_target_pairs, sample_error_model = _attach_prediction_error(sample_target_pairs)
             sample_pred_arr, sample_actual_arr = _correlate(sample_target_pairs)
             sample_r, sample_r_p = pearson_correlation(sample_pred_arr, sample_actual_arr)
 
@@ -298,6 +402,42 @@ def _summarize_target(
         }
     if pearson_ci is not None:
         tests["pearson_grouped_bootstrap_ci"] = pearson_ci
+    tests["comparable_bridge_grouped"] = grouped_bridge
+    tests["comparable_bridge_sample"] = (
+        sample_bridge
+        if sample_bridge is not None
+        else {
+            "n": len(sample_target_pairs),
+            "x_transform": "zscore(log1p(predicted))",
+            "y_transform": "zscore(actual)",
+            "not_applicable": not supports_sample,
+        }
+    )
+    if len(sample_target_pairs) >= 3:
+        tests["continuous_complexity"] = {
+            "predicted_vs_complexity": summarize_linear_trend(
+                sample_target_pairs,
+                x_key="complexity_score",
+                y_key="predicted",
+            ),
+            "prediction_error_vs_complexity": summarize_linear_trend(
+                sample_target_pairs,
+                x_key="complexity_score",
+                y_key="absolute_prediction_error",
+            ),
+            "predicted_vs_complexity_fixed_effects": summarize_fixed_effects_trend(
+                sample_target_pairs,
+                group_key="image_id",
+                x_key="complexity_score",
+                y_key="predicted",
+            ),
+            "prediction_error_vs_complexity_fixed_effects": summarize_fixed_effects_trend(
+                sample_target_pairs,
+                group_key="image_id",
+                x_key="complexity_score",
+                y_key="absolute_prediction_error",
+            ),
+        }
     tests["hypothesis_supported"] = tests["pearson_predicted_vs_actual_grouped"]["passed"]
 
     per_level_corr: Dict[str, Any] = {}
@@ -319,6 +459,10 @@ def _summarize_target(
         "pearson_r_sample": sample_r,
         "per_level_correlation": per_level_corr,
         "sample_metric_available": sample_r is not None,
+        "comparable_bridge_grouped": grouped_bridge,
+        "comparable_bridge_sample": sample_bridge,
+        "prediction_error_model_grouped": grouped_error_model,
+        "prediction_error_model_sample": sample_error_model,
     }
     metrics = {
         "n_grouped_pairs": len(grouped_target_pairs),

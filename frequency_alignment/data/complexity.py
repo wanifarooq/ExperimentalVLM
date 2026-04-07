@@ -8,9 +8,30 @@ relationships such as complexity vs bandwidth or complexity vs robustness.
 
 from __future__ import annotations
 
+import math
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+
+SEMANTIC_COMPLEXITY_SCORE_NAME = "complexity_score"
+SEMANTIC_COMPLEXITY_SCORE_LABEL = "Semantic Program Complexity"
+SEMANTIC_COMPLEXITY_SCORE_DEFINITION = (
+    "structured semantic-program complexity with grounding ambiguity"
+)
+SEMANTIC_COMPLEXITY_SCORE_FORMULA = (
+    "entity refs + attribute refs + relation refs + reasoning ops + "
+    "program depth + log1p(grounding candidates)"
+)
+PROMPT_COMPLEXITY_SCORE_NAME = "prompt_complexity_score"
+PROMPT_COMPLEXITY_SCORE_LABEL = "Prompt Load Control"
+PROMPT_COMPLEXITY_SCORE_DEFINITION = (
+    "prompt load proxy from question and option content tokens"
+)
+OPTION_HARDNESS_SCORE_NAME = "option_hardness_score"
+OPTION_HARDNESS_SCORE_LABEL = "Option Hardness Control"
+OPTION_HARDNESS_SCORE_DEFINITION = (
+    "MCQ distractor hardness: same-category distractors plus a scene-plausibility tie-break"
+)
 
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?")
 _TEXT_STOPWORDS = {
@@ -80,44 +101,80 @@ def _option_atoms(options: Optional[Mapping[str, str]]) -> List[str]:
     return atoms
 
 
+def _question_load_atoms(question_text: str) -> List[str]:
+    return [
+        token
+        for token in _tokens(question_text)
+        if token not in _TEXT_STOPWORDS
+    ]
+
+
 def build_semantic_complexity(
     *,
     entity_names: Sequence[str] = (),
     attribute_queries: Sequence[str] = (),
     relation_labels: Sequence[str] = (),
+    reasoning_ops: Sequence[str] = (),
+    program_depth: float = 0.0,
+    grounding_candidate_count: float = 0.0,
+    question_text: str = "",
     options: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     """Build structured semantic-complexity metadata.
 
-    The primary ``complexity_score`` is based on the full language shown to the
-    model during scoring, i.e. question semantics plus option semantics.
+    The primary ``complexity_score`` is a structured semantic-program score.
+    Prompt/load complexity is kept separately in ``prompt_complexity_score``.
     """
 
-    noun_atoms = _entity_atoms(entity_names)
-    attribute_atoms = _attribute_atoms(attribute_queries)
-    relation_atoms = _relation_atoms(relation_labels)
+    noun_atoms = list(entity_names)
+    attribute_atoms = list(attribute_queries)
+    relation_atoms = list(relation_labels)
+    operator_atoms = [str(op).strip().lower() for op in reasoning_ops if str(op).strip()]
+    question_atoms = (
+        [f"entity:{name}" for name in _entity_atoms(entity_names)]
+        + [f"attribute:{attr}" for attr in _attribute_atoms(attribute_queries)]
+        + [f"relation:{rel}" for rel in _relation_atoms(relation_labels)]
+        + [f"op:{op}" for op in operator_atoms]
+    )
+    entity_ref_count = len(noun_atoms)
+    attribute_ref_count = len(attribute_atoms)
+    relation_ref_count = len(relation_atoms)
+    operator_count = len(operator_atoms)
+    program_depth = max(0.0, float(program_depth or 0.0))
+    grounding_candidate_count = max(0.0, float(grounding_candidate_count or 0.0))
+    grounding_ambiguity = float(math.log1p(grounding_candidate_count))
+    semantic_score = float(
+        entity_ref_count
+        + attribute_ref_count
+        + relation_ref_count
+        + operator_count
+        + program_depth
+        + grounding_ambiguity
+    )
+
+    question_load_atoms = _question_load_atoms(question_text)
     option_atoms = _option_atoms(options)
-
-    question_atoms = list(noun_atoms) + list(attribute_atoms) + list(relation_atoms)
-    prompt_atoms = question_atoms + list(option_atoms)
-
-    question_score = float(len(question_atoms))
-    prompt_score = float(len(prompt_atoms)) if prompt_atoms else question_score
+    prompt_atoms = question_load_atoms + list(option_atoms)
+    prompt_score = float(len(prompt_atoms)) if prompt_atoms else float(len(question_load_atoms))
 
     return {
         "semantic_atoms": question_atoms,
         "prompt_semantic_atoms": prompt_atoms,
         "semantic_atom_counts": {
-            "noun_atoms": len(noun_atoms),
-            "attribute_atoms": len(attribute_atoms),
-            "relation_atoms": len(relation_atoms),
+            "entity_refs": entity_ref_count,
+            "attribute_refs": attribute_ref_count,
+            "relation_refs": relation_ref_count,
+            "reasoning_ops": operator_count,
+            "program_depth": int(program_depth),
+            "grounding_candidate_count": grounding_candidate_count,
+            "grounding_ambiguity": grounding_ambiguity,
             "option_atoms": len(option_atoms),
             "question_atoms_total": len(question_atoms),
             "prompt_atoms_total": len(prompt_atoms),
         },
-        "question_complexity_score": question_score,
+        "question_complexity_score": semantic_score,
         "prompt_complexity_score": prompt_score,
-        "complexity_score": prompt_score,
+        "complexity_score": semantic_score,
     }
 
 
@@ -136,16 +193,20 @@ def fallback_text_complexity(
         "semantic_atoms": question_atoms,
         "prompt_semantic_atoms": prompt_atoms,
         "semantic_atom_counts": {
-            "noun_atoms": 0,
-            "attribute_atoms": 0,
-            "relation_atoms": 0,
+            "entity_refs": 0,
+            "attribute_refs": 0,
+            "relation_refs": 0,
+            "reasoning_ops": 0,
+            "program_depth": 0,
+            "grounding_candidate_count": 0.0,
+            "grounding_ambiguity": 0.0,
             "option_atoms": len(option_atoms),
             "question_atoms_total": len(question_atoms),
             "prompt_atoms_total": len(prompt_atoms),
         },
         "question_complexity_score": question_score,
         "prompt_complexity_score": prompt_score,
-        "complexity_score": prompt_score,
+        "complexity_score": question_score,
     }
 
 

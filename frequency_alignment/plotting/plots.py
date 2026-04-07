@@ -13,6 +13,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from ..analysis.spectral import spectral_band_centers
+from ..data.complexity import (
+    SEMANTIC_COMPLEXITY_SCORE_FORMULA,
+    SEMANTIC_COMPLEXITY_SCORE_LABEL,
+)
 from ..perturbations.frequency_sweep import compute_critical_cutoff
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,16 @@ _EXP5_TARGET_LABELS = {
     "loglik_erosion": "Correct-Answer Log-Likelihood Erosion",
     "net_drop": "Net Accuracy Change",
     "relative_accuracy_drop": "Relative Accuracy Drop",
+}
+_COEFFICIENT_LABELS = {
+    "complexity_score": "Semantic Complexity",
+    "prompt_complexity_score": "Prompt Load",
+    "option_hardness_score": "Option Hardness",
+}
+_COEFFICIENT_COLORS = {
+    "complexity_score": "#2ca02c",
+    "prompt_complexity_score": "#7f7f7f",
+    "option_hardness_score": "#ff7f0e",
 }
 _DEFAULT_PLOT_PROFILE = "exhaustive"
 _FULL_PLOT_PROFILES = {"full", "exhaustive", "all"}
@@ -83,6 +97,17 @@ def _set_plot_metadata(fig: plt.Figure, lines: Optional[Sequence[str]]) -> None:
     if not lines:
         return
     setattr(fig, "_fa_metadata_lines", [str(line) for line in lines if str(line).strip()])
+
+
+def _complexity_axis_label() -> str:
+    return SEMANTIC_COMPLEXITY_SCORE_LABEL
+
+
+def _complexity_plot_note() -> str:
+    return (
+        "Semantic score = "
+        + SEMANTIC_COMPLEXITY_SCORE_FORMULA
+    )
 
 
 def _tight_layout(fig: plt.Figure, *, metadata_bottom: float = 0.08, top: float = 0.97) -> None:
@@ -832,12 +857,19 @@ def plot_overlap_scatter(
     x_label = "Predicted Sensitivity (spectral overlap)"
     displayed_y_label = y_label
     scale_note = None
-    if str(scale_mode).strip().lower() == "zscore":
+    scale_mode = str(scale_mode).strip().lower()
+    if scale_mode == "zscore":
         plot_x = _zscore_for_plot(preds)
         plot_y = _zscore_for_plot(actuals)
         x_label = "Predicted Sensitivity (z-score)"
         displayed_y_label = f"{y_label} (z-score)"
         scale_note = "Axes are z-scored for visualization only; correlation uses raw values"
+    elif scale_mode == "bridge":
+        plot_x = _zscore_for_plot(np.log1p(np.clip(preds, 0.0, None)))
+        plot_y = _zscore_for_plot(actuals)
+        x_label = "Log-Overlap (z-score)"
+        displayed_y_label = f"{y_label} (z-score)"
+        scale_note = "X uses zscore(log1p(overlap)); Y uses zscore(observed target); raw metrics unchanged"
 
     fig, ax = plt.subplots(figsize=(7.1, 6.0))
     for idx, item in enumerate(scatter_data):
@@ -967,7 +999,7 @@ def _plot_complexity_scatter_on_axis(
             label="Linear fit",
         )
 
-    ax.set_xlabel("Semantic Complexity Score", fontsize=10)
+    ax.set_xlabel(_complexity_axis_label(), fontsize=10)
     ax.set_ylabel(y_label, fontsize=10)
     ax.set_title(title, fontsize=12)
     ax.grid(alpha=0.2, linewidth=0.6)
@@ -996,16 +1028,17 @@ def plot_complexity_scatter(
     )
     handles, labels = ax.get_legend_handles_labels()
     if handles:
-        ax.legend(fontsize=8, loc="best")
+        ax.legend(fontsize=8, loc="best", title="Series", title_fontsize=8)
     _set_plot_metadata(
         fig,
         metadata
         or _metadata_lines(
             "View=scatter",
-            "X=semantic complexity score",
+            f"X={_complexity_axis_label().lower()}",
             f"Y={y_label}",
             "Points=per-image per-level summaries",
             "Black line=mean by exact score; dashed line=linear fit",
+            _complexity_plot_note(),
         ),
     )
     _tight_layout(fig)
@@ -1048,16 +1081,19 @@ def _plot_exp2_complexity_groups(
     handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8)
-    fig.suptitle("Bandwidth vs Semantic Complexity by Layer Group", fontsize=14, y=0.99)
+    fig.suptitle("Bandwidth vs Semantic Program Complexity by Layer Group", fontsize=14, y=0.99)
     _set_plot_metadata(
         fig,
         _plot_metadata(
             experiment="2",
             what="Continuous semantic complexity vs effective bandwidth",
             aggregation="per-image per-level points",
-            x="semantic complexity score",
+            x=_complexity_axis_label().lower(),
             y="effective bandwidth G(t)",
-            note="Black line is mean by exact score; dashed line is linear fit",
+            note=(
+                "Black line is mean by exact score; dashed line is linear fit; "
+                + _complexity_plot_note()
+            ),
             profile=profile,
         ),
     )
@@ -1096,21 +1132,240 @@ def _plot_exp4_complexity_modes(
 
     handles, labels = axes_arr[0].get_legend_handles_labels()
     if handles:
-        fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8)
-    fig.suptitle("Critical Cutoff vs Semantic Complexity", fontsize=14, y=0.99)
+        fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8, title="Series", title_fontsize=8)
+    fig.suptitle("Critical Cutoff vs Semantic Program Complexity", fontsize=14, y=0.99)
     _set_plot_metadata(
         fig,
         _plot_metadata(
             experiment="4",
             what="Continuous semantic complexity vs critical cutoff",
             aggregation="per-image per-level points",
-            x="semantic complexity score",
+            x=_complexity_axis_label().lower(),
             y="critical cutoff",
-            note="Black line is mean by exact score; dashed line is linear fit",
+            note=(
+                "Black line is mean by exact score; dashed line is linear fit; "
+                + _complexity_plot_note()
+            ),
             profile=profile,
         ),
     )
     _tight_layout(fig, metadata_bottom=0.07, top=0.96)
+    _save_fig(fig, out_path)
+
+
+def _standardized_beta_and_ci(predictor_stats: Dict[str, Any]) -> Tuple[float, float, float]:
+    beta = float(predictor_stats.get("beta", 0.0) or 0.0)
+    std_beta = float(predictor_stats.get("standardized_beta", 0.0) or 0.0)
+    stderr = float(predictor_stats.get("stderr", 0.0) or 0.0)
+    if abs(beta) > _LOG_FLOOR:
+        scale = std_beta / beta
+        std_stderr = abs(scale) * stderr
+    else:
+        std_stderr = 0.0
+    delta = 1.96 * std_stderr
+    return std_beta, std_beta - delta, std_beta + delta
+
+
+def _regression_series(
+    primary_label: str,
+    primary_regression: Optional[Dict[str, Any]],
+    comparison_label: Optional[str] = None,
+    comparison_regression: Optional[Dict[str, Any]] = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    series: List[Tuple[str, Dict[str, Any]]] = []
+    if isinstance(primary_regression, dict) and primary_regression.get("predictors"):
+        series.append((primary_label, primary_regression))
+    if comparison_label and isinstance(comparison_regression, dict) and comparison_regression.get("predictors"):
+        series.append((comparison_label, comparison_regression))
+    return series
+
+
+def plot_coefficient_forest(
+    regression: Dict[str, Any],
+    out_path: Path,
+    *,
+    title: str,
+    subtitle: Optional[str] = None,
+    primary_label: str = "Pooled OLS",
+    comparison_label: Optional[str] = None,
+    comparison_regression: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    series = _regression_series(
+        primary_label,
+        regression,
+        comparison_label=comparison_label,
+        comparison_regression=comparison_regression,
+    )
+    if not series:
+        return
+
+    predictor_keys = {
+        key
+        for _, reg in series
+        for key in (reg.get("predictors", {}) if isinstance(reg, dict) else {})
+    }
+    order = [
+        key for key in ("complexity_score", "prompt_complexity_score", "option_hardness_score")
+        if key in predictor_keys
+    ]
+    if not order:
+        return
+
+    labels = [_COEFFICIENT_LABELS.get(key, key) for key in order]
+    y_positions = np.arange(len(order))[::-1]
+    fig_height = max(3.4, 1.3 + 0.9 * len(order))
+    fig, ax = plt.subplots(figsize=(8.4, fig_height))
+    ax.axvline(0.0, color="#555555", linestyle="--", linewidth=1.0, alpha=0.8)
+
+    marker_cycle = ["o", "s", "D"]
+    offset_values = np.linspace(-0.16, 0.16, num=len(series)) if len(series) > 1 else np.array([0.0])
+    legend_handles: List[Any] = []
+    for series_idx, (series_label, reg) in enumerate(series):
+        predictors = reg.get("predictors", {}) if isinstance(reg, dict) else {}
+        marker = marker_cycle[series_idx % len(marker_cycle)]
+        for idx, key in enumerate(order):
+            predictor_stats = predictors.get(key)
+            if predictor_stats is None:
+                continue
+            center, lower, upper = _standardized_beta_and_ci(predictor_stats)
+            color = _COEFFICIENT_COLORS.get(key, "#444444")
+            ax.errorbar(
+                center,
+                y_positions[idx] + float(offset_values[series_idx]),
+                xerr=[[center - lower], [upper - center]],
+                fmt=marker,
+                color=color,
+                ecolor=color,
+                elinewidth=2.0,
+                capsize=4,
+                markersize=8,
+                alpha=0.95,
+            )
+        legend_handles.append(
+            plt.Line2D(
+                [0],
+                [0],
+                marker=marker,
+                color="#444444",
+                linestyle="None",
+                markersize=8,
+                label=series_label,
+            )
+        )
+
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(labels, fontsize=10)
+    ax.set_xlabel("Standardized Coefficient (95% CI)", fontsize=11)
+    ax.set_title(title, fontsize=13)
+    if subtitle:
+        ax.text(
+            0.0,
+            1.02,
+            subtitle,
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            color="#555555",
+        )
+    if legend_handles and len(legend_handles) > 1:
+        ax.legend(handles=legend_handles, fontsize=8, loc="lower right", title="Regression", title_fontsize=8)
+    ax.grid(axis="x", alpha=0.2, linewidth=0.6)
+    _apply_style(ax)
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=coefficient plot",
+            "Dots=standardized coefficients",
+            "Bars=approximate 95% CI from regression stderr",
+            "Predictors=semantic complexity, prompt load, option hardness",
+            "Series=pooled and within-image fixed effects when available",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def plot_dual_force_bars(
+    regression: Dict[str, Any],
+    out_path: Path,
+    *,
+    title: str,
+    subtitle: Optional[str] = None,
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    predictors = regression.get("predictors", {}) if isinstance(regression, dict) else {}
+    order = [key for key in ("complexity_score", "prompt_complexity_score") if key in predictors]
+    if not order:
+        return
+
+    labels = {
+        "complexity_score": "Semantic Logic\n(Compositional Precision)",
+        "prompt_complexity_score": "Prompt Load\n(Linguistic Anchoring)",
+    }
+    x = np.arange(len(order))
+    centers = []
+    lowers = []
+    uppers = []
+    colors = []
+    for key in order:
+        center, lower, upper = _standardized_beta_and_ci(predictors[key])
+        centers.append(center)
+        lowers.append(lower)
+        uppers.append(upper)
+        colors.append(_COEFFICIENT_COLORS.get(key, "#444444"))
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.axhline(0.0, color="#555555", linestyle="--", linewidth=1.0, alpha=0.8)
+    bars = ax.bar(x, centers, color=colors, alpha=0.9, width=0.62)
+    yerr = np.vstack([
+        np.asarray(centers) - np.asarray(lowers),
+        np.asarray(uppers) - np.asarray(centers),
+    ])
+    ax.errorbar(x, centers, yerr=yerr, fmt="none", ecolor="#333333", elinewidth=1.6, capsize=4)
+    for idx, bar in enumerate(bars):
+        height = float(centers[idx])
+        va = "bottom" if height >= 0 else "top"
+        y_text = height + (0.03 if height >= 0 else -0.03)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            y_text,
+            f"{height:.2f}",
+            ha="center",
+            va=va,
+            fontsize=9,
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([labels[key] for key in order], fontsize=10)
+    ax.set_ylabel("Standardized Coefficient (95% CI)", fontsize=11)
+    ax.set_title(title, fontsize=13)
+    if subtitle:
+        ax.text(
+            0.0,
+            1.02,
+            subtitle,
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            color="#555555",
+        )
+    ax.grid(axis="y", alpha=0.2, linewidth=0.6)
+    _apply_style(ax)
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=dual-force bar chart",
+            "Bars=standardized coefficients",
+            "Outcome=internal drift",
+            "Forces=semantic logic vs prompt load",
+        ),
+    )
+    _tight_layout(fig)
     _save_fig(fig, out_path)
 
 
@@ -2351,9 +2606,11 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     exp1_detail = _load_json(results_dir / "exp1" / "degradation_by_level.json")
     exp1_samples = _load_jsonl(results_dir / "exp1" / "per_sample.jsonl")
     exp1_complexity = _load_json(results_dir / "exp1" / "complexity_points.json")
+    exp1_tests = _load_json(results_dir / "exp1" / "hypothesis_tests.json")
     exp2_summary = _load_json(results_dir / "exp2" / "summary.json")
     exp2_samples = _load_json(results_dir / "exp2" / "power_spectra.json")
     exp2_complexity = _load_json(results_dir / "exp2" / "complexity_points.json")
+    exp2_tests = _load_json(results_dir / "exp2" / "hypothesis_tests.json")
     exp2_by_id = {
         str(record.get("image_id")): record
         for record in (exp2_samples or [])
@@ -2400,6 +2657,52 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
+    if exp1_tests:
+        cc = exp1_tests.get("continuous_complexity", {})
+        accuracy_reg_pooled = cc.get("horse_race_mean_accuracy_drop")
+        accuracy_reg_within = cc.get("horse_race_mean_accuracy_drop_within_image")
+        accuracy_reg = accuracy_reg_pooled or accuracy_reg_within
+        if accuracy_reg:
+            plot_coefficient_forest(
+                accuracy_reg,
+                plots_dir / "exp1_coefficient_plot_accuracy_drop.png",
+                title="Coefficient Plot: Accuracy Drop Controls",
+                subtitle="Pooled and within-image standardized coefficients",
+                primary_label="Pooled OLS" if accuracy_reg_pooled else "Within-Image Fixed Effects",
+                comparison_label="Within-Image Fixed Effects" if accuracy_reg_pooled and accuracy_reg_within else None,
+                comparison_regression=accuracy_reg_within if accuracy_reg_pooled else None,
+                metadata=_plot_metadata(
+                    experiment="1",
+                    what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                    aggregation="multivariate regression over per-image per-level averages",
+                    x="standardized coefficient with 95% CI",
+                    y="predictor",
+                    note="Shows pooled OLS and within-image fixed-effects when available",
+                    profile=profile,
+                ),
+            )
+        loglik_reg_pooled = cc.get("horse_race_mean_loglik_drift")
+        loglik_reg_within = cc.get("horse_race_mean_loglik_drift_within_image")
+        loglik_reg = loglik_reg_pooled or loglik_reg_within
+        if loglik_reg:
+            plot_coefficient_forest(
+                loglik_reg,
+                plots_dir / "exp1_coefficient_plot_loglik_drift.png",
+                title="Coefficient Plot: Log-Likelihood Drift Controls",
+                subtitle="Pooled and within-image standardized coefficients",
+                primary_label="Pooled OLS" if loglik_reg_pooled else "Within-Image Fixed Effects",
+                comparison_label="Within-Image Fixed Effects" if loglik_reg_pooled and loglik_reg_within else None,
+                comparison_regression=loglik_reg_within if loglik_reg_pooled else None,
+                metadata=_plot_metadata(
+                    experiment="1",
+                    what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                    aggregation="multivariate regression over per-image per-level averages",
+                    x="standardized coefficient with 95% CI",
+                    y="predictor",
+                    note="Shows pooled OLS and within-image fixed-effects when available; outcome is mean correct-answer log-likelihood drift",
+                    profile=profile,
+                ),
+            )
     if exp1_detail:
         levels, perturbations, matrix = _exp1_level_perturbation_matrix(exp1_detail)
         _plot_heatmap(
@@ -2574,6 +2877,30 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 plots_dir / "exp2_complexity_bandwidth.png",
                 profile=profile,
             )
+        if exp2_tests:
+            cc = exp2_tests.get("continuous_complexity", {})
+            bandwidth_reg_pooled = cc.get("horse_race_bandwidth")
+            bandwidth_reg_within = cc.get("horse_race_bandwidth_within_image")
+            bandwidth_reg = bandwidth_reg_pooled or bandwidth_reg_within
+            if bandwidth_reg:
+                plot_coefficient_forest(
+                    bandwidth_reg,
+                    plots_dir / "exp2_coefficient_plot_bandwidth.png",
+                    title="Coefficient Plot: Bandwidth Controls",
+                    subtitle="Pooled and within-image standardized coefficients",
+                    primary_label="Pooled OLS" if bandwidth_reg_pooled else "Within-Image Fixed Effects",
+                    comparison_label="Within-Image Fixed Effects" if bandwidth_reg_pooled and bandwidth_reg_within else None,
+                    comparison_regression=bandwidth_reg_within if bandwidth_reg_pooled else None,
+                    metadata=_plot_metadata(
+                        experiment="2",
+                        what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                        aggregation="multivariate regression over per-image per-level bandwidth",
+                        x="standardized coefficient with 95% CI",
+                        y="predictor",
+                        note="Shows pooled OLS and within-image fixed-effects when available; outcome is effective bandwidth G(t)",
+                        profile=profile,
+                    ),
+                )
         if exhaustive:
             _plot_exp2_level_band_heatmap(
                 exp2_summary,
@@ -2662,6 +2989,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     exp3_summary = _load_json(results_dir / "exp3" / "summary.json")
     exp3_samples = _load_json(results_dir / "exp3" / "amplification.json")
     exp3_tests = _load_json(results_dir / "exp3" / "hypothesis_tests.json")
+    exp3_complexity = _load_json(results_dir / "exp3" / "complexity_points.json")
     if exp3_summary:
         _plot_exp3_response_amplification(exp3_summary, plots_dir / "exp3_amplification.png")
         plot_amplification_heatmap(
@@ -2678,8 +3006,104 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp3_summary,
             plots_dir / "exp3_profile_group_response.png",
         )
+    if exp3_complexity:
+        plot_complexity_scatter(
+            exp3_complexity,
+            y_key="mean_post_drift_all",
+            y_label="Mean Post-Fusion Drift ΔZ_all",
+            out_path=plots_dir / "exp3_complexity_post_drift_all.png",
+            title="Post-Fusion Drift vs Semantic Complexity",
+            metadata=_plot_metadata(
+                experiment="3",
+                what="Continuous semantic complexity vs task-conditioned post-fusion response",
+                aggregation="per-image per-level average over perturbations",
+                x="semantic complexity score",
+                y="mean post-fusion drift ΔZ_all",
+                note="Black line is mean by exact score; dashed line is linear fit",
+                profile=profile,
+            ),
+        )
+        plot_complexity_scatter(
+            exp3_complexity,
+            y_key="mean_response_amplification",
+            y_label="Mean Response Amplification",
+            out_path=plots_dir / "exp3_complexity_response_amplification.png",
+            title="Response Amplification vs Semantic Complexity",
+            metadata=_plot_metadata(
+                experiment="3",
+                what="Continuous semantic complexity vs response amplification",
+                aggregation="per-image per-level average over perturbations",
+                x="semantic complexity score",
+                y="mean response amplification",
+                note="Black line is mean by exact score; dashed line is linear fit",
+                profile=profile,
+            ),
+        )
     if exp3_tests:
         _plot_exp3_group_correlations(exp3_tests, plots_dir / "exp3_group_correlations.png")
+        cc = exp3_tests.get("continuous_complexity", {})
+        post_reg_pooled = cc.get("horse_race_mean_post_drift_all")
+        post_reg_within = cc.get("horse_race_mean_post_drift_all_within_image")
+        post_reg = post_reg_pooled or post_reg_within
+        if post_reg:
+            plot_coefficient_forest(
+                post_reg,
+                plots_dir / "exp3_coefficient_plot_post_drift_all.png",
+                title="Coefficient Plot: Post-Fusion Drift Controls",
+                subtitle="Pooled and within-image standardized coefficients",
+                primary_label="Pooled OLS" if post_reg_pooled else "Within-Image Fixed Effects",
+                comparison_label="Within-Image Fixed Effects" if post_reg_pooled and post_reg_within else None,
+                comparison_regression=post_reg_within if post_reg_pooled else None,
+                metadata=_plot_metadata(
+                    experiment="3",
+                    what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                    aggregation="multivariate regression over per-image per-level mean post-fusion drift",
+                    x="standardized coefficient with 95% CI",
+                    y="predictor",
+                    note="Shows pooled OLS and within-image fixed-effects when available; outcome is mean post-fusion drift ΔZ_all",
+                    profile=profile,
+                ),
+            )
+            if post_reg_within or post_reg_pooled:
+                plot_dual_force_bars(
+                    post_reg_within or post_reg_pooled,
+                    plots_dir / "exp3_tug_of_war_internal_drift.png",
+                    title="Two-Factor Tug-of-War: Internal Drift",
+                    subtitle=(
+                        "Within-image fixed effects" if post_reg_within else "Pooled OLS"
+                    ),
+                    metadata=_plot_metadata(
+                        experiment="3",
+                        what="Standardized semantic-logic vs prompt-load effects on post-fusion internal drift",
+                        aggregation="multivariate regression over per-image per-level mean post-fusion drift",
+                        x="semantic logic and prompt load",
+                        y="standardized coefficient with 95% CI",
+                        note="Theory figure for compositional precision vs linguistic anchoring",
+                        profile=profile,
+                    ),
+                )
+        amp_reg_pooled = cc.get("horse_race_mean_response_amplification")
+        amp_reg_within = cc.get("horse_race_mean_response_amplification_within_image")
+        amp_reg = amp_reg_pooled or amp_reg_within
+        if amp_reg:
+            plot_coefficient_forest(
+                amp_reg,
+                plots_dir / "exp3_coefficient_plot_response_amplification.png",
+                title="Coefficient Plot: Response Amplification Controls",
+                subtitle="Pooled and within-image standardized coefficients",
+                primary_label="Pooled OLS" if amp_reg_pooled else "Within-Image Fixed Effects",
+                comparison_label="Within-Image Fixed Effects" if amp_reg_pooled and amp_reg_within else None,
+                comparison_regression=amp_reg_within if amp_reg_pooled else None,
+                metadata=_plot_metadata(
+                    experiment="3",
+                    what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                    aggregation="multivariate regression over per-image per-level mean response amplification",
+                    x="standardized coefficient with 95% CI",
+                    y="predictor",
+                    note="Shows pooled OLS and within-image fixed-effects when available; outcome is mean response amplification",
+                    profile=profile,
+                ),
+            )
     if exp3_samples:
         if exhaustive:
             levels, perturbations, matrix = _exp3_level_perturbation_matrix(exp3_samples)
@@ -2753,6 +3177,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     exp4_curves = _load_json(results_dir / "exp4" / "accuracy_curves.json")
     exp4_samples = _load_json(results_dir / "exp4" / "per_sample.json")
     exp4_complexity = _load_json(results_dir / "exp4" / "complexity_points.json")
+    exp4_tests = _load_json(results_dir / "exp4" / "hypothesis_tests.json")
     if exp4_curves:
         for mode in ("lowpass", "highpass"):
             plot_frequency_threshold_curves(
@@ -2768,6 +3193,32 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             plots_dir / "exp4_complexity_cutoff.png",
             profile=profile,
         )
+    if exp4_tests:
+        cc = exp4_tests.get("continuous_complexity", {})
+        for mode in ("lowpass", "highpass"):
+            mode_reg = cc.get(mode, {})
+            regression_pooled = mode_reg.get("horse_race_critical_cutoff")
+            regression_within = mode_reg.get("horse_race_critical_cutoff_within_image")
+            regression = regression_pooled or regression_within
+            if regression:
+                plot_coefficient_forest(
+                    regression,
+                    plots_dir / f"exp4_coefficient_plot_{mode}.png",
+                    title=f"Coefficient Plot: Critical Cutoff Controls ({mode})",
+                    subtitle="Pooled and within-image standardized coefficients",
+                    primary_label="Pooled OLS" if regression_pooled else "Within-Image Fixed Effects",
+                    comparison_label="Within-Image Fixed Effects" if regression_pooled and regression_within else None,
+                    comparison_regression=regression_within if regression_pooled else None,
+                    metadata=_plot_metadata(
+                        experiment="4",
+                        what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                        aggregation=f"multivariate regression over per-image per-level critical cutoff ({mode})",
+                        x="standardized coefficient with 95% CI",
+                        y="predictor",
+                        note=f"Shows pooled OLS and within-image fixed-effects when available; outcome is critical cutoff under {mode} sweep",
+                        profile=profile,
+                    ),
+                )
     if exp4_samples:
         _plot_exp4_sample_curves(
             exp4_samples,
@@ -2827,6 +3278,23 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
+        plot_overlap_scatter(
+            exp5_grouped,
+            image_summary.get("comparable_bridge_grouped", {}).get("pearson_r", 0.0),
+            plots_dir / "exp5_bridge_scatter.png",
+            title=f"Comparable Bridge: Overlap vs Accuracy Drop (grouped, {_exp5_source_label('image_space')})",
+            y_label=_exp5_target_label("accuracy_drop"),
+            scale_mode="bridge",
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Comparable-bridge view of predicted overlap vs observed accuracy drop",
+                aggregation="grouped by level and perturbation",
+                x="zscore(log1p(predicted spectral overlap))",
+                y=f"zscore({_exp5_target_label('accuracy_drop').lower()})",
+                note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
+                profile=profile,
+            ),
+        )
         _plot_exp5_heatmaps(
             exp5_grouped,
             plots_dir / "exp5_grouped_heatmap_image.png",
@@ -2860,6 +3328,23 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
+        plot_overlap_scatter(
+            exp5_vision_grouped,
+            vision_summary.get("comparable_bridge_grouped", {}).get("pearson_r", 0.0),
+            plots_dir / "exp5_bridge_scatter_vision.png",
+            title=f"Comparable Bridge: Overlap vs Accuracy Drop (grouped, {_exp5_source_label('vision_feature_space')})",
+            y_label=_exp5_target_label("accuracy_drop"),
+            scale_mode="bridge",
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Comparable-bridge view of predicted overlap vs observed accuracy drop",
+                aggregation="grouped by level and perturbation",
+                x="zscore(log1p(predicted spectral overlap))",
+                y=f"zscore({_exp5_target_label('accuracy_drop').lower()})",
+                note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
+                profile=profile,
+            ),
+        )
         _plot_exp5_heatmaps(
             exp5_vision_grouped,
             plots_dir / "exp5_grouped_heatmap_vision.png",
@@ -2889,6 +3374,50 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             "vision_feature_space",
             plots_dir / "exp5_per_level_correlation_vision_groups.png",
         )
+        if exp5_sample_by_group_and_target:
+            primary_group = exp5_summary.get("primary_group", "late")
+            primary_target = exp5_summary.get("primary_target", "accuracy_drop")
+            for source_name in ("image_space", "vision_feature_space"):
+                sample_points = (
+                    exp5_sample_by_group_and_target
+                    .get(source_name, {})
+                    .get(primary_group, {})
+                    .get(primary_target, [])
+                )
+                if sample_points:
+                    plot_complexity_scatter(
+                        sample_points,
+                        y_key="predicted",
+                        y_label="Predicted Sensitivity S_pred",
+                        out_path=plots_dir / f"exp5_complexity_predicted_{source_name}_{primary_group}_{primary_target}.png",
+                        title=f"S_pred vs Semantic Complexity ({_exp5_source_label(source_name)}, {primary_group})",
+                        metadata=_plot_metadata(
+                            experiment="5",
+                            what="Continuous semantic complexity vs predicted spectral sensitivity",
+                            aggregation="per-sample overlap pairs",
+                            x="semantic complexity score",
+                            y="predicted sensitivity S_pred",
+                            note=f"Source={_exp5_source_label(source_name)}; group={primary_group}; target={_exp5_target_label(primary_target)}",
+                            profile=profile,
+                        ),
+                    )
+                    if any(point.get("absolute_prediction_error") is not None for point in sample_points):
+                        plot_complexity_scatter(
+                            sample_points,
+                            y_key="absolute_prediction_error",
+                            y_label="Absolute Prediction Error",
+                            out_path=plots_dir / f"exp5_complexity_prediction_error_{source_name}_{primary_group}_{primary_target}.png",
+                            title=f"Prediction Error vs Semantic Complexity ({_exp5_source_label(source_name)}, {primary_group})",
+                            metadata=_plot_metadata(
+                                experiment="5",
+                                what="Continuous semantic complexity vs calibrated absolute prediction error",
+                                aggregation="per-sample overlap pairs",
+                                x="semantic complexity score",
+                                y="absolute prediction error",
+                                note=f"Source={_exp5_source_label(source_name)}; group={primary_group}; target={_exp5_target_label(primary_target)}",
+                                profile=profile,
+                            ),
+                        )
     if exhaustive and exp5_samples and exp5_summary:
         image_summary = exp5_summary.get("image_space", {}).get("primary_group_summary", exp5_summary.get("image_space", exp5_summary))
         plot_overlap_scatter(
@@ -2909,6 +3438,25 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
+        plot_overlap_scatter(
+            exp5_samples,
+            image_summary.get("comparable_bridge_sample", {}).get("pearson_r", 0.0),
+            plots_dir / "exp5_bridge_scatter_sample.png",
+            title=f"Comparable Bridge: Overlap vs Accuracy Drop (per sample, {_exp5_source_label('image_space')})",
+            point_size=20,
+            alpha=0.45,
+            y_label=_exp5_target_label("accuracy_drop"),
+            scale_mode="bridge",
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Comparable-bridge view of predicted overlap vs observed accuracy drop",
+                aggregation="per sample",
+                x="zscore(log1p(predicted spectral overlap))",
+                y=f"zscore({_exp5_target_label('accuracy_drop').lower()})",
+                note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
+                profile=profile,
+            ),
+        )
     if exhaustive and exp5_vision_samples and exp5_summary:
         vision_summary = exp5_summary.get("vision_feature_space", {}).get("primary_group_summary", exp5_summary.get("vision_feature_space", {}))
         plot_overlap_scatter(
@@ -2926,6 +3474,25 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 x="predicted spectral overlap S_pred",
                 y=_exp5_target_label("accuracy_drop"),
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
+        )
+        plot_overlap_scatter(
+            exp5_vision_samples,
+            vision_summary.get("comparable_bridge_sample", {}).get("pearson_r", 0.0),
+            plots_dir / "exp5_bridge_scatter_vision_sample.png",
+            title=f"Comparable Bridge: Overlap vs Accuracy Drop (per sample, {_exp5_source_label('vision_feature_space')})",
+            point_size=20,
+            alpha=0.45,
+            y_label=_exp5_target_label("accuracy_drop"),
+            scale_mode="bridge",
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Comparable-bridge view of predicted overlap vs observed accuracy drop",
+                aggregation="per sample",
+                x="zscore(log1p(predicted spectral overlap))",
+                y=f"zscore({_exp5_target_label('accuracy_drop').lower()})",
+                note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
                 profile=profile,
             ),
         )
@@ -3039,6 +3606,23 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                             profile=profile,
                         ),
                     )
+                    plot_overlap_scatter(
+                        grouped_pairs,
+                        target_summary.get("comparable_bridge_grouped", {}).get("pearson_r", 0.0),
+                        plots_dir / f"exp5_bridge_scatter_{source_name}_{primary_group}_{target_name}.png",
+                        title=f"Comparable Bridge: Overlap vs {_exp5_target_label(target_name)} ({_exp5_source_label(source_name)}, {primary_group})",
+                        y_label=_exp5_target_label(target_name),
+                        scale_mode="bridge",
+                        metadata=_plot_metadata(
+                            experiment="5",
+                            what=f"Comparable-bridge view of overlap vs {_exp5_target_label(target_name)}",
+                            aggregation="grouped by level and perturbation",
+                            x="zscore(log1p(predicted spectral overlap))",
+                            y=f"zscore({_exp5_target_label(target_name).lower()})",
+                            note=f"Source={_exp5_source_label(source_name)}; group={primary_group}; raw overlap results are still preserved separately",
+                            profile=profile,
+                        ),
+                    )
                     _plot_exp5_heatmaps(
                         grouped_pairs,
                         plots_dir / f"exp5_grouped_heatmap_{source_name}_{primary_group}_{target_name}.png",
@@ -3091,6 +3675,25 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                             if target_name == "loglik_erosion"
                             else f"Source={_exp5_source_label(source_name)}; group={primary_group}"
                         ),
+                        profile=profile,
+                    ),
+                )
+                plot_overlap_scatter(
+                    sample_pairs,
+                    target_summary.get("comparable_bridge_sample", {}).get("pearson_r", 0.0),
+                    plots_dir / f"exp5_bridge_scatter_{source_name}_{primary_group}_{target_name}_sample.png",
+                    title=f"Comparable Bridge: Overlap vs {_exp5_target_label(target_name)} ({_exp5_source_label(source_name)}, {primary_group}, per sample)",
+                    point_size=20,
+                    alpha=0.45,
+                    y_label=_exp5_target_label(target_name),
+                    scale_mode="bridge",
+                    metadata=_plot_metadata(
+                        experiment="5",
+                        what=f"Comparable-bridge view of overlap vs {_exp5_target_label(target_name)}",
+                        aggregation="per sample",
+                        x="zscore(log1p(predicted spectral overlap))",
+                        y=f"zscore({_exp5_target_label(target_name).lower()})",
+                        note=f"Source={_exp5_source_label(source_name)}; group={primary_group}; raw overlap results are still preserved separately",
                         profile=profile,
                     ),
                 )

@@ -77,15 +77,15 @@ perturbations:
 analysis:
   # Fallback manual band count. In auto mode the runner probes a few real images,
   # infers the model patch grid, and freezes one run-level count from the median grid.
-  num_bands: 12
+  num_bands: 20
   num_bands_mode: auto
   num_bands_auto:
     probe_samples: 6
     coefficient: 0.6
     rounding: ceil
     statistic: median
-    min_bands: 8
-    max_bands: 20
+    min_bands: 12
+    max_bands: 25
   suppress_dc: false
   attention_layers: all
   # Set to hann / hamming to enable windowing, or none / off / false to disable it.

@@ -63,22 +63,26 @@ python3 -m frequency_alignment.run_experiment \
 ### Experiment 1
 
 - Uses the configured VQA dataset. For the main research path this should be `gqa`.
-- Keeps the original same-image `L1-L4` labels, and also stores a continuous semantic complexity score per task based on prompt atoms (question semantics plus non-boolean option semantics).
+- Keeps the original same-image `L1-L4` labels, and also stores a continuous semantic complexity score per task based on a structured semantic program with a grounding-ambiguity term.
+- Also stores an explicit `option_hardness_score` control for MCQ discrimination difficulty.
 - Scores MCQ options with the parent repository’s assistant-continuation log-likelihood routine.
 - Stores raw and relative image-space perturbation spectra: `delta_f`, `delta_f_relative`.
 - When vision-token extraction is enabled, also stores raw and relative feature-space perturbation spectra: `delta_f_vision`, `delta_f_vision_relative`.
 - Stores the correct-option score change used downstream as `loglik_drift`, plus optional cosine drift and Dirichlet deltas.
-- Saves `complexity_points.json` so degradation can be analyzed as a continuous function of semantic complexity, not only as four discrete level averages.
+- Saves `complexity_points.json` so degradation can be analyzed as a continuous function of semantic complexity, while `prompt_complexity_score` and `option_hardness_score` remain available as controls.
+- `hypothesis_tests.json` now includes within-image fixed-effects regressions and multivariate horse-race regressions.
 
 ### Experiment 2
 
 - Extracts the effective language-to-vision attention map from the self-attention slice returned by the model.
-- Keeps the original level-wise summaries, and also stores a continuous semantic complexity score for each `(image, level)` task.
+- Keeps the original level-wise summaries, and also stores a continuous semantic complexity score for each `(image, level)` task, plus a separate prompt-load control score.
+- Also stores `option_hardness_score` so semantic complexity can be tested against MCQ discrimination difficulty.
 - Applies the configured attention FFT window before the 2D FFT to reduce spectral leakage from patch-grid borders. Supported values are `hann`, `hamming`, and the off modes `none` / `off` / `false`. The current configs default this to `none`.
 - Computes radial power spectra, `W_t`, and bandwidth for `overall`, `early`, `mid`, and `late` layer groups.
 - Runs prompt-only controls (`empty_language`, `random_language`) on the same images and stores divergence-to-task statistics.
 - Saves both per-sample and average filters for downstream experiments.
 - Saves `complexity_points.json` so effective bandwidth can be plotted against continuous semantic complexity.
+- `hypothesis_tests.json` now includes both pooled and within-image horse-race regressions (`semantic`, `prompt load`, `option hardness`) in addition to the univariate trends.
 
 ### Experiment 3
 
@@ -87,12 +91,15 @@ python3 -m frequency_alignment.run_experiment \
 - Computes the task-conditioned post-fusion response as scalar drift over all aligned tokens from a late decoder hidden state.
 - Groups perturbations by similar pre-fusion drift profiles so the controlled input is approximately held fixed.
 - Reports controlled overlap-vs-response correlations for `overall`, `early`, `mid`, and `late`, with `late` as the main post-fusion test.
+- Also runs continuous regressions from semantic complexity to internal response metrics (`ΔZ_all` and response amplification), including within-image fixed effects and horse-race controls over semantic complexity, prompt load, and option hardness.
+- The plotting layer now includes pooled-vs-within-image coefficient plots and a dedicated two-factor "tug-of-war" bar chart for internal drift.
 
 ### Experiment 4
 
 - Runs the low-pass / high-pass sweep on the same multilevel GQA samples.
 - Reports the critical cutoff where accuracy crosses the configured threshold.
-- Saves `complexity_points.json` so critical cutoffs can be analyzed against continuous semantic complexity, not only discrete level labels.
+- Saves `complexity_points.json` so critical cutoffs can be analyzed against continuous semantic complexity, with prompt load and option hardness retained as control variables.
+- `hypothesis_tests.json` now includes within-image fixed-effects and multivariate horse-race regressions for the continuous analysis.
 
 ### Experiment 5
 
@@ -105,6 +112,21 @@ python3 -m frequency_alignment.run_experiment \
   - `net_drop`
   - grouped `relative_accuracy_drop`
 - Treats the `late` filter group as the primary hypothesis test and the others as controls.
+- Also saves a standardized "comparable bridge" view in parallel with the raw overlap analysis:
+  - prediction uses `zscore(log1p(S_pred))`
+  - observed targets use `zscore(actual)`
+  - this is for effect-size comparability and visualization only; the raw overlap metrics remain intact
+- Also tracks whether predicted overlap and calibrated prediction error vary continuously with semantic complexity.
+
+## Two-Factor Interpretation
+
+Across the continuous analyses, the intended interpretation is:
+
+- `semantic complexity` measures **compositional precision**
+- `prompt load` measures potential **linguistic anchoring**
+- `option hardness` controls for MCQ discrimination difficulty
+
+The fixed-effects and horse-race regressions are therefore the main evidence for whether semantic complexity is the real driver of frequency-based fragility after controlling for prompt length and answer-set difficulty.
 
 ### Experiment 6
 

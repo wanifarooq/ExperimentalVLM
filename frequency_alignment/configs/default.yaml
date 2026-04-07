@@ -10,6 +10,7 @@ out_dir: frequency_alignment_outputs
 model:
   primary: Qwen/Qwen3-VL-30B-A3B-Instruct
   alternatives:
+    - Qwen/Qwen3-VL-2B-Instruct
     - Qwen/Qwen3-VL-8B-Instruct
     - llava-hf/llava-v1.6-mistral-7b-hf
     - OpenGVLab/InternVL3-8B-hf
@@ -85,16 +86,16 @@ perturbations:
 analysis:
   # Fallback manual band count. In auto mode the runner probes a few real images,
   # infers the model patch grid, and freezes one run-level count from the median grid.
-  num_bands: 12
+  num_bands: 20
   num_bands_mode: auto
   num_bands_auto:
     probe_samples: 8
     coefficient: 0.6
     rounding: ceil
     statistic: median
-    min_bands: 8
-    max_bands: 20
-  suppress_dc: true
+    min_bands: 14
+    max_bands: 30
+  suppress_dc: false
   attention_layers: all
   # Set to hann / hamming to enable windowing, or none / off / false to disable it.
   attention_fft_window: none
@@ -103,7 +104,7 @@ analysis:
 
 plotting:
   profile: exhaustive
-  representative_samples: 3
+  representative_samples: 10
 
 experiments:
   exp1:

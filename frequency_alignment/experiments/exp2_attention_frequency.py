@@ -26,7 +26,12 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from PIL import Image
 
-from ..analysis.continuous import summarize_by_score, summarize_linear_trend
+from ..analysis.continuous import (
+    summarize_by_score,
+    summarize_fixed_effects_trend,
+    summarize_linear_trend,
+    summarize_multivariate_regression,
+)
 from ..analysis.spectral import (
     compare_spectral_filters,
     compute_attention_power_spectrum_multi,
@@ -41,6 +46,14 @@ from ..analysis.statistics import (
 )
 from ..data.base import ExperimentResult, GranularityLevel
 from ..data.complexity import ensure_level_complexity
+from ..data.complexity import (
+    OPTION_HARDNESS_SCORE_DEFINITION,
+    OPTION_HARDNESS_SCORE_NAME,
+    PROMPT_COMPLEXITY_SCORE_DEFINITION,
+    PROMPT_COMPLEXITY_SCORE_NAME,
+    SEMANTIC_COMPLEXITY_SCORE_DEFINITION,
+    SEMANTIC_COMPLEXITY_SCORE_NAME,
+)
 from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
 from ..utils.device import select_device
@@ -68,6 +81,9 @@ def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str,
                 "prompt_complexity_score": float(
                     level_data.get("prompt_complexity_score", 0.0) or 0.0
                 ),
+                "option_hardness_score": float(
+                    level_data.get("option_hardness_score", 0.0) or 0.0
+                ),
                 "bandwidth": float(level_data.get("bandwidth", 0.0) or 0.0),
             }
             for group_name in LAYER_GROUP_ORDER:
@@ -91,14 +107,28 @@ def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
         if point.get("complexity_score") is not None
     ]
     summary: Dict[str, Any] = {
-        "score_name": "complexity_score",
-        "score_definition": "semantic prompt atoms (question semantics plus non-boolean option semantics)",
+        "score_name": SEMANTIC_COMPLEXITY_SCORE_NAME,
+        "score_definition": SEMANTIC_COMPLEXITY_SCORE_DEFINITION,
+        "control_score_name": PROMPT_COMPLEXITY_SCORE_NAME,
+        "control_score_definition": PROMPT_COMPLEXITY_SCORE_DEFINITION,
+        "option_hardness_score_name": OPTION_HARDNESS_SCORE_NAME,
+        "option_hardness_score_definition": OPTION_HARDNESS_SCORE_DEFINITION,
         "score_min": float(min(complexity_values)) if complexity_values else 0.0,
         "score_max": float(max(complexity_values)) if complexity_values else 0.0,
         "num_points": len(points),
         "mean_bandwidth_by_score": summarize_by_score(
             points,
             score_key="complexity_score",
+            value_key="bandwidth",
+        ),
+        "mean_bandwidth_by_prompt_load": summarize_by_score(
+            points,
+            score_key="prompt_complexity_score",
+            value_key="bandwidth",
+        ),
+        "mean_bandwidth_by_option_hardness": summarize_by_score(
+            points,
+            score_key="option_hardness_score",
             value_key="bandwidth",
         ),
         "layer_groups": {},
@@ -111,7 +141,12 @@ def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
                     points,
                     score_key="complexity_score",
                     value_key=value_key,
-                )
+                ),
+                "mean_bandwidth_by_option_hardness": summarize_by_score(
+                    points,
+                    score_key="option_hardness_score",
+                    value_key=value_key,
+                ),
             }
     return summary
 
@@ -400,9 +435,13 @@ def run_exp2(
                 "complexity_score": complexity["complexity_score"],
                 "question_complexity_score": complexity["question_complexity_score"],
                 "prompt_complexity_score": complexity["prompt_complexity_score"],
+                "option_hardness_score": float(getattr(level_data, "option_hardness_score", 0.0) or 0.0),
                 "semantic_atoms": complexity["semantic_atoms"],
                 "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],
                 "semantic_atom_counts": complexity["semantic_atom_counts"],
+                "option_hardness_components": dict(
+                    getattr(level_data, "option_hardness_components", {}) or {}
+                ),
                 "bandwidth": result["bandwidth"],
                 "radial_power": result["radial_power"].tolist(),
                 "W_t": result["W_t"].tolist(),
@@ -763,7 +802,43 @@ def run_exp2(
             complexity_points,
             x_key="complexity_score",
             y_key="bandwidth",
-        )
+        ),
+        "bandwidth_vs_prompt_load_overall": summarize_linear_trend(
+            complexity_points,
+            x_key="prompt_complexity_score",
+            y_key="bandwidth",
+        ),
+        "bandwidth_vs_option_hardness_overall": summarize_linear_trend(
+            complexity_points,
+            x_key="option_hardness_score",
+            y_key="bandwidth",
+        ),
+        "bandwidth_vs_complexity_fixed_effects_overall": summarize_fixed_effects_trend(
+            complexity_points,
+            group_key="image_id",
+            x_key="complexity_score",
+            y_key="bandwidth",
+        ),
+        "horse_race_bandwidth": summarize_multivariate_regression(
+            complexity_points,
+            y_key="bandwidth",
+            x_keys=[
+                "complexity_score",
+                "prompt_complexity_score",
+                "option_hardness_score",
+            ],
+        ),
+        "horse_race_bandwidth_within_image": summarize_multivariate_regression(
+            complexity_points,
+            y_key="bandwidth",
+            x_keys=[
+                "complexity_score",
+                "prompt_complexity_score",
+                "option_hardness_score",
+            ],
+            group_key="image_id",
+            demean_by_group=True,
+        ),
     }
     for group_name in LAYER_GROUP_ORDER:
         value_key = f"bandwidth_{group_name}"
@@ -773,6 +848,52 @@ def run_exp2(
                     complexity_points,
                     x_key="complexity_score",
                     y_key=value_key,
+                )
+            )
+            tests["continuous_complexity"][f"bandwidth_vs_prompt_load_{group_name}"] = (
+                summarize_linear_trend(
+                    complexity_points,
+                    x_key="prompt_complexity_score",
+                    y_key=value_key,
+                )
+            )
+            tests["continuous_complexity"][f"bandwidth_vs_option_hardness_{group_name}"] = (
+                summarize_linear_trend(
+                    complexity_points,
+                    x_key="option_hardness_score",
+                    y_key=value_key,
+                )
+            )
+            tests["continuous_complexity"][f"bandwidth_vs_complexity_fixed_effects_{group_name}"] = (
+                summarize_fixed_effects_trend(
+                    complexity_points,
+                    group_key="image_id",
+                    x_key="complexity_score",
+                    y_key=value_key,
+                )
+            )
+            tests["continuous_complexity"][f"horse_race_bandwidth_{group_name}"] = (
+                summarize_multivariate_regression(
+                    complexity_points,
+                    y_key=value_key,
+                    x_keys=[
+                        "complexity_score",
+                        "prompt_complexity_score",
+                        "option_hardness_score",
+                    ],
+                )
+            )
+            tests["continuous_complexity"][f"horse_race_bandwidth_within_image_{group_name}"] = (
+                summarize_multivariate_regression(
+                    complexity_points,
+                    y_key=value_key,
+                    x_keys=[
+                        "complexity_score",
+                        "prompt_complexity_score",
+                        "option_hardness_score",
+                    ],
+                    group_key="image_id",
+                    demean_by_group=True,
                 )
             )
     tests["hypothesis_supported"] = core_passed

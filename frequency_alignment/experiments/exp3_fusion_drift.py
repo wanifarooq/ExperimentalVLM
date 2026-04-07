@@ -31,6 +31,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
+from ..analysis.continuous import (
+    summarize_by_score,
+    summarize_fixed_effects_trend,
+    summarize_linear_trend,
+    summarize_multivariate_regression,
+)
 from ..analysis.drift import (
     compute_band_drift,
     compute_scalar_drift,
@@ -38,6 +44,15 @@ from ..analysis.drift import (
 )
 from ..analysis.statistics import pearson_correlation, spearman_correlation
 from ..data.base import ExperimentResult, GranularityLevel
+from ..data.complexity import ensure_level_complexity
+from ..data.complexity import (
+    OPTION_HARDNESS_SCORE_DEFINITION,
+    OPTION_HARDNESS_SCORE_NAME,
+    PROMPT_COMPLEXITY_SCORE_DEFINITION,
+    PROMPT_COMPLEXITY_SCORE_NAME,
+    SEMANTIC_COMPLEXITY_SCORE_DEFINITION,
+    SEMANTIC_COMPLEXITY_SCORE_NAME,
+)
 from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
 from ..perturbations import build_perturbation_suite, export_perturbation_suite_images
@@ -49,6 +64,82 @@ from ..utils.layer_groups import LAYER_GROUP_ORDER
 logger = logging.getLogger(__name__)
 FILTER_ANALYSIS_ORDER = ("overall",) + LAYER_GROUP_ORDER
 _EPS = 1e-10
+
+
+def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    for record in per_sample:
+        image_id = str(record.get("image_id"))
+        for level_key, level_data in record.get("levels", {}).items():
+            perturbations = level_data.get("perturbations", [])
+            if not perturbations:
+                continue
+            pre_values = [float(item.get("pre_drift_scalar", 0.0)) for item in perturbations]
+            post_all_values = [float(item.get("post_drift_scalar_all", 0.0)) for item in perturbations]
+            response_values = [float(item.get("response_amplification", 0.0)) for item in perturbations]
+            point = {
+                "image_id": image_id,
+                "level": level_key,
+                "question": level_data.get("question"),
+                "question_type": level_data.get("question_type"),
+                "complexity_score": float(level_data.get("complexity_score", 0.0) or 0.0),
+                "question_complexity_score": float(
+                    level_data.get("question_complexity_score", 0.0) or 0.0
+                ),
+                "prompt_complexity_score": float(
+                    level_data.get("prompt_complexity_score", 0.0) or 0.0
+                ),
+                "option_hardness_score": float(
+                    level_data.get("option_hardness_score", 0.0) or 0.0
+                ),
+                "mean_pre_drift_scalar": float(np.mean(pre_values)) if pre_values else 0.0,
+                "mean_post_drift_all": float(np.mean(post_all_values)) if post_all_values else 0.0,
+                "mean_response_amplification": float(np.mean(response_values)) if response_values else 0.0,
+                "num_perturbations": len(perturbations),
+            }
+            points.append(point)
+    return points
+
+
+def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not points:
+        return {}
+    complexity_values = [
+        float(point.get("complexity_score", 0.0))
+        for point in points
+        if point.get("complexity_score") is not None
+    ]
+    return {
+        "score_name": SEMANTIC_COMPLEXITY_SCORE_NAME,
+        "score_definition": SEMANTIC_COMPLEXITY_SCORE_DEFINITION,
+        "control_score_name": PROMPT_COMPLEXITY_SCORE_NAME,
+        "control_score_definition": PROMPT_COMPLEXITY_SCORE_DEFINITION,
+        "option_hardness_score_name": OPTION_HARDNESS_SCORE_NAME,
+        "option_hardness_score_definition": OPTION_HARDNESS_SCORE_DEFINITION,
+        "score_min": float(min(complexity_values)) if complexity_values else 0.0,
+        "score_max": float(max(complexity_values)) if complexity_values else 0.0,
+        "num_points": len(points),
+        "mean_post_drift_all_by_score": summarize_by_score(
+            points,
+            score_key="complexity_score",
+            value_key="mean_post_drift_all",
+        ),
+        "mean_response_amplification_by_score": summarize_by_score(
+            points,
+            score_key="complexity_score",
+            value_key="mean_response_amplification",
+        ),
+        "mean_post_drift_all_by_prompt_load": summarize_by_score(
+            points,
+            score_key="prompt_complexity_score",
+            value_key="mean_post_drift_all",
+        ),
+        "mean_response_amplification_by_option_hardness": summarize_by_score(
+            points,
+            score_key="option_hardness_score",
+            value_key="mean_response_amplification",
+        ),
+    }
 
 
 def _spectral_overlap_score(pre_drift_bands: np.ndarray, W_t: np.ndarray) -> float:
@@ -413,6 +504,7 @@ def run_exp3(
             if level_data is None:
                 continue
             level_key = level.name
+            complexity = ensure_level_complexity(level_data)
 
             group_filters: Dict[str, Optional[np.ndarray]] = {
                 "overall": W_t_per_sample_by_group["overall"].get(
@@ -559,6 +651,18 @@ def run_exp3(
 
             if level_pert_records:
                 sample_record["levels"][level_key] = {
+                    "question": level_data.question,
+                    "question_type": level_data.question_type,
+                    "complexity_score": complexity["complexity_score"],
+                    "question_complexity_score": complexity["question_complexity_score"],
+                    "prompt_complexity_score": complexity["prompt_complexity_score"],
+                    "option_hardness_score": float(getattr(level_data, "option_hardness_score", 0.0) or 0.0),
+                    "semantic_atoms": complexity["semantic_atoms"],
+                    "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],
+                    "semantic_atom_counts": complexity["semantic_atom_counts"],
+                    "option_hardness_components": dict(
+                        getattr(level_data, "option_hardness_components", {}) or {}
+                    ),
                     "num_perturbations": len(level_pert_records),
                     "post_fusion_layer_index": clean_internals.post_fusion_layer_index,
                     "analysis_groups": {
@@ -652,6 +756,9 @@ def run_exp3(
         "post_fusion_layer_fraction": post_fusion_layer_fraction,
         "post_fusion_layer_index": post_fusion_layer_index,
     }
+
+    complexity_points = _build_complexity_points(per_sample)
+    agg["complexity_analysis"] = _summarize_complexity(complexity_points)
 
     level_order = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
     present_levels = [level_key for level_key in level_order if level_key in level_post_all_drifts]
@@ -758,6 +865,81 @@ def run_exp3(
     tests["primary_group"] = "late"
     tests["control_groups"] = [group_name for group_name in FILTER_ANALYSIS_ORDER if group_name != "late"]
     tests["hypothesis_supported"] = bool(late_primary.get("passed", False))
+    if complexity_points:
+        tests["continuous_complexity"] = {
+            "mean_post_drift_all_vs_complexity": summarize_linear_trend(
+                complexity_points,
+                x_key="complexity_score",
+                y_key="mean_post_drift_all",
+            ),
+            "mean_response_amplification_vs_complexity": summarize_linear_trend(
+                complexity_points,
+                x_key="complexity_score",
+                y_key="mean_response_amplification",
+            ),
+            "mean_post_drift_all_vs_prompt_load": summarize_linear_trend(
+                complexity_points,
+                x_key="prompt_complexity_score",
+                y_key="mean_post_drift_all",
+            ),
+            "mean_response_amplification_vs_option_hardness": summarize_linear_trend(
+                complexity_points,
+                x_key="option_hardness_score",
+                y_key="mean_response_amplification",
+            ),
+            "mean_post_drift_all_vs_complexity_fixed_effects": summarize_fixed_effects_trend(
+                complexity_points,
+                group_key="image_id",
+                x_key="complexity_score",
+                y_key="mean_post_drift_all",
+            ),
+            "mean_response_amplification_vs_complexity_fixed_effects": summarize_fixed_effects_trend(
+                complexity_points,
+                group_key="image_id",
+                x_key="complexity_score",
+                y_key="mean_response_amplification",
+            ),
+            "horse_race_mean_post_drift_all": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_post_drift_all",
+                x_keys=[
+                    "complexity_score",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+            ),
+            "horse_race_mean_post_drift_all_within_image": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_post_drift_all",
+                x_keys=[
+                    "complexity_score",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                group_key="image_id",
+                demean_by_group=True,
+            ),
+            "horse_race_mean_response_amplification": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_response_amplification",
+                x_keys=[
+                    "complexity_score",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+            ),
+            "horse_race_mean_response_amplification_within_image": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_response_amplification",
+                x_keys=[
+                    "complexity_score",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                group_key="image_id",
+                demean_by_group=True,
+            ),
+        }
 
     logger.info("-" * 40)
     for level_key in present_levels:
@@ -785,6 +967,7 @@ def run_exp3(
     save_json(agg, out_dir / "summary.json")
     save_json(tests, out_dir / "hypothesis_tests.json")
     save_json(per_sample, out_dir / "amplification.json")
+    save_json(complexity_points, out_dir / "complexity_points.json")
 
     try:
         adapter.unload()

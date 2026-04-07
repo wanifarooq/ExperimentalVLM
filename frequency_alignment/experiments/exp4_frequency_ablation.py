@@ -27,13 +27,26 @@ from typing import Any, Dict, List
 import numpy as np
 from PIL import Image
 
-from ..analysis.continuous import summarize_by_score, summarize_linear_trend
+from ..analysis.continuous import (
+    summarize_by_score,
+    summarize_fixed_effects_trend,
+    summarize_linear_trend,
+    summarize_multivariate_regression,
+)
 from ..analysis.statistics import (
     monotonicity_test,
     spearman_correlation,
 )
 from ..data.base import ExperimentResult, GranularityLevel
 from ..data.complexity import ensure_level_complexity
+from ..data.complexity import (
+    OPTION_HARDNESS_SCORE_DEFINITION,
+    OPTION_HARDNESS_SCORE_NAME,
+    PROMPT_COMPLEXITY_SCORE_DEFINITION,
+    PROMPT_COMPLEXITY_SCORE_NAME,
+    SEMANTIC_COMPLEXITY_SCORE_DEFINITION,
+    SEMANTIC_COMPLEXITY_SCORE_NAME,
+)
 from ..data.loaders import load_multilevel_vqa_dataset
 from ..models import get_adapter
 from ..perturbations.frequency_sweep import compute_critical_cutoff, frequency_sweep
@@ -75,6 +88,9 @@ def _build_complexity_points(
                         "prompt_complexity_score": float(
                             level_data.get("prompt_complexity_score", 0.0) or 0.0
                         ),
+                        "option_hardness_score": float(
+                            level_data.get("option_hardness_score", 0.0) or 0.0
+                        ),
                         "critical_cutoff": float(
                             compute_critical_cutoff(accuracy, cutoffs, threshold=threshold)
                         ),
@@ -95,8 +111,12 @@ def _summarize_complexity(
         if point.get("complexity_score") is not None
     ]
     summary: Dict[str, Any] = {
-        "score_name": "complexity_score",
-        "score_definition": "semantic prompt atoms (question semantics plus non-boolean option semantics)",
+        "score_name": SEMANTIC_COMPLEXITY_SCORE_NAME,
+        "score_definition": SEMANTIC_COMPLEXITY_SCORE_DEFINITION,
+        "control_score_name": PROMPT_COMPLEXITY_SCORE_NAME,
+        "control_score_definition": PROMPT_COMPLEXITY_SCORE_DEFINITION,
+        "option_hardness_score_name": OPTION_HARDNESS_SCORE_NAME,
+        "option_hardness_score_definition": OPTION_HARDNESS_SCORE_DEFINITION,
         "score_min": float(min(complexity_values)) if complexity_values else 0.0,
         "score_max": float(max(complexity_values)) if complexity_values else 0.0,
         "num_points": len(points),
@@ -109,7 +129,17 @@ def _summarize_complexity(
                 mode_points,
                 score_key="complexity_score",
                 value_key="critical_cutoff",
-            )
+            ),
+            "mean_critical_cutoff_by_prompt_load": summarize_by_score(
+                mode_points,
+                score_key="prompt_complexity_score",
+                value_key="critical_cutoff",
+            ),
+            "mean_critical_cutoff_by_option_hardness": summarize_by_score(
+                mode_points,
+                score_key="option_hardness_score",
+                value_key="critical_cutoff",
+            ),
         }
     return summary
 
@@ -231,9 +261,13 @@ def run_exp4(
                     "complexity_score": complexity["complexity_score"],
                     "question_complexity_score": complexity["question_complexity_score"],
                     "prompt_complexity_score": complexity["prompt_complexity_score"],
+                    "option_hardness_score": float(getattr(level_data, "option_hardness_score", 0.0) or 0.0),
                     "semantic_atoms": complexity["semantic_atoms"],
                     "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],
                     "semantic_atom_counts": complexity["semantic_atom_counts"],
+                    "option_hardness_components": dict(
+                        getattr(level_data, "option_hardness_components", {}) or {}
+                    ),
                     "correct_at_cutoff": accuracies_at_cutoff,
                 }
 
@@ -317,11 +351,49 @@ def run_exp4(
     tests["continuous_complexity"] = {}
     for mode in sweep_modes:
         mode_points = [point for point in complexity_points if point.get("mode") == mode]
-        tests["continuous_complexity"][mode] = summarize_linear_trend(
-            mode_points,
-            x_key="complexity_score",
-            y_key="critical_cutoff",
-        )
+        tests["continuous_complexity"][mode] = {
+            "critical_cutoff_vs_complexity": summarize_linear_trend(
+                mode_points,
+                x_key="complexity_score",
+                y_key="critical_cutoff",
+            ),
+            "critical_cutoff_vs_prompt_load": summarize_linear_trend(
+                mode_points,
+                x_key="prompt_complexity_score",
+                y_key="critical_cutoff",
+            ),
+            "critical_cutoff_vs_option_hardness": summarize_linear_trend(
+                mode_points,
+                x_key="option_hardness_score",
+                y_key="critical_cutoff",
+            ),
+            "critical_cutoff_vs_complexity_fixed_effects": summarize_fixed_effects_trend(
+                mode_points,
+                group_key="image_id",
+                x_key="complexity_score",
+                y_key="critical_cutoff",
+            ),
+            "horse_race_critical_cutoff": summarize_multivariate_regression(
+                mode_points,
+                y_key="critical_cutoff",
+                x_keys=[
+                    "complexity_score",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+            ),
+            "horse_race_critical_cutoff_within_image": summarize_multivariate_regression(
+                mode_points,
+                y_key="critical_cutoff",
+                x_keys=[
+                    "complexity_score",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                group_key="image_id",
+                demean_by_group=True,
+            ),
+        }
 
     # Summary: lowpass is the main test
     lp_mono = tests.get("monotonicity_lowpass", {}).get("passed", False)

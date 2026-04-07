@@ -253,6 +253,93 @@ def _make_distractors(
     return pool[:n]
 
 
+def _count_named_objects(objects: Dict[str, dict], object_name: str) -> int:
+    object_name = str(object_name or "").strip().lower()
+    if not object_name:
+        return 0
+    return sum(
+        1
+        for obj in objects.values()
+        if str(obj.get("name", "")).strip().lower() == object_name
+    )
+
+
+def _count_named_pairs(
+    objects: Dict[str, dict],
+    subject_name: str,
+    target_name: str,
+) -> int:
+    subject_name = str(subject_name or "").strip().lower()
+    target_name = str(target_name or "").strip().lower()
+    if not subject_name or not target_name:
+        return 0
+    subject_ids = [
+        object_id
+        for object_id, obj in objects.items()
+        if str(obj.get("name", "")).strip().lower() == subject_name
+    ]
+    target_ids = [
+        object_id
+        for object_id, obj in objects.items()
+        if str(obj.get("name", "")).strip().lower() == target_name
+    ]
+    return sum(1 for sid in subject_ids for tid in target_ids if sid != tid)
+
+
+def _scene_attribute_inventory(objects: Dict[str, dict]) -> Set[str]:
+    inventory: Set[str] = set()
+    for obj in objects.values():
+        for attr in obj.get("attributes", []) or []:
+            attr_name = str(attr or "").strip().lower()
+            if attr_name:
+                inventory.add(attr_name)
+    return inventory
+
+
+def _compute_option_hardness(
+    *,
+    options: Dict[str, str],
+    answer_label: Optional[str],
+    attribute_category: Optional[str] = None,
+    scene_attributes: Optional[Set[str]] = None,
+) -> Tuple[float, Dict[str, Any]]:
+    """Approximate MCQ discrimination difficulty.
+
+    The primary term is the number of distractors drawn from the same semantic
+    category as the correct answer. A secondary scene-plausibility term counts
+    distractors that also occur as attributes somewhere in the scene.
+    """
+
+    if not options or answer_label not in options:
+        return 0.0, {
+            "num_distractors": 0,
+            "same_category_distractors": 0,
+            "scene_present_distractors": 0,
+        }
+
+    distractors = [
+        str(value or "").strip().lower()
+        for label, value in options.items()
+        if label != answer_label
+    ]
+    same_category_distractors = 0
+    if attribute_category:
+        same_category_distractors = sum(
+            1 for distractor in distractors
+            if _ATTR_TO_CATEGORY.get(distractor) == attribute_category
+        )
+    scene_attributes = scene_attributes or set()
+    scene_present_distractors = sum(
+        1 for distractor in distractors if distractor in scene_attributes
+    )
+    hardness = float(same_category_distractors + 0.5 * scene_present_distractors)
+    return hardness, {
+        "num_distractors": len(distractors),
+        "same_category_distractors": int(same_category_distractors),
+        "scene_present_distractors": int(scene_present_distractors),
+    }
+
+
 def build_l1_question(
     sg: dict,
     obj_id: str,
@@ -270,7 +357,7 @@ def build_l1_question(
         question = f"Is there a {name} in this image?"
         answer = "A"
         options = {"A": "yes", "B": "no"}
-        complexity = build_semantic_complexity(entity_names=[name], options=options)
+        grounding_candidates = _count_named_objects(sg.get("objects", {}), name)
     else:
         # Pick an absent object
         absent = list(all_object_names - {o.get("name", "") for o in sg.get("objects", {}).values()})
@@ -280,7 +367,20 @@ def build_l1_question(
         question = f"Is there a {absent_name} in this image?"
         answer = "B"
         options = {"A": "yes", "B": "no"}
-        complexity = build_semantic_complexity(entity_names=[absent_name], options=options)
+        name = absent_name
+        grounding_candidates = 0
+    complexity = build_semantic_complexity(
+        entity_names=[name],
+        reasoning_ops=["exist"],
+        program_depth=1,
+        grounding_candidate_count=grounding_candidates,
+        question_text=question,
+        options=options,
+    )
+    option_hardness_score, option_hardness_components = _compute_option_hardness(
+        options=options,
+        answer_label=answer,
+    )
 
     return LevelData(
         level=GranularityLevel.L1_COARSE,
@@ -288,6 +388,8 @@ def build_l1_question(
         options=options,
         answer_label=answer,
         question_type="object_presence",
+        option_hardness_score=option_hardness_score,
+        option_hardness_components=option_hardness_components,
         **complexity,
     )
 
@@ -325,7 +427,17 @@ def build_l2_question(
     complexity = build_semantic_complexity(
         entity_names=[name],
         attribute_queries=[cat],
+        reasoning_ops=["query_attribute"],
+        program_depth=2,
+        grounding_candidate_count=_count_named_objects(sg.get("objects", {}), name),
+        question_text=question,
         options=options,
+    )
+    option_hardness_score, option_hardness_components = _compute_option_hardness(
+        options=options,
+        answer_label=answer,
+        attribute_category=cat,
+        scene_attributes=_scene_attribute_inventory(sg.get("objects", {})),
     )
     return LevelData(
         level=GranularityLevel.L2_MEDIUM,
@@ -333,6 +445,8 @@ def build_l2_question(
         options=options,
         answer_label=answer,
         question_type=f"attribute_{cat}",
+        option_hardness_score=option_hardness_score,
+        option_hardness_components=option_hardness_components,
         **complexity,
     )
 
@@ -381,7 +495,15 @@ def build_l3_question(
     complexity = build_semantic_complexity(
         entity_names=[name, target_name],
         relation_labels=[rel_name],
+        reasoning_ops=["verify_relation"],
+        program_depth=2,
+        grounding_candidate_count=_count_named_pairs(objects, name, target_name),
+        question_text=question,
         options=options,
+    )
+    option_hardness_score, option_hardness_components = _compute_option_hardness(
+        options=options,
+        answer_label=answer,
     )
     return LevelData(
         level=GranularityLevel.L3_FINE,
@@ -389,6 +511,8 @@ def build_l3_question(
         options=options,
         answer_label=answer,
         question_type="spatial_relationship",
+        option_hardness_score=option_hardness_score,
+        option_hardness_components=option_hardness_components,
         **complexity,
     )
 
@@ -449,7 +573,17 @@ def build_l4_question(
         entity_names=[name, target_name],
         attribute_queries=[cat],
         relation_labels=[rel_name],
+        reasoning_ops=["restrict_by_relation", "query_attribute"],
+        program_depth=3,
+        grounding_candidate_count=_count_named_pairs(objects, name, target_name),
+        question_text=question,
         options=options,
+    )
+    option_hardness_score, option_hardness_components = _compute_option_hardness(
+        options=options,
+        answer_label=answer,
+        attribute_category=cat,
+        scene_attributes=_scene_attribute_inventory(objects),
     )
     return LevelData(
         level=GranularityLevel.L4_VERY_FINE,
@@ -457,6 +591,8 @@ def build_l4_question(
         options=options,
         answer_label=answer,
         question_type=f"compositional_{cat}",
+        option_hardness_score=option_hardness_score,
+        option_hardness_components=option_hardness_components,
         **complexity,
     )
 
