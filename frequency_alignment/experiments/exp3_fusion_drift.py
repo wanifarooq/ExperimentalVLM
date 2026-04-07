@@ -66,6 +66,25 @@ FILTER_ANALYSIS_ORDER = ("overall",) + LAYER_GROUP_ORDER
 _EPS = 1e-10
 
 
+def _resolve_perturbation_subset(value: Any) -> Optional[int]:
+    """Resolve the Exp 3 perturbation cap.
+
+    ``null`` / ``None`` in YAML means "use all perturbations".
+    Positive integers keep only the first N perturbations per sample.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "all", "null", "none"}:
+            return None
+        value = normalized
+    subset = int(value)
+    if subset <= 0:
+        return None
+    return subset
+
+
 def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     points: List[Dict[str, Any]] = []
     for record in per_sample:
@@ -326,7 +345,7 @@ def run_exp3(
 
     exp_cfg = cfg.get("experiments", {}).get("exp3", {})
     max_samples = exp_cfg.get("max_samples", 200)
-    pert_subset = exp_cfg.get("perturbation_subset", 10)
+    pert_subset = _resolve_perturbation_subset(exp_cfg.get("perturbation_subset", 10))
     num_bands = cfg.get("analysis", {}).get("num_bands", 10)
     suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
     post_fusion_layer_index = exp_cfg.get("post_fusion_layer_index")
@@ -341,6 +360,10 @@ def run_exp3(
         len(W_t_average_by_group["overall"]),
         len(W_t_per_sample_by_group["late"]),
     )
+    if pert_subset is None:
+        logger.info("Exp 3 perturbation subset: all perturbations per sample")
+    else:
+        logger.info("Exp 3 perturbation subset: first %d perturbations per sample", pert_subset)
 
     model_cfg = cfg.get("model", {})
     model_id = model_cfg.get("primary", "Qwen/Qwen3-VL-8B-Instruct")

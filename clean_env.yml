@@ -1,28 +1,27 @@
-name: base
+name: vlm-robustness
 channels:
-  - defaults
+  - conda-forge
 dependencies:
-  - _anaconda_depends
-  - python=3.13
-  - setuptools
+  # Keep the conda side minimal and avoid pinning CUDA toolkits / compilers here.
+  # GPU drivers are expected to be managed by the server.
+  - python=3.10
   - pip
-  - wheel
-  - anaconda-anon-usage
-  - anaconda-catalogs
-  - anaconda-client
-  - anaconda-project
-  - anaconda-navigator
-  - conda
-  - conda-anaconda-telemetry
-  - conda-anaconda-tos[version='>=0.2.0']
-  - conda-build
-  - conda-content-trust
-  - conda-libmamba-solver
-  - conda-pack
-  - conda-package-handling
-  - conda-package-streaming
-  - anaconda-auth
-  - anaconda-toolbox
-  - cuda-nvcc=12.9
-  - cuda-libraries-dev=12.9
-prefix: /home/farooq/anaconda3
+  - numpy
+  - scipy
+  - matplotlib
+  - pillow
+  - pyyaml
+  - requests
+  - pycocotools
+  - pip:
+      # Core VLM stack for frequency_alignment and the current Qwen/LLaVA/InternVL paths.
+      - torch
+      - torchvision
+      - transformers>=4.57.0
+      - accelerate
+
+      # Optional only if you explicitly need them:
+      # - bitsandbytes          # quantized loading
+      # - segment-anything-2    # exp6 segmentation path
+      # - pandas                # root-level vlm_invariance_check.py helpers
+      # - scikit-learn          # PCA / t-SNE utilities in root scripts

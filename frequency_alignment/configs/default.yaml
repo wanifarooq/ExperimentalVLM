@@ -124,6 +124,7 @@ experiments:
   exp3:
     enabled: true
     max_samples: 200
+    # Set to null to use all perturbations for each sample.
     perturbation_subset: 10
     post_fusion_layer_fraction: 0.8
   exp4:
