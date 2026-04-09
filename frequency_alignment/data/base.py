@@ -15,6 +15,25 @@ class GranularityLevel(IntEnum):
     L2_MEDIUM = 2       # Attribute recognition / part-level segmentation
     L3_FINE = 3          # Spatial relationship / subpart segmentation
     L4_VERY_FINE = 4     # Compositional MCQ reasoning
+    L5_WORDY_SIMPLETON = 5  # L1 semantics with inflated prompt load control
+
+
+PRIMARY_VQA_LEVELS: List[GranularityLevel] = [
+    GranularityLevel.L1_COARSE,
+    GranularityLevel.L2_MEDIUM,
+    GranularityLevel.L3_FINE,
+    GranularityLevel.L4_VERY_FINE,
+]
+ALL_VQA_LEVELS: List[GranularityLevel] = PRIMARY_VQA_LEVELS + [
+    GranularityLevel.L5_WORDY_SIMPLETON,
+]
+PRIMARY_VQA_LEVEL_NAMES: List[str] = [level.name for level in PRIMARY_VQA_LEVELS]
+ALL_VQA_LEVEL_NAMES: List[str] = [level.name for level in ALL_VQA_LEVELS]
+VERIFICATION_VQA_LEVELS: List[GranularityLevel] = [
+    GranularityLevel.L1_COARSE,
+    GranularityLevel.L3_FINE,
+    GranularityLevel.L5_WORDY_SIMPLETON,
+]
 
 
 @dataclass
@@ -48,7 +67,7 @@ class GranularitySample:
 
     This is the primary sample type for the frequency alignment experiments.
     Each sample contains the same image but with questions/prompts ranging
-    from coarse (L1) to fine (L4) granularity.
+    from coarse (L1) to fine (L4) granularity, plus optional control levels.
     """
 
     image_id: str
@@ -77,7 +96,12 @@ class GranularitySample:
         MCQ context. The default overlay mode is label-free, so this fallback
         is only used when that legacy mode is explicitly enabled.
         """
-        for level in sorted(self.levels.keys(), key=int, reverse=True):
+        preferred_levels = list(reversed(PRIMARY_VQA_LEVELS))
+        fallback_levels = [
+            level for level in sorted(self.levels.keys(), key=int, reverse=True)
+            if level not in preferred_levels
+        ]
+        for level in preferred_levels + fallback_levels:
             level_data = self.levels.get(level)
             if level_data and level_data.options:
                 return level_data.options, level_data.answer_label

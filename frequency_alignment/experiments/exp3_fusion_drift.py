@@ -32,6 +32,7 @@ import numpy as np
 from PIL import Image
 
 from ..analysis.continuous import (
+    attach_complexity_residual,
     summarize_by_score,
     summarize_fixed_effects_trend,
     summarize_linear_trend,
@@ -43,7 +44,7 @@ from ..analysis.drift import (
     compute_scalar_drift_all_tokens,
 )
 from ..analysis.statistics import pearson_correlation, spearman_correlation
-from ..data.base import ExperimentResult, GranularityLevel
+from ..data.base import ExperimentResult, GranularityLevel, ALL_VQA_LEVEL_NAMES, PRIMARY_VQA_LEVEL_NAMES
 from ..data.complexity import ensure_level_complexity
 from ..data.complexity import (
     OPTION_HARDNESS_SCORE_DEFINITION,
@@ -117,6 +118,7 @@ def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str,
                 "num_perturbations": len(perturbations),
             }
             points.append(point)
+    attach_complexity_residual(points)
     return points
 
 
@@ -135,6 +137,8 @@ def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
         "control_score_definition": PROMPT_COMPLEXITY_SCORE_DEFINITION,
         "option_hardness_score_name": OPTION_HARDNESS_SCORE_NAME,
         "option_hardness_score_definition": OPTION_HARDNESS_SCORE_DEFINITION,
+        "logic_residual_key": "complexity_score_residual",
+        "logic_residual_definition": "Residual of semantic complexity after linear regression on prompt load.",
         "score_min": float(min(complexity_values)) if complexity_values else 0.0,
         "score_max": float(max(complexity_values)) if complexity_values else 0.0,
         "num_points": len(points),
@@ -743,7 +747,7 @@ def run_exp3(
     for profile_group, summary in profile_group_summary.items():
         group_obs = [obs for obs in observations if obs.get("profile_group") == profile_group]
         per_level_summary: Dict[str, Any] = {}
-        for level_key in ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]:
+        for level_key in ALL_VQA_LEVEL_NAMES:
             level_obs = [obs for obs in group_obs if obs["level"] == level_key]
             if not level_obs:
                 continue
@@ -783,8 +787,9 @@ def run_exp3(
     complexity_points = _build_complexity_points(per_sample)
     agg["complexity_analysis"] = _summarize_complexity(complexity_points)
 
-    level_order = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
+    level_order = list(ALL_VQA_LEVEL_NAMES)
     present_levels = [level_key for level_key in level_order if level_key in level_post_all_drifts]
+    primary_present_levels = [level_key for level_key in PRIMARY_VQA_LEVEL_NAMES if level_key in level_post_all_drifts]
 
     for level_key in present_levels:
         mean_pre_bands = np.mean(np.stack(level_pre_band_profiles[level_key]), axis=0)
@@ -856,20 +861,20 @@ def run_exp3(
                 _controlled_correlation_payload(observations, group_name, level=level_key)
             )
 
-    if present_levels:
-        post_values = [agg["per_level"][level_key]["mean_post_drift_all"] for level_key in present_levels]
+    if primary_present_levels:
+        post_values = [agg["per_level"][level_key]["mean_post_drift_all"] for level_key in primary_present_levels]
         rho, p = spearman_correlation(range(1, len(post_values) + 1), post_values)
         tests["spearman_post_drift_all_vs_granularity"] = {
             "rho": rho,
             "p_value": p,
             "passed": rho > 0.6,
-            "values": dict(zip(present_levels, post_values)),
+            "values": dict(zip(primary_present_levels, post_values)),
         }
 
     for group_name in FILTER_ANALYSIS_ORDER:
         group_values = []
         group_levels = []
-        for level_key in present_levels:
+        for level_key in primary_present_levels:
             group_stats = agg["per_level"][level_key]["analysis_groups"].get(group_name)
             if group_stats is None:
                 continue
@@ -926,7 +931,7 @@ def run_exp3(
                 complexity_points,
                 y_key="mean_post_drift_all",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -935,7 +940,7 @@ def run_exp3(
                 complexity_points,
                 y_key="mean_post_drift_all",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -946,7 +951,7 @@ def run_exp3(
                 complexity_points,
                 y_key="mean_response_amplification",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -955,7 +960,7 @@ def run_exp3(
                 complexity_points,
                 y_key="mean_response_amplification",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],

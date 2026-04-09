@@ -5,6 +5,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 
+from ..data.base import ALL_VQA_LEVEL_NAMES
 from .io import load_json
 from .layer_groups import LAYER_GROUP_ORDER
 
@@ -22,7 +23,7 @@ def load_exp2_filter_bank(
         sample_filters[group_name] = {}
 
     filters_dir = exp2_out_dir / "filters"
-    level_keys = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
+    level_keys = list(ALL_VQA_LEVEL_NAMES)
     for level_key in level_keys:
         overall_path = filters_dir / f"average_{level_key}.npy"
         if overall_path.exists():

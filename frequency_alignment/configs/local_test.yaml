@@ -33,7 +33,7 @@ perturbations:
   # Save clean + all perturbation images for the first N successful samples per experiment. Use 0 to disable.
   export_num_images: 1
   # Overlay families are task-agnostic by default so the same nuisance text/box perturbations
-  # are reused across L1-L4 without accidentally encoding answer labels.
+  # are reused across the VQA levels without accidentally encoding answer labels.
   overlay_mode: label_free
   overlay_count: 3
   include_natural: true
@@ -116,7 +116,7 @@ experiments:
     enabled: true
     max_samples: 5
     # Set to null to use all perturbations for each sample.
-    perturbation_subset: 3
+    perturbation_subset: null
     post_fusion_layer_fraction: 0.8
   exp4:
     enabled: true

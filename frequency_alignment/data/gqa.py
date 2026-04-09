@@ -1,4 +1,4 @@
-"""GQA dataset loader with 4-level granularity question generation.
+"""GQA dataset loader with 5-level granularity question generation.
 
 Downloads GQA scene graphs and images, then generates questions at four
 granularity levels from the same image:
@@ -7,6 +7,7 @@ granularity levels from the same image:
 - **L2 (Medium)**: Attribute recognition -- "What {attr_type} is the {object}?"
 - **L3 (Fine)**: Spatial relationship -- "Is the {obj1} to the {relation} of {obj2}?"
 - **L4 (Very Fine)**: Compositional MCQ -- combines attributes + spatial reasoning
+- **L5 (Wordy-Simpleton)**: L1 semantics with redundant filler text
 
 GQA scene graph structure (per image)::
 
@@ -45,10 +46,26 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
-from .base import GranularityLevel, GranularitySample, LevelData
+from .base import (
+    ALL_VQA_LEVELS,
+    GranularityLevel,
+    GranularitySample,
+    LevelData,
+    VERIFICATION_VQA_LEVELS,
+)
 from .complexity import build_semantic_complexity
 
 logger = logging.getLogger(__name__)
+
+_WORDY_FILLER_PREFIX = (
+    "Please consider the visual scene carefully, without overthinking any hidden trick, "
+    "and answer the following in a straightforward way after taking a moment to reflect on "
+    "what is plainly visible. "
+)
+_WORDY_FILLER_SUFFIX = (
+    "In other words, even though this may sound longer than necessary, the question is still "
+    "asking only about the obvious visible presence of the object, so respond accordingly."
+)
 
 # ---------------------------------------------------------------------------
 # Download URLs
@@ -340,35 +357,46 @@ def _compute_option_hardness(
     }
 
 
-def build_l1_question(
+def _build_object_presence_question(
     sg: dict,
     obj_id: str,
     obj: dict,
     rng: random.Random,
     all_object_names: Set[str],
+    *,
+    level: GranularityLevel,
+    question_type: str,
+    desired_answer_label: Optional[str] = None,
+    wordy: bool = False,
 ) -> Optional[LevelData]:
-    """L1 (Coarse): Object presence Y/N."""
+    """Object-presence verification with optional prompt-load inflation."""
     name = obj.get("name", "").strip()
     if not name:
         return None
 
-    # 80% positive, 20% negative
-    if rng.random() < 0.8:
-        question = f"Is there a {name} in this image?"
+    if desired_answer_label not in {None, "A", "B"}:
+        return None
+    positive = desired_answer_label == "A" if desired_answer_label is not None else (rng.random() < 0.5)
+
+    if positive:
+        base_question = f"Is there a {name} in this image?"
         answer = "A"
         options = {"A": "yes", "B": "no"}
         grounding_candidates = _count_named_objects(sg.get("objects", {}), name)
     else:
-        # Pick an absent object
         absent = list(all_object_names - {o.get("name", "") for o in sg.get("objects", {}).values()})
         if not absent:
             return None
         absent_name = rng.choice(absent)
-        question = f"Is there a {absent_name} in this image?"
+        base_question = f"Is there a {absent_name} in this image?"
         answer = "B"
         options = {"A": "yes", "B": "no"}
         name = absent_name
         grounding_candidates = 0
+    if wordy:
+        question = f"{_WORDY_FILLER_PREFIX}{base_question} {_WORDY_FILLER_SUFFIX}"
+    else:
+        question = base_question
     complexity = build_semantic_complexity(
         entity_names=[name],
         reasoning_ops=["exist"],
@@ -383,14 +411,60 @@ def build_l1_question(
     )
 
     return LevelData(
-        level=GranularityLevel.L1_COARSE,
+        level=level,
         question=question,
         options=options,
         answer_label=answer,
-        question_type="object_presence",
+        question_type=question_type,
         option_hardness_score=option_hardness_score,
         option_hardness_components=option_hardness_components,
         **complexity,
+    )
+
+
+def build_l1_question(
+    sg: dict,
+    obj_id: str,
+    obj: dict,
+    rng: random.Random,
+    all_object_names: Set[str],
+    desired_answer_label: Optional[str] = None,
+) -> Optional[LevelData]:
+    """L1 (Coarse): Object presence Y/N."""
+
+    return _build_object_presence_question(
+        sg,
+        obj_id,
+        obj,
+        rng,
+        all_object_names,
+        level=GranularityLevel.L1_COARSE,
+        question_type="object_presence",
+        desired_answer_label=desired_answer_label,
+        wordy=False,
+    )
+
+
+def build_l5_question(
+    sg: dict,
+    obj_id: str,
+    obj: dict,
+    rng: random.Random,
+    all_object_names: Set[str],
+    desired_answer_label: Optional[str] = None,
+) -> Optional[LevelData]:
+    """L5 (Wordy-Simpleton): L1 semantics with redundant filler text."""
+
+    return _build_object_presence_question(
+        sg,
+        obj_id,
+        obj,
+        rng,
+        all_object_names,
+        level=GranularityLevel.L5_WORDY_SIMPLETON,
+        question_type="object_presence_wordy_control",
+        desired_answer_label=desired_answer_label,
+        wordy=True,
     )
 
 
@@ -457,6 +531,7 @@ def build_l3_question(
     obj: dict,
     objects: dict,
     rng: random.Random,
+    desired_answer_label: Optional[str] = None,
 ) -> Optional[LevelData]:
     """L3 (Fine): Spatial relationship Y/N."""
     name = obj.get("name", "").strip()
@@ -475,12 +550,14 @@ def build_l3_question(
     if not target_name:
         return None
 
-    if rng.random() < 0.7:
-        # Positive: use the actual relation
+    if desired_answer_label not in {None, "A", "B"}:
+        return None
+    positive = desired_answer_label == "A" if desired_answer_label is not None else (rng.random() < 0.5)
+
+    if positive:
         question = f"Is the {name} {rel_name} the {target_name}?"
         answer = "A"
     else:
-        # Negative: use a different (likely wrong) relation
         other_rels = ["to the left of", "to the right of", "above", "below",
                       "behind", "in front of", "on top of", "next to"]
         other_rels = [r for r in other_rels if r != rel_name]
@@ -613,6 +690,90 @@ def _collect_all_object_names(scene_graphs: Dict[str, dict]) -> Set[str]:
     return names
 
 
+def _is_yes_label(level_data: LevelData) -> bool:
+    return str(level_data.answer_label or "").strip().upper() == "A"
+
+
+def _balance_verification_answers(
+    candidates: List[GranularitySample],
+    *,
+    max_samples: int,
+    rng: random.Random,
+) -> List[GranularitySample]:
+    """Select a subset with exact 50/50 yes/no balance on verification levels.
+
+    Balance is enforced jointly across the verification levels by pairing each
+    binary answer pattern with its complement.
+    """
+
+    if max_samples <= 0 or not candidates:
+        return []
+
+    verification_levels = [level for level in VERIFICATION_VQA_LEVELS if level in ALL_VQA_LEVELS]
+    buckets: Dict[Tuple[int, ...], List[GranularitySample]] = {}
+    for sample in candidates:
+        if not sample.has_all_levels(list(ALL_VQA_LEVELS)):
+            continue
+        pattern = tuple(
+            1 if _is_yes_label(sample.levels[level]) else 0
+            for level in verification_levels
+        )
+        buckets.setdefault(pattern, []).append(sample)
+
+    for samples in buckets.values():
+        rng.shuffle(samples)
+
+    unique_patterns = sorted(buckets)
+    seen = set()
+    pair_keys: List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = []
+    for pattern in unique_patterns:
+        if pattern in seen:
+            continue
+        complement = tuple(1 - value for value in pattern)
+        seen.add(pattern)
+        seen.add(complement)
+        if complement not in buckets:
+            continue
+        pair_keys.append((pattern, complement))
+
+    pair_capacities = {
+        (pattern, complement): min(len(buckets.get(pattern, [])), len(buckets.get(complement, [])))
+        for pattern, complement in pair_keys
+    }
+    total_capacity = 2 * sum(pair_capacities.values())
+    if total_capacity <= 0:
+        return []
+
+    target = min(max_samples, total_capacity)
+    if target % 2 == 1:
+        target -= 1
+    if target <= 0:
+        return []
+
+    rng.shuffle(pair_keys)
+    selected: List[GranularitySample] = []
+    remaining_pairs = target // 2
+    for pattern, complement in pair_keys:
+        if remaining_pairs <= 0:
+            break
+        take = min(pair_capacities[(pattern, complement)], remaining_pairs)
+        if take <= 0:
+            continue
+        selected.extend(buckets[pattern][:take])
+        selected.extend(buckets[complement][:take])
+        remaining_pairs -= take
+
+    if len(selected) < target:
+        logger.warning(
+            "Balanced verification sampling could only provide %d samples (requested %d).",
+            len(selected),
+            target,
+        )
+
+    rng.shuffle(selected)
+    return selected[:target]
+
+
 def build_granularity_dataset(
     cache_dir: Path,
     max_samples: int = 1000,
@@ -620,10 +781,10 @@ def build_granularity_dataset(
     split: str = "val",
     allow_download: bool = True,
 ) -> List[GranularitySample]:
-    """Build the 4-level granularity dataset from GQA.
+    """Build the 5-level granularity dataset from GQA.
 
     Downloads scene graphs and images if needed, generates questions at
-    all four levels, and returns only images where all levels were
+    all primary levels plus the L5 control, and returns only images where all levels were
     successfully constructed.
 
     Args:
@@ -634,7 +795,7 @@ def build_granularity_dataset(
         allow_download: Whether to download missing data.
 
     Returns:
-        List of :class:`GranularitySample`, each with L1-L4 questions.
+        List of :class:`GranularitySample`, each with L1-L5 questions.
     """
     rng = random.Random(seed)
 
@@ -647,14 +808,11 @@ def build_granularity_dataset(
     all_names = _collect_all_object_names(scene_graphs)
 
     # Generate questions per image
-    samples: List[GranularitySample] = []
+    candidate_samples: List[GranularitySample] = []
     image_ids = list(scene_graphs.keys())
     rng.shuffle(image_ids)
 
     for image_id in image_ids:
-        if len(samples) >= max_samples:
-            break
-
         sg = scene_graphs[image_id]
         objects = sg.get("objects", {})
         if len(objects) < 2:
@@ -680,6 +838,14 @@ def build_granularity_dataset(
                 if q is not None:
                     levels[GranularityLevel.L1_COARSE] = q
 
+            if GranularityLevel.L5_WORDY_SIMPLETON not in levels:
+                desired_answer = None
+                if GranularityLevel.L1_COARSE in levels:
+                    desired_answer = levels[GranularityLevel.L1_COARSE].answer_label
+                q = build_l5_question(sg, obj_id, obj, rng, all_names, desired_answer_label=desired_answer)
+                if q is not None:
+                    levels[GranularityLevel.L5_WORDY_SIMPLETON] = q
+
             if GranularityLevel.L2_MEDIUM not in levels:
                 q = build_l2_question(sg, obj_id, obj, rng)
                 if q is not None:
@@ -690,7 +856,7 @@ def build_granularity_dataset(
                 if q is not None:
                     levels[GranularityLevel.L3_FINE] = q
 
-            if len(levels) >= 3:
+            if len(levels) >= 4:
                 break
 
         # L4 uses the full scene graph
@@ -699,9 +865,8 @@ def build_granularity_dataset(
             if q is not None:
                 levels[GranularityLevel.L4_VERY_FINE] = q
 
-        # Only keep images where all 4 levels were generated
-        if len(levels) == 4:
-            sample = GranularitySample(
+        # Only keep images where all levels were generated
+        sample = GranularitySample(
                 image_id=image_id,
                 image_path=img_path,
                 levels=levels,
@@ -709,10 +874,16 @@ def build_granularity_dataset(
                 split=split,
                 metadata={"num_objects": len(objects)},
             )
-            samples.append(sample)
+        if sample.has_all_levels(list(ALL_VQA_LEVELS)):
+            candidate_samples.append(sample)
 
+    samples = _balance_verification_answers(
+        candidate_samples,
+        max_samples=max_samples,
+        rng=rng,
+    )
     logger.info(
-        "Built %d complete samples (all 4 levels) from %d scene graphs",
-        len(samples), len(scene_graphs),
+        "Built %d complete balanced samples (all 5 levels) from %d scene graphs",
+        len(samples), len(scene_graphs)
     )
     return samples

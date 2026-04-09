@@ -28,6 +28,7 @@ import numpy as np
 from PIL import Image
 
 from ..analysis.continuous import (
+    attach_complexity_residual,
     summarize_by_score,
     summarize_fixed_effects_trend,
     summarize_linear_trend,
@@ -37,7 +38,7 @@ from ..analysis.statistics import (
     monotonicity_test,
     spearman_correlation,
 )
-from ..data.base import ExperimentResult, GranularityLevel
+from ..data.base import ExperimentResult, GranularityLevel, PRIMARY_VQA_LEVEL_NAMES
 from ..data.complexity import ensure_level_complexity
 from ..data.complexity import (
     OPTION_HARDNESS_SCORE_DEFINITION,
@@ -96,6 +97,7 @@ def _build_complexity_points(
                         ),
                     }
                 )
+    attach_complexity_residual(points)
     return points
 
 
@@ -117,6 +119,8 @@ def _summarize_complexity(
         "control_score_definition": PROMPT_COMPLEXITY_SCORE_DEFINITION,
         "option_hardness_score_name": OPTION_HARDNESS_SCORE_NAME,
         "option_hardness_score_definition": OPTION_HARDNESS_SCORE_DEFINITION,
+        "logic_residual_key": "complexity_score_residual",
+        "logic_residual_definition": "Residual of semantic complexity after linear regression on prompt load.",
         "score_min": float(min(complexity_values)) if complexity_values else 0.0,
         "score_max": float(max(complexity_values)) if complexity_values else 0.0,
         "num_points": len(points),
@@ -294,7 +298,7 @@ def run_exp4(
         agg["per_mode"][mode] = {}
         critical_cutoffs[mode] = {}
 
-        level_order = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
+        level_order = list(PRIMARY_VQA_LEVEL_NAMES)
         for lk in level_order:
             # Compute mean accuracy at each cutoff
             acc_curve = []
@@ -377,7 +381,7 @@ def run_exp4(
                 mode_points,
                 y_key="critical_cutoff",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -386,7 +390,7 @@ def run_exp4(
                 mode_points,
                 y_key="critical_cutoff",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],

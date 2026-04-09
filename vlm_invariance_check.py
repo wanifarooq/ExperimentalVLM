@@ -329,27 +329,9 @@ def tokenize_conversations(
     add_generation_prompt: bool,
     padding: bool = False,
 ) -> Dict[str, Any]:
-    """Tokenize chat messages with a fallback for processors that require text+images calls."""
+    """Tokenize chat messages via rendered chat text, with a fallback for processors without chat templates."""
     is_batch = bool(messages) and isinstance(messages[0], list)
     template_available = _get_chat_template_status(processor)
-    if template_available is not False:
-        try:
-            enc = processor.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=add_generation_prompt,
-                padding=padding or is_batch,
-                return_tensors="pt",
-                return_dict=True,
-            )
-            enc_dict = _batch_to_device(enc, device)
-            if "input_ids" in enc_dict:
-                _set_chat_template_status(processor, True)
-                return enc_dict
-        except Exception as exc:
-            if _is_missing_chat_template_error(exc):
-                _set_chat_template_status(processor, False)
-                template_available = False
 
     if template_available is False:
         prompt_text = _render_messages_fallback(

@@ -27,6 +27,7 @@ import numpy as np
 from PIL import Image
 
 from ..analysis.continuous import (
+    attach_complexity_residual,
     summarize_by_score,
     summarize_fixed_effects_trend,
     summarize_linear_trend,
@@ -44,7 +45,7 @@ from ..analysis.statistics import (
     spearman_correlation,
     bootstrap_ci,
 )
-from ..data.base import ExperimentResult, GranularityLevel
+from ..data.base import ExperimentResult, GranularityLevel, PRIMARY_VQA_LEVEL_NAMES
 from ..data.complexity import ensure_level_complexity
 from ..data.complexity import (
     OPTION_HARDNESS_SCORE_DEFINITION,
@@ -95,6 +96,7 @@ def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str,
                 if group_bandwidth is not None:
                     point[f"bandwidth_{group_name}"] = float(group_bandwidth)
             points.append(point)
+    attach_complexity_residual(points)
     return points
 
 
@@ -113,6 +115,8 @@ def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
         "control_score_definition": PROMPT_COMPLEXITY_SCORE_DEFINITION,
         "option_hardness_score_name": OPTION_HARDNESS_SCORE_NAME,
         "option_hardness_score_definition": OPTION_HARDNESS_SCORE_DEFINITION,
+        "logic_residual_key": "complexity_score_residual",
+        "logic_residual_definition": "Residual of semantic complexity after linear regression on prompt load.",
         "score_min": float(min(complexity_values)) if complexity_values else 0.0,
         "score_max": float(max(complexity_values)) if complexity_values else 0.0,
         "num_points": len(points),
@@ -592,7 +596,7 @@ def run_exp2(
         "effective_num_bands": int(effective_band_count),
         "prompt_controls": prompt_controls,
     }
-    level_order = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
+    level_order = list(PRIMARY_VQA_LEVEL_NAMES)
     present_levels = [lk for lk in level_order if lk in level_bandwidths]
 
     for lk in present_levels:
@@ -823,7 +827,7 @@ def run_exp2(
             complexity_points,
             y_key="bandwidth",
             x_keys=[
-                "complexity_score",
+                "complexity_score_residual",
                 "prompt_complexity_score",
                 "option_hardness_score",
             ],
@@ -832,7 +836,7 @@ def run_exp2(
             complexity_points,
             y_key="bandwidth",
             x_keys=[
-                "complexity_score",
+                "complexity_score_residual",
                 "prompt_complexity_score",
                 "option_hardness_score",
             ],
@@ -877,7 +881,7 @@ def run_exp2(
                     complexity_points,
                     y_key=value_key,
                     x_keys=[
-                        "complexity_score",
+                        "complexity_score_residual",
                         "prompt_complexity_score",
                         "option_hardness_score",
                     ],
@@ -888,7 +892,7 @@ def run_exp2(
                     complexity_points,
                     y_key=value_key,
                     x_keys=[
-                        "complexity_score",
+                        "complexity_score_residual",
                         "prompt_complexity_score",
                         "option_hardness_score",
                     ],

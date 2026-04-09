@@ -25,6 +25,7 @@ import numpy as np
 from PIL import Image
 
 from ..analysis.continuous import (
+    attach_complexity_residual,
     summarize_by_score,
     summarize_fixed_effects_trend,
     summarize_linear_trend,
@@ -42,6 +43,7 @@ from ..data.base import (
     ExperimentResult,
     GranularityLevel,
     GranularitySample,
+    PRIMARY_VQA_LEVEL_NAMES,
 )
 from ..data.complexity import ensure_level_complexity
 from ..data.complexity import (
@@ -101,6 +103,18 @@ def _compute_cosine_drift(
     return float(1.0 - cos_sim)
 
 
+def _directional_loglik_summary(drifts: List[float]) -> Dict[str, float]:
+    """Split signed correct-answer drift into erosion / recovery / volatility."""
+
+    positive = [float(d) for d in drifts if float(d) > 0.0]
+    negative = [float(d) for d in drifts if float(d) < 0.0]
+    return {
+        "mean_loglik_erosion": float(np.mean(positive)) if positive else 0.0,
+        "mean_loglik_recovery": float(np.mean(negative)) if negative else 0.0,
+        "mean_loglik_volatility": float(np.mean(np.abs(drifts))) if drifts else 0.0,
+    }
+
+
 def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     points: List[Dict[str, Any]] = []
     for record in per_sample:
@@ -115,6 +129,7 @@ def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str,
                 for item in perturbations
                 if item.get("loglik_drift") is not None
             ]
+            directional = _directional_loglik_summary(drifts)
             point = {
                 "image_id": image_id,
                 "level": level_key,
@@ -130,12 +145,53 @@ def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str,
                 "option_hardness_score": float(
                     level_data.get("option_hardness_score", 0.0) or 0.0
                 ),
+                "clean_accuracy": 1.0 if level_data.get("clean", {}).get("correct", False) else 0.0,
                 "mean_accuracy_drop": float(np.mean(drops)) if drops else 0.0,
                 "mean_loglik_drift": float(np.mean(drifts)) if drifts else 0.0,
+                **directional,
                 "num_perturbations": len(perturbations),
             }
             points.append(point)
+    attach_complexity_residual(points)
     return points
+
+
+def _build_perturbation_complexity_points(per_sample: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in per_sample:
+        image_id = str(record.get("image_id"))
+        for level_key, level_data in record.get("levels", {}).items():
+            clean_accuracy = 1.0 if level_data.get("clean", {}).get("correct", False) else 0.0
+            base = {
+                "image_id": image_id,
+                "level": level_key,
+                "question": level_data.get("question"),
+                "question_type": level_data.get("question_type"),
+                "complexity_score": float(level_data.get("complexity_score", 0.0) or 0.0),
+                "question_complexity_score": float(
+                    level_data.get("question_complexity_score", 0.0) or 0.0
+                ),
+                "prompt_complexity_score": float(
+                    level_data.get("prompt_complexity_score", 0.0) or 0.0
+                ),
+                "option_hardness_score": float(
+                    level_data.get("option_hardness_score", 0.0) or 0.0
+                ),
+                "clean_accuracy": clean_accuracy,
+            }
+            for perturbation in level_data.get("perturbations", []):
+                name = str(perturbation.get("name") or perturbation.get("perturbation") or "unknown")
+                point = dict(base)
+                point.update(
+                    {
+                        "perturbation": name,
+                        "accuracy_drop": float(perturbation.get("accuracy_drop", 0.0) or 0.0),
+                    }
+                )
+                grouped[name].append(point)
+    for points in grouped.values():
+        attach_complexity_residual(points)
+    return grouped
 
 
 def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -153,6 +209,8 @@ def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
         "control_score_definition": PROMPT_COMPLEXITY_SCORE_DEFINITION,
         "option_hardness_score_name": OPTION_HARDNESS_SCORE_NAME,
         "option_hardness_score_definition": OPTION_HARDNESS_SCORE_DEFINITION,
+        "logic_residual_key": "complexity_score_residual",
+        "logic_residual_definition": "Residual of semantic complexity after linear regression on prompt load.",
         "score_min": float(min(complexity_values)) if complexity_values else 0.0,
         "score_max": float(max(complexity_values)) if complexity_values else 0.0,
         "num_points": len(points),
@@ -165,6 +223,21 @@ def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
             points,
             score_key="complexity_score",
             value_key="mean_loglik_drift",
+        ),
+        "mean_loglik_erosion_by_score": summarize_by_score(
+            points,
+            score_key="complexity_score",
+            value_key="mean_loglik_erosion",
+        ),
+        "mean_loglik_recovery_by_score": summarize_by_score(
+            points,
+            score_key="complexity_score",
+            value_key="mean_loglik_recovery",
+        ),
+        "mean_loglik_volatility_by_score": summarize_by_score(
+            points,
+            score_key="complexity_score",
+            value_key="mean_loglik_volatility",
         ),
         "mean_accuracy_drop_by_prompt_load": summarize_by_score(
             points,
@@ -444,6 +517,7 @@ def _aggregate_results(
     for lk in levels_ordered:
         drops = level_drops[lk]
         drifts = level_loglik_drifts[lk]
+        directional = _directional_loglik_summary(drifts)
         clean = level_clean_acc.get(lk, [])
         pert = level_pert_acc.get(lk, [])
         cos_drifts = level_cosine_drifts.get(lk, [])
@@ -455,6 +529,7 @@ def _aggregate_results(
             "std_accuracy_drop": float(np.std(drops)) if drops else 0.0,
             "mean_loglik_drift": float(np.mean(drifts)) if drifts else 0.0,
             "std_loglik_drift": float(np.std(drifts)) if drifts else 0.0,
+            **directional,
             "mean_cosine_drift": float(np.mean(cos_drifts)) if cos_drifts else 0.0,
             "mean_dirichlet_delta": float(np.mean(level_dirichlet_deltas.get(lk, [])))
             if level_dirichlet_deltas.get(lk)
@@ -483,6 +558,7 @@ def _aggregate_results(
 def _run_hypothesis_tests(
     agg: Dict[str, Any],
     complexity_points: Optional[List[Dict[str, Any]]] = None,
+    perturbation_points: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Run statistical tests on aggregated results.
 
@@ -492,7 +568,7 @@ def _run_hypothesis_tests(
     per_level = agg.get("per_level", {})
 
     # Order levels by granularity
-    level_order = ["L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"]
+    level_order = list(PRIMARY_VQA_LEVEL_NAMES)
     present_levels = [lk for lk in level_order if lk in per_level]
 
     if len(present_levels) < 2:
@@ -582,7 +658,18 @@ def _run_hypothesis_tests(
     tests["num_criteria_total"] = len(core_tests)
 
     if complexity_points:
+        accuracy_drop_points = [
+            point
+            for point in complexity_points
+            if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
+        ]
         tests["continuous_complexity"] = {
+            "accuracy_drop_horse_race_filter": {
+                "description": "Accuracy-drop horse races use only image-level points where the clean answer was correct.",
+                "clean_accuracy_required": 1.0,
+                "n_points_used": len(accuracy_drop_points),
+                "n_points_total": len(complexity_points),
+            },
             "mean_accuracy_drop_vs_complexity": summarize_linear_trend(
                 complexity_points,
                 x_key="complexity_score",
@@ -592,6 +679,21 @@ def _run_hypothesis_tests(
                 complexity_points,
                 x_key="complexity_score",
                 y_key="mean_loglik_drift",
+            ),
+            "mean_loglik_erosion_vs_complexity": summarize_linear_trend(
+                complexity_points,
+                x_key="complexity_score",
+                y_key="mean_loglik_erosion",
+            ),
+            "mean_loglik_recovery_vs_complexity": summarize_linear_trend(
+                complexity_points,
+                x_key="complexity_score",
+                y_key="mean_loglik_recovery",
+            ),
+            "mean_loglik_volatility_vs_complexity": summarize_linear_trend(
+                complexity_points,
+                x_key="complexity_score",
+                y_key="mean_loglik_volatility",
             ),
             "mean_accuracy_drop_vs_prompt_load": summarize_linear_trend(
                 complexity_points,
@@ -626,19 +728,19 @@ def _run_hypothesis_tests(
                 y_key="mean_loglik_drift",
             ),
             "horse_race_mean_accuracy_drop": summarize_multivariate_regression(
-                complexity_points,
+                accuracy_drop_points,
                 y_key="mean_accuracy_drop",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
             ),
             "horse_race_mean_accuracy_drop_within_image": summarize_multivariate_regression(
-                complexity_points,
+                accuracy_drop_points,
                 y_key="mean_accuracy_drop",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -649,7 +751,7 @@ def _run_hypothesis_tests(
                 complexity_points,
                 y_key="mean_loglik_drift",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -658,7 +760,67 @@ def _run_hypothesis_tests(
                 complexity_points,
                 y_key="mean_loglik_drift",
                 x_keys=[
-                    "complexity_score",
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                group_key="image_id",
+                demean_by_group=True,
+            ),
+            "horse_race_mean_loglik_erosion": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_loglik_erosion",
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+            ),
+            "horse_race_mean_loglik_erosion_within_image": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_loglik_erosion",
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                group_key="image_id",
+                demean_by_group=True,
+            ),
+            "horse_race_mean_loglik_recovery": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_loglik_recovery",
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+            ),
+            "horse_race_mean_loglik_recovery_within_image": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_loglik_recovery",
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                group_key="image_id",
+                demean_by_group=True,
+            ),
+            "horse_race_mean_loglik_volatility": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_loglik_volatility",
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+            ),
+            "horse_race_mean_loglik_volatility_within_image": summarize_multivariate_regression(
+                complexity_points,
+                y_key="mean_loglik_volatility",
+                x_keys=[
+                    "complexity_score_residual",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -666,6 +828,41 @@ def _run_hypothesis_tests(
                 demean_by_group=True,
             ),
         }
+        if perturbation_points:
+            by_perturbation: Dict[str, Any] = {}
+            for perturbation_name, points in sorted(perturbation_points.items()):
+                gated_points = [
+                    point for point in points
+                    if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
+                ]
+                by_perturbation[perturbation_name] = {
+                    "filter": {
+                        "clean_accuracy_required": 1.0,
+                        "n_points_used": len(gated_points),
+                        "n_points_total": len(points),
+                    },
+                    "pooled": summarize_multivariate_regression(
+                        gated_points,
+                        y_key="accuracy_drop",
+                        x_keys=[
+                            "complexity_score_residual",
+                            "prompt_complexity_score",
+                            "option_hardness_score",
+                        ],
+                    ),
+                    "within_image": summarize_multivariate_regression(
+                        gated_points,
+                        y_key="accuracy_drop",
+                        x_keys=[
+                            "complexity_score_residual",
+                            "prompt_complexity_score",
+                            "option_hardness_score",
+                        ],
+                        group_key="image_id",
+                        demean_by_group=True,
+                    ),
+                }
+            tests["continuous_complexity"]["horse_race_mean_accuracy_drop_by_perturbation"] = by_perturbation
 
     return tests
 
@@ -829,10 +1026,11 @@ def run_exp1(
     # --- Aggregate results ---
     agg = _aggregate_results(per_sample_results)
     complexity_points = _build_complexity_points(per_sample_results)
+    perturbation_complexity_points = _build_perturbation_complexity_points(per_sample_results)
     agg["complexity_analysis"] = _summarize_complexity(complexity_points)
 
     # --- Hypothesis testing ---
-    hypothesis_tests = _run_hypothesis_tests(agg, complexity_points)
+    hypothesis_tests = _run_hypothesis_tests(agg, complexity_points, perturbation_complexity_points)
 
     # --- Log key results ---
     logger.info("-" * 40)

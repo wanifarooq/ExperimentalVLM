@@ -1,6 +1,7 @@
 """Semantic complexity helpers for question-conditioned analyses.
 
-The project keeps the original discrete L1-L4 labels, but also assigns each
+The project keeps the original discrete L1-L4 labels (plus optional controls such as L5),
+but also assigns each
 task a continuous language-complexity score based on the semantic atoms that
 the model sees in the prompt. This lets downstream experiments test smooth
 relationships such as complexity vs bandwidth or complexity vs robustness.

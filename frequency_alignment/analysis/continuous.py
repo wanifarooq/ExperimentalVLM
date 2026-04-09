@@ -11,6 +11,90 @@ from scipy import stats
 from .statistics import pearson_correlation, spearman_correlation
 
 
+def attach_linear_residual(
+    points: Sequence[Dict[str, Any]],
+    *,
+    target_key: str,
+    control_key: str,
+    residual_key: str,
+) -> Dict[str, Any]:
+    """Attach residuals from target ~ control to each point in-place.
+
+    Returns summary metadata for the fitted residualization model.
+    """
+
+    valid_indices: List[int] = []
+    xs: List[float] = []
+    ys: List[float] = []
+    for idx, point in enumerate(points):
+        x_val = point.get(control_key)
+        y_val = point.get(target_key)
+        if x_val is None or y_val is None:
+            continue
+        x_float = float(x_val)
+        y_float = float(y_val)
+        if not np.isfinite(x_float) or not np.isfinite(y_float):
+            continue
+        valid_indices.append(idx)
+        xs.append(x_float)
+        ys.append(y_float)
+
+    for point in points:
+        point[residual_key] = None
+
+    if not valid_indices:
+        return {
+            "target_key": target_key,
+            "control_key": control_key,
+            "residual_key": residual_key,
+            "n": 0,
+            "slope": 0.0,
+            "intercept": 0.0,
+            "r_squared": 0.0,
+        }
+
+    x_arr = np.asarray(xs, dtype=np.float64)
+    y_arr = np.asarray(ys, dtype=np.float64)
+    design = np.column_stack([np.ones(x_arr.size, dtype=np.float64), x_arr])
+    beta, _, _, _ = np.linalg.lstsq(design, y_arr, rcond=None)
+    fitted = design @ beta
+    residuals = y_arr - fitted
+    y_mean = float(np.mean(y_arr))
+    tss = float(np.sum((y_arr - y_mean) ** 2))
+    rss = float(np.sum(residuals ** 2))
+    r_squared = 1.0 - rss / tss if tss > 0 else 0.0
+
+    for idx, residual in zip(valid_indices, residuals):
+        points[idx][residual_key] = float(residual)
+
+    return {
+        "target_key": target_key,
+        "control_key": control_key,
+        "residual_key": residual_key,
+        "n": int(len(valid_indices)),
+        "slope": float(beta[1]),
+        "intercept": float(beta[0]),
+        "r_squared": float(r_squared),
+    }
+
+
+def attach_complexity_residual(
+    points: Sequence[Dict[str, Any]],
+    *,
+    complexity_key: str = "complexity_score",
+    prompt_key: str = "prompt_complexity_score",
+    residual_key: str = "complexity_score_residual",
+) -> Dict[str, Any]:
+    """Residualize semantic complexity against prompt load in-place."""
+
+    return attach_linear_residual(
+        points,
+        target_key=complexity_key,
+        control_key=prompt_key,
+        residual_key=residual_key,
+    )
+
+
 def summarize_linear_trend(
     points: Sequence[Dict[str, Any]],
     *,
