@@ -57,6 +57,9 @@ from .complexity import build_semantic_complexity
 
 logger = logging.getLogger(__name__)
 
+_DATASET_CACHE_VERSION = "gqa_multilevel_v2"
+_DATASET_MEMO: Dict[str, List[GranularitySample]] = {}
+
 _WORDY_FILLER_PREFIX = (
     "Please consider the visual scene carefully, without overthinking any hidden trick, "
     "and answer the following in a straightforward way after taking a moment to reflect on "
@@ -774,6 +777,154 @@ def _balance_verification_answers(
     return selected[:target]
 
 
+def _verification_pattern(sample: GranularitySample) -> Tuple[int, ...]:
+    verification_levels = [level for level in VERIFICATION_VQA_LEVELS if level in ALL_VQA_LEVELS]
+    return tuple(
+        1 if _is_yes_label(sample.levels[level]) else 0
+        for level in verification_levels
+    )
+
+
+def _balanced_target(max_samples: int) -> int:
+    if max_samples <= 0:
+        return 0
+    return int(max_samples) if int(max_samples) % 2 == 0 else int(max_samples) - 1
+
+
+def _balanced_capacity_from_counts(pattern_counts: Dict[Tuple[int, ...], int]) -> int:
+    seen: Set[Tuple[int, ...]] = set()
+    capacity = 0
+    for pattern in sorted(pattern_counts):
+        if pattern in seen:
+            continue
+        complement = tuple(1 - value for value in pattern)
+        seen.add(pattern)
+        seen.add(complement)
+        if complement not in pattern_counts:
+            continue
+        capacity += 2 * min(pattern_counts.get(pattern, 0), pattern_counts.get(complement, 0))
+    return int(capacity)
+
+
+def _serialize_level_data(level_data: LevelData) -> Dict[str, Any]:
+    return {
+        "level": level_data.level.name,
+        "question": level_data.question,
+        "options": dict(level_data.options),
+        "answer_label": level_data.answer_label,
+        "question_type": level_data.question_type,
+        "semantic_atoms": list(level_data.semantic_atoms),
+        "prompt_semantic_atoms": list(level_data.prompt_semantic_atoms),
+        "semantic_atom_counts": dict(level_data.semantic_atom_counts),
+        "question_complexity_score": float(level_data.question_complexity_score),
+        "prompt_complexity_score": float(level_data.prompt_complexity_score),
+        "complexity_score": float(level_data.complexity_score),
+        "option_hardness_score": float(level_data.option_hardness_score),
+        "option_hardness_components": dict(level_data.option_hardness_components),
+    }
+
+
+def _deserialize_level_data(payload: Dict[str, Any]) -> LevelData:
+    return LevelData(
+        level=GranularityLevel[str(payload["level"])],
+        question=str(payload.get("question", "")),
+        options={str(k): str(v) for k, v in dict(payload.get("options", {})).items()},
+        answer_label=payload.get("answer_label"),
+        question_type=payload.get("question_type"),
+        semantic_atoms=[str(value) for value in payload.get("semantic_atoms", [])],
+        prompt_semantic_atoms=[str(value) for value in payload.get("prompt_semantic_atoms", [])],
+        semantic_atom_counts=dict(payload.get("semantic_atom_counts", {})),
+        question_complexity_score=float(payload.get("question_complexity_score", 0.0) or 0.0),
+        prompt_complexity_score=float(payload.get("prompt_complexity_score", 0.0) or 0.0),
+        complexity_score=float(payload.get("complexity_score", 0.0) or 0.0),
+        option_hardness_score=float(payload.get("option_hardness_score", 0.0) or 0.0),
+        option_hardness_components=dict(payload.get("option_hardness_components", {})),
+    )
+
+
+def _serialize_sample(sample: GranularitySample) -> Dict[str, Any]:
+    return {
+        "image_id": str(sample.image_id),
+        "image_path": str(sample.image_path),
+        "levels": {
+            level.name: _serialize_level_data(level_data)
+            for level, level_data in sample.levels.items()
+        },
+        "dataset": sample.dataset,
+        "split": sample.split,
+        "metadata": dict(sample.metadata),
+    }
+
+
+def _deserialize_sample(payload: Dict[str, Any]) -> GranularitySample:
+    levels = {
+        GranularityLevel[level_name]: _deserialize_level_data(level_payload)
+        for level_name, level_payload in dict(payload.get("levels", {})).items()
+    }
+    return GranularitySample(
+        image_id=str(payload.get("image_id", "")),
+        image_path=Path(payload.get("image_path", "")),
+        levels=levels,
+        dataset=str(payload.get("dataset", "")),
+        split=str(payload.get("split", "val")),
+        metadata=dict(payload.get("metadata", {})),
+    )
+
+
+def _dataset_cache_key(*, split: str, seed: int, max_samples: int, allow_download: bool) -> str:
+    return (
+        f"{_DATASET_CACHE_VERSION}|split={split}|seed={int(seed)}|"
+        f"max={int(max_samples)}|allow_download={int(bool(allow_download))}"
+    )
+
+
+def _dataset_cache_path(
+    cache_dir: Path,
+    *,
+    split: str,
+    seed: int,
+    max_samples: int,
+    allow_download: bool,
+) -> Path:
+    cache_root = cache_dir / "gqa" / "granularity_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    return cache_root / (
+        f"{_DATASET_CACHE_VERSION}_{split}_seed{int(seed)}_max{int(max_samples)}_"
+        f"allowdl{int(bool(allow_download))}.json"
+    )
+
+
+def _load_cached_dataset(path: Path, expected_key: str) -> Optional[List[GranularitySample]]:
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r") as handle:
+            payload = json.load(handle)
+        if payload.get("cache_key") != expected_key:
+            return None
+        samples = [_deserialize_sample(item) for item in payload.get("samples", [])]
+        if not all(sample.image_path.exists() for sample in samples):
+            logger.info("Ignoring stale dataset cache with missing images: %s", path)
+            return None
+        logger.info("Loaded cached GQA multilevel dataset: %s (%d samples)", path, len(samples))
+        return samples
+    except Exception as exc:
+        logger.warning("Failed to load cached GQA multilevel dataset %s: %s", path, exc)
+        return None
+
+
+def _save_cached_dataset(path: Path, cache_key: str, samples: List[GranularitySample]) -> None:
+    payload = {
+        "cache_key": cache_key,
+        "version": _DATASET_CACHE_VERSION,
+        "num_samples": len(samples),
+        "samples": [_serialize_sample(sample) for sample in samples],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as handle:
+        json.dump(payload, handle, indent=2)
+
+
 def build_granularity_dataset(
     cache_dir: Path,
     max_samples: int = 1000,
@@ -797,7 +948,39 @@ def build_granularity_dataset(
     Returns:
         List of :class:`GranularitySample`, each with L1-L5 questions.
     """
+    cache_key = _dataset_cache_key(
+        split=split,
+        seed=seed,
+        max_samples=max_samples,
+        allow_download=allow_download,
+    )
+    memoized = _DATASET_MEMO.get(cache_key)
+    if memoized is not None:
+        logger.info("Using in-memory cached GQA multilevel dataset (%d samples)", len(memoized))
+        return list(memoized)
+
+    cache_path = _dataset_cache_path(
+        cache_dir,
+        split=split,
+        seed=seed,
+        max_samples=max_samples,
+        allow_download=allow_download,
+    )
+    cached_samples = _load_cached_dataset(cache_path, cache_key)
+    if cached_samples is not None:
+        _DATASET_MEMO[cache_key] = list(cached_samples)
+        return list(cached_samples)
+
     rng = random.Random(seed)
+    target_samples = _balanced_target(max_samples)
+    if target_samples <= 0:
+        logger.warning(
+            "Requested max_samples=%d cannot satisfy exact 50/50 verification balancing; returning no samples.",
+            max_samples,
+        )
+        _DATASET_MEMO[cache_key] = []
+        _save_cached_dataset(cache_path, cache_key, [])
+        return []
 
     # Download data
     sg_dir = download_scene_graphs(cache_dir)
@@ -809,10 +992,14 @@ def build_granularity_dataset(
 
     # Generate questions per image
     candidate_samples: List[GranularitySample] = []
+    pattern_counts: Dict[Tuple[int, ...], int] = {}
     image_ids = list(scene_graphs.keys())
     rng.shuffle(image_ids)
+    progress_interval = 250
 
-    for image_id in image_ids:
+    scanned_count = 0
+    for index, image_id in enumerate(image_ids, start=1):
+        scanned_count = index
         sg = scene_graphs[image_id]
         objects = sg.get("objects", {})
         if len(objects) < 2:
@@ -876,6 +1063,27 @@ def build_granularity_dataset(
             )
         if sample.has_all_levels(list(ALL_VQA_LEVELS)):
             candidate_samples.append(sample)
+            pattern = _verification_pattern(sample)
+            pattern_counts[pattern] = pattern_counts.get(pattern, 0) + 1
+
+        if index % progress_interval == 0:
+            balanced_capacity = _balanced_capacity_from_counts(pattern_counts)
+            logger.info(
+                "GQA dataset build progress: checked %d/%d scene graphs, complete=%d, balanced_capacity=%d/%d",
+                index,
+                len(image_ids),
+                len(candidate_samples),
+                balanced_capacity,
+                target_samples,
+            )
+
+        if _balanced_capacity_from_counts(pattern_counts) >= target_samples:
+            logger.info(
+                "Reached balanced target after %d/%d scene graphs; stopping dataset construction early.",
+                index,
+                len(image_ids),
+            )
+            break
 
     samples = _balance_verification_answers(
         candidate_samples,
@@ -883,7 +1091,9 @@ def build_granularity_dataset(
         rng=rng,
     )
     logger.info(
-        "Built %d complete balanced samples (all 5 levels) from %d scene graphs",
-        len(samples), len(scene_graphs)
+        "Built %d complete balanced samples (all 5 levels) after scanning %d/%d scene graphs",
+        len(samples), scanned_count, len(scene_graphs)
     )
+    _DATASET_MEMO[cache_key] = list(samples)
+    _save_cached_dataset(cache_path, cache_key, samples)
     return samples
