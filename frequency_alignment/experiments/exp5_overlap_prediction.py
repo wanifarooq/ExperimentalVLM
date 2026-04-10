@@ -13,7 +13,7 @@ import numpy as np
 from ..analysis.continuous import summarize_fixed_effects_trend, summarize_linear_trend
 from ..analysis.spectral import compute_spectral_overlap
 from ..analysis.statistics import bootstrap_ci, pearson_correlation, spearman_correlation
-from ..data.base import ExperimentResult
+from ..data.base import ALL_VQA_LEVEL_NAMES, ExperimentResult
 from ..utils.exp2_filters import load_exp2_filter_bank
 from ..utils.io import save_json
 from ..utils.layer_groups import LAYER_GROUP_ORDER
@@ -441,7 +441,8 @@ def _summarize_target(
     tests["hypothesis_supported"] = tests["pearson_predicted_vs_actual_grouped"]["passed"]
 
     per_level_corr: Dict[str, Any] = {}
-    for level_key in sorted({pair["level"] for pair in grouped_target_pairs}):
+    present_level_keys = {str(pair["level"]) for pair in grouped_target_pairs if pair.get("level")}
+    for level_key in [level for level in ALL_VQA_LEVEL_NAMES if level in present_level_keys]:
         level_pairs = [pair for pair in grouped_target_pairs if pair["level"] == level_key]
         if len(level_pairs) < 3:
             continue

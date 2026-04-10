@@ -16,6 +16,9 @@ class GranularityLevel(IntEnum):
     L3_FINE = 3          # Spatial relationship / subpart segmentation
     L4_VERY_FINE = 4     # Compositional MCQ reasoning
     L5_WORDY_SIMPLETON = 5  # L1 semantics with inflated prompt load control
+    L6_WORDY_MEDIUM = 6  # L2 semantics with inflated prompt load control
+    L7_WORDY_FINE = 7  # L3 semantics with inflated prompt load control
+    L8_WORDY_VERY_FINE = 8  # L4 semantics with inflated prompt load control
 
 
 PRIMARY_VQA_LEVELS: List[GranularityLevel] = [
@@ -24,15 +27,26 @@ PRIMARY_VQA_LEVELS: List[GranularityLevel] = [
     GranularityLevel.L3_FINE,
     GranularityLevel.L4_VERY_FINE,
 ]
-ALL_VQA_LEVELS: List[GranularityLevel] = PRIMARY_VQA_LEVELS + [
+WORDY_CONTROL_VQA_LEVELS: List[GranularityLevel] = [
     GranularityLevel.L5_WORDY_SIMPLETON,
+    GranularityLevel.L6_WORDY_MEDIUM,
+    GranularityLevel.L7_WORDY_FINE,
+    GranularityLevel.L8_WORDY_VERY_FINE,
 ]
+ALL_VQA_LEVELS: List[GranularityLevel] = PRIMARY_VQA_LEVELS + WORDY_CONTROL_VQA_LEVELS
 PRIMARY_VQA_LEVEL_NAMES: List[str] = [level.name for level in PRIMARY_VQA_LEVELS]
 ALL_VQA_LEVEL_NAMES: List[str] = [level.name for level in ALL_VQA_LEVELS]
+WORDY_CONTROL_LEVEL_NAME_PAIRS: List[Tuple[str, str]] = [
+    (GranularityLevel.L1_COARSE.name, GranularityLevel.L5_WORDY_SIMPLETON.name),
+    (GranularityLevel.L2_MEDIUM.name, GranularityLevel.L6_WORDY_MEDIUM.name),
+    (GranularityLevel.L3_FINE.name, GranularityLevel.L7_WORDY_FINE.name),
+    (GranularityLevel.L4_VERY_FINE.name, GranularityLevel.L8_WORDY_VERY_FINE.name),
+]
 VERIFICATION_VQA_LEVELS: List[GranularityLevel] = [
     GranularityLevel.L1_COARSE,
     GranularityLevel.L3_FINE,
     GranularityLevel.L5_WORDY_SIMPLETON,
+    GranularityLevel.L7_WORDY_FINE,
 ]
 
 

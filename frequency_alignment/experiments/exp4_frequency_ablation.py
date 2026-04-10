@@ -38,7 +38,7 @@ from ..analysis.statistics import (
     monotonicity_test,
     spearman_correlation,
 )
-from ..data.base import ExperimentResult, GranularityLevel, PRIMARY_VQA_LEVEL_NAMES
+from ..data.base import ExperimentResult, GranularityLevel, ALL_VQA_LEVEL_NAMES, PRIMARY_VQA_LEVEL_NAMES
 from ..data.complexity import ensure_level_complexity
 from ..data.complexity import (
     OPTION_HARDNESS_SCORE_DEFINITION,
@@ -298,7 +298,7 @@ def run_exp4(
         agg["per_mode"][mode] = {}
         critical_cutoffs[mode] = {}
 
-        level_order = list(PRIMARY_VQA_LEVEL_NAMES)
+        level_order = list(ALL_VQA_LEVEL_NAMES)
         for lk in level_order:
             # Compute mean accuracy at each cutoff
             acc_curve = []
@@ -327,7 +327,7 @@ def run_exp4(
     tests: Dict[str, Any] = {}
 
     for mode in sweep_modes:
-        present_levels = [lk for lk in level_order if lk in critical_cutoffs.get(mode, {})]
+        present_levels = [lk for lk in PRIMARY_VQA_LEVEL_NAMES if lk in critical_cutoffs.get(mode, {})]
         if len(present_levels) < 2:
             continue
 

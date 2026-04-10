@@ -18,7 +18,7 @@ from ..analysis.continuous import (
     summarize_multivariate_regression,
 )
 from ..analysis.spectral import spectral_band_centers
-from ..data.base import ALL_VQA_LEVEL_NAMES, PRIMARY_VQA_LEVEL_NAMES
+from ..data.base import ALL_VQA_LEVEL_NAMES, PRIMARY_VQA_LEVEL_NAMES, WORDY_CONTROL_LEVEL_NAME_PAIRS
 from ..data.complexity import (
     SEMANTIC_COMPLEXITY_SCORE_FORMULA,
     SEMANTIC_COMPLEXITY_SCORE_LABEL,
@@ -33,6 +33,9 @@ _LEVEL_COLORS = {
     "L3_FINE": "#ff7f0e",
     "L4_VERY_FINE": "#d62728",
     "L5_WORDY_SIMPLETON": "#9467bd",
+    "L6_WORDY_MEDIUM": "#8c6bb1",
+    "L7_WORDY_FINE": "#9e9ac8",
+    "L8_WORDY_VERY_FINE": "#bcbddc",
 }
 _LEVEL_LABELS = {
     "L1_COARSE": "L1 (Coarse)",
@@ -40,6 +43,9 @@ _LEVEL_LABELS = {
     "L3_FINE": "L3 (Fine)",
     "L4_VERY_FINE": "L4 (Very Fine)",
     "L5_WORDY_SIMPLETON": "L5 (Wordy-Simpleton)",
+    "L6_WORDY_MEDIUM": "L6 (Wordy-Medium)",
+    "L7_WORDY_FINE": "L7 (Wordy-Fine)",
+    "L8_WORDY_VERY_FINE": "L8 (Wordy-Very-Fine)",
 }
 _LEVEL_ORDER = list(ALL_VQA_LEVEL_NAMES)
 _PRIMARY_LEVEL_ORDER = list(PRIMARY_VQA_LEVEL_NAMES)
@@ -77,6 +83,64 @@ _PLOT_MANIFEST: List[Dict[str, Any]] = []
 _DEFAULT_SUPPRESS_DC = True
 _LOG_FLOOR = 1e-10
 _DEFAULT_SPECTRAL_LOG_AXES = True
+_WORDY_PAIR_LABELS = {
+    "L1_COARSE": "L1 vs L5",
+    "L2_MEDIUM": "L2 vs L6",
+    "L3_FINE": "L3 vs L7",
+    "L4_VERY_FINE": "L4 vs L8",
+}
+_EXP1_PERTURBATION_OUTCOME_SPECS = (
+            (
+                "accuracy_drop",
+                "horse_race_mean_accuracy_drop_by_perturbation",
+                "exp1_coefficient_plot_accuracy_drop_by_perturbation.png",
+                "Coefficient Plot Series: Accuracy Drop by Perturbation",
+                "supplementary_exp1_horse_race_by_perturbation.png",
+                "Supplementary: Horse Race by Individual Perturbation",
+                "gated accuracy drop",
+                "Only clean-correct points are included in each perturbation-specific regression",
+            ),
+            (
+                "loglik_drift",
+                "horse_race_mean_loglik_drift_by_perturbation",
+                "exp1_coefficient_plot_loglik_drift_by_perturbation.png",
+                "Coefficient Plot Series: Log-Likelihood Drift by Perturbation",
+                "supplementary_exp1_horse_race_loglik_drift_by_perturbation.png",
+                "Supplementary: Log-Likelihood Drift by Individual Perturbation",
+                "signed correct-answer log-likelihood drift",
+                "Positive values mean confidence erosion; negative values mean confidence recovery",
+            ),
+            (
+                "loglik_erosion",
+                "horse_race_mean_loglik_erosion_by_perturbation",
+                "exp1_coefficient_plot_loglik_erosion_by_perturbation.png",
+                "Coefficient Plot Series: Log-Likelihood Erosion by Perturbation",
+                "supplementary_exp1_horse_race_loglik_erosion_by_perturbation.png",
+                "Supplementary: Log-Likelihood Erosion by Individual Perturbation",
+                "positive correct-answer log-likelihood drift",
+                "Only positive drifts contribute to this outcome",
+            ),
+            (
+                "loglik_recovery",
+                "horse_race_mean_loglik_recovery_by_perturbation",
+                "exp1_coefficient_plot_loglik_recovery_by_perturbation.png",
+                "Coefficient Plot Series: Log-Likelihood Recovery by Perturbation",
+                "supplementary_exp1_horse_race_loglik_recovery_by_perturbation.png",
+                "Supplementary: Log-Likelihood Recovery by Individual Perturbation",
+                "negative correct-answer log-likelihood drift",
+                "More negative values indicate stronger confidence recovery",
+            ),
+            (
+                "loglik_volatility",
+                "horse_race_mean_loglik_volatility_by_perturbation",
+                "exp1_coefficient_plot_loglik_volatility_by_perturbation.png",
+                "Coefficient Plot Series: Log-Likelihood Volatility by Perturbation",
+                "supplementary_exp1_horse_race_loglik_volatility_by_perturbation.png",
+                "Supplementary: Log-Likelihood Volatility by Individual Perturbation",
+                "absolute correct-answer log-likelihood drift",
+                "Higher values mean larger movement away from zero regardless of sign",
+            ),
+        )
 
 
 def _metadata_lines(*parts: Optional[str]) -> List[str]:
@@ -484,6 +548,43 @@ def _plot_grouped_bars(
     )
     _tight_layout(fig)
     _save_fig(fig, out_path)
+
+
+def _plot_wordy_control_pair_comparison(
+    values_by_level: Dict[str, float],
+    out_path: Path,
+    *,
+    title: str,
+    ylabel: str,
+    metadata: Optional[Sequence[str]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
+    base_label: str = "Base",
+    control_label: str = "Wordy Control",
+) -> None:
+    pair_labels: List[str] = []
+    base_values: List[float] = []
+    control_values: List[float] = []
+    for base_level, control_level in WORDY_CONTROL_LEVEL_NAME_PAIRS:
+        if base_level not in values_by_level or control_level not in values_by_level:
+            continue
+        pair_labels.append(_WORDY_PAIR_LABELS.get(base_level, f"{base_level} vs {control_level}"))
+        base_values.append(float(values_by_level[base_level]))
+        control_values.append(float(values_by_level[control_level]))
+    if not pair_labels:
+        return
+    _plot_grouped_bars(
+        {
+            base_label: base_values,
+            control_label: control_values,
+        },
+        pair_labels,
+        out_path,
+        title,
+        ylabel,
+        colors=["#4c78a8", "#8c6bb1"],
+        ylim=ylim,
+        metadata=metadata,
+    )
 
 
 def _plot_distribution_with_points(
@@ -1320,6 +1421,21 @@ def _regression_series(
         series.append((primary_label, primary_regression))
     if comparison_label and isinstance(comparison_regression, dict) and comparison_regression.get("predictors"):
         series.append((comparison_label, comparison_regression))
+    return series
+
+
+def _collect_regression_series_from_payload_map(
+    payload_map: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    series: Dict[str, Dict[str, Any]] = {}
+    for perturbation_name, payload in sorted(payload_map.items()):
+        if not isinstance(payload, dict):
+            continue
+        pooled = payload.get("pooled", {})
+        within = payload.get("within_image", {})
+        regression = pooled if isinstance(pooled, dict) and pooled.get("predictors") else within
+        if regression and regression.get("predictors"):
+            series[perturbation_name] = regression
     return series
 
 
@@ -2755,11 +2871,14 @@ def _plot_exp5_level_perturbation_comparison(
     width = 0.38
     pred_color = "#6a51a3"
     actual_color = "#31a354"
+    legend_handles: List[Any] = []
+    legend_labels: List[str] = []
 
     for axis, level, pred_row, act_row in zip(axes_arr, levels, predicted, actual):
         pred_vals = np.asarray(pred_row, dtype=float)
         act_vals = np.asarray(act_row, dtype=float)
-        axis.bar(
+        pred_axis = axis.twinx()
+        pred_bars = pred_axis.bar(
             x - width / 2.0,
             pred_vals,
             width=width,
@@ -2767,7 +2886,7 @@ def _plot_exp5_level_perturbation_comparison(
             alpha=0.88,
             label="Predicted",
         )
-        axis.bar(
+        actual_bars = axis.bar(
             x + width / 2.0,
             act_vals,
             width=width,
@@ -2778,12 +2897,99 @@ def _plot_exp5_level_perturbation_comparison(
         axis.set_title(_level_label(level), fontsize=11)
         axis.set_xticks(x)
         axis.set_xticklabels(perturbations, rotation=45, ha="right", fontsize=8)
-        axis.set_ylabel(actual_label, fontsize=9)
+        axis.set_ylabel(actual_label, fontsize=9, color=actual_color)
+        pred_axis.set_ylabel("Predicted Sensitivity", fontsize=9, color=pred_color)
+        axis.tick_params(axis="y", colors=actual_color)
+        pred_axis.tick_params(axis="y", colors=pred_color)
         axis.grid(axis="y", alpha=0.2, linewidth=0.6)
         _apply_style(axis)
+        pred_axis.spines["top"].set_visible(False)
+        pred_axis.spines["left"].set_visible(False)
+        pred_axis.spines["right"].set_color(pred_color)
+        pred_axis.grid(False)
+        if not legend_handles:
+            legend_handles = [pred_bars.patches[0], actual_bars.patches[0]]
+            legend_labels = ["Predicted", "Observed"]
 
     for axis in axes_arr[len(levels):]:
         axis.axis("off")
+
+    if legend_handles:
+        fig.legend(legend_handles, legend_labels, loc="lower center", ncol=2, fontsize=9)
+    fig.suptitle(title, fontsize=14, y=0.99)
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "Experiment=5",
+            "View=level-wise perturbation comparison",
+            "Panels=one level per subplot",
+            "Bars=predicted overlap and observed target by perturbation",
+            "Axes=left observed scale, right predicted scale",
+        ),
+    )
+    _tight_layout(fig, metadata_bottom=0.07, top=0.95)
+    _save_fig(fig, out_path)
+
+
+def _plot_exp5_wordy_control_comparison(
+    grouped_pairs: List[Dict[str, Any]],
+    out_path: Path,
+    title: str,
+    *,
+    actual_label: str = "Observed Accuracy Drop",
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    if not grouped_pairs:
+        return
+
+    predicted_by_level: Dict[str, List[float]] = defaultdict(list)
+    actual_by_level: Dict[str, List[float]] = defaultdict(list)
+    for pair in grouped_pairs:
+        level = str(pair.get("level", ""))
+        if not level:
+            continue
+        predicted = pair.get("predicted")
+        actual = pair.get("actual")
+        if predicted is not None and np.isfinite(float(predicted)):
+            predicted_by_level[level].append(float(predicted))
+        if actual is not None and np.isfinite(float(actual)):
+            actual_by_level[level].append(float(actual))
+
+    predicted_values = {level: float(np.mean(values)) for level, values in predicted_by_level.items() if values}
+    actual_values = {level: float(np.mean(values)) for level, values in actual_by_level.items() if values}
+    if not predicted_values and not actual_values:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.8, 5.2), squeeze=False)
+    axes_arr = axes.ravel()
+    panels = [
+        ("Predicted Sensitivity", predicted_values, "Predicted Sensitivity"),
+        (actual_label, actual_values, actual_label),
+    ]
+    for axis, (panel_title, values_by_level, ylabel_panel) in zip(axes_arr, panels):
+        pair_labels: List[str] = []
+        base_values: List[float] = []
+        control_values: List[float] = []
+        for base_level, control_level in WORDY_CONTROL_LEVEL_NAME_PAIRS:
+            if base_level not in values_by_level or control_level not in values_by_level:
+                continue
+            pair_labels.append(_WORDY_PAIR_LABELS.get(base_level, f"{base_level} vs {control_level}"))
+            base_values.append(float(values_by_level[base_level]))
+            control_values.append(float(values_by_level[control_level]))
+        if not pair_labels:
+            axis.axis("off")
+            continue
+        x = np.arange(len(pair_labels))
+        width = 0.38
+        axis.bar(x - width / 2, base_values, width=width, color="#4c78a8", alpha=0.88, label="Base")
+        axis.bar(x + width / 2, control_values, width=width, color="#8c6bb1", alpha=0.84, label="Wordy Control")
+        axis.set_xticks(x)
+        axis.set_xticklabels(pair_labels, fontsize=9)
+        axis.set_title(panel_title, fontsize=11)
+        axis.set_ylabel(ylabel_panel, fontsize=10)
+        axis.grid(axis="y", alpha=0.2, linewidth=0.6)
+        _apply_style(axis)
 
     handles, labels = axes_arr[0].get_legend_handles_labels()
     if handles:
@@ -2794,9 +3000,9 @@ def _plot_exp5_level_perturbation_comparison(
         metadata
         or _metadata_lines(
             "Experiment=5",
-            "View=level-wise perturbation comparison",
-            "Panels=one level per subplot",
-            "Bars=predicted overlap and observed target by perturbation",
+            "View=wordy-control pair comparison",
+            "Panels=predicted sensitivity and observed target",
+            "Bars=base level vs matched wordy control",
         ),
     )
     _tight_layout(fig, metadata_bottom=0.07, top=0.95)
@@ -2967,6 +3173,51 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     ]
     if exp1_summary:
         plot_granularity_curves(exp1_summary, plots_dir / "exp1_granularity_curves.png")
+        per_level = exp1_summary.get("per_level", {})
+        _plot_wordy_control_pair_comparison(
+            {level: float(stats.get("mean_accuracy_drop", np.nan)) for level, stats in per_level.items()},
+            plots_dir / "exp1_wordy_control_accuracy_drop.png",
+            title="Wordy Control Comparison: Accuracy Drop",
+            ylabel="Mean Accuracy Drop",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Base level vs matched wordy control for mean accuracy drop",
+                aggregation="level-wise average over all perturbation evaluations",
+                x="matched base/control pair",
+                y="mean gated accuracy drop",
+                note="Compares L1 vs L5, L2 vs L6, L3 vs L7, and L4 vs L8",
+                profile=profile,
+            ),
+        )
+        _plot_wordy_control_pair_comparison(
+            {level: float(stats.get("mean_loglik_drift", np.nan)) for level, stats in per_level.items()},
+            plots_dir / "exp1_wordy_control_loglik_drift.png",
+            title="Wordy Control Comparison: Log-Likelihood Drift",
+            ylabel="Mean Log-Likelihood Drift",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Base level vs matched wordy control for signed confidence drift",
+                aggregation="level-wise average over all perturbation evaluations",
+                x="matched base/control pair",
+                y="mean correct-answer log-likelihood drift",
+                note="Positive values mean confidence erosion",
+                profile=profile,
+            ),
+        )
+        _plot_wordy_control_pair_comparison(
+            {level: float(stats.get("mean_loglik_volatility", np.nan)) for level, stats in per_level.items()},
+            plots_dir / "exp1_wordy_control_loglik_volatility.png",
+            title="Wordy Control Comparison: Log-Likelihood Volatility",
+            ylabel="Mean Log-Likelihood Volatility",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Base level vs matched wordy control for absolute confidence movement",
+                aggregation="level-wise average over all perturbation evaluations",
+                x="matched base/control pair",
+                y="mean absolute correct-answer log-likelihood drift",
+                profile=profile,
+            ),
+        )
     if exp1_complexity:
         plot_complexity_scatter(
             exp1_complexity,
@@ -3137,96 +3388,148 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     profile=profile,
                 ),
             )
-        perturbation_regs = cc.get("horse_race_mean_accuracy_drop_by_perturbation", {})
-        if perturbation_regs:
-            series = {}
-            for perturbation_name, payload in perturbation_regs.items():
-                pooled = payload.get("pooled", {}) if isinstance(payload, dict) else {}
-                within = payload.get("within_image", {}) if isinstance(payload, dict) else {}
-                regression = pooled if pooled.get("predictors") else within
-                if regression and regression.get("predictors"):
-                    series[perturbation_name] = regression
-            if series:
-                plot_coefficient_forest_series(
-                    series,
-                    plots_dir / "exp1_coefficient_plot_accuracy_drop_by_perturbation.png",
-                    title="Coefficient Plot Series: Accuracy Drop by Perturbation",
-                    metadata=_plot_metadata(
-                        experiment="1",
-                        what="Perturbation-specific horse race for gated accuracy drop",
-                        aggregation="one subplot per perturbation type",
-                        x="standardized coefficient with 95% CI",
-                        y="predictor",
-                        note="Only clean-correct points are included in each perturbation-specific regression",
-                        profile=profile,
-                    ),
-                )
-                plot_coefficient_forest_series(
-                    series,
-                    plots_dir / "supplementary_exp1_horse_race_by_perturbation.png",
-                    title="Supplementary: Horse Race by Individual Perturbation",
-                    metadata=_plot_metadata(
-                        experiment="1",
-                        what="Supplementary perturbation-specific horse race for gated accuracy drop",
-                        aggregation="one subplot per perturbation type",
-                        x="standardized coefficient with 95% CI",
-                        y="predictor",
-                        note="Only clean-correct points are included in each perturbation-specific regression; supplementary figure",
-                        profile=profile,
-                    ),
-                )
-    if exp1_samples:
-        family_points = _exp1_perturbation_family_points(exp1_samples)
-        for family in sorted(family_points):
-            points = [
-                point
-                for point in family_points[family]
-                if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
-            ]
-            pooled = summarize_multivariate_regression(
-                points,
-                y_key="accuracy_drop",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
-            )
-            within = summarize_multivariate_regression(
-                points,
-                y_key="accuracy_drop",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
-                group_key="image_id",
-                demean_by_group=True,
-            )
-            regression = pooled if pooled.get("predictors") else within
-            comparison = within if pooled.get("predictors") and within.get("predictors") else None
-            if not regression or not regression.get("predictors"):
+        for (
+            _outcome_key,
+            test_key,
+            main_filename,
+            main_title,
+            supplementary_filename,
+            supplementary_title,
+            outcome_label,
+            note,
+        ) in _EXP1_PERTURBATION_OUTCOME_SPECS:
+            perturbation_regs = cc.get(test_key, {})
+            if not perturbation_regs:
                 continue
-            family_label = family.replace("_", " ").title()
-            plot_coefficient_forest(
-                regression,
-                plots_dir / f"exp1_coefficient_plot_accuracy_drop_{_safe_name(family)}.png",
-                title=f"Coefficient Plot: {family_label} Accuracy Drop",
-                subtitle="Predictors for one perturbation family",
-                primary_label="Pooled OLS" if pooled.get("predictors") else "Within-Image Fixed Effects",
-                comparison_label="Within-Image Fixed Effects" if comparison is not None else None,
-                comparison_regression=comparison,
+            series = _collect_regression_series_from_payload_map(perturbation_regs)
+            if not series:
+                continue
+            plot_coefficient_forest_series(
+                series,
+                plots_dir / main_filename,
+                title=main_title,
                 metadata=_plot_metadata(
                     experiment="1",
-                    what="Perturbation-family-specific horse race for accuracy drop",
-                    aggregation="per-image per-level single-perturbation observations",
+                    what=f"Perturbation-specific horse race for {outcome_label}",
+                    aggregation="one subplot per perturbation type",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
-                    selection=f"family={family}",
-                    note="Only clean-correct points are included, so this measures fragility of existing knowledge",
+                    note=note,
                     profile=profile,
                 ),
             )
+            plot_coefficient_forest_series(
+                series,
+                plots_dir / supplementary_filename,
+                title=supplementary_title,
+                metadata=_plot_metadata(
+                    experiment="1",
+                    what=f"Supplementary perturbation-specific horse race for {outcome_label}",
+                    aggregation="one subplot per perturbation type",
+                    x="standardized coefficient with 95% CI",
+                    y="predictor",
+                    note=note + "; supplementary figure",
+                    profile=profile,
+                ),
+            )
+    if exp1_samples:
+        family_points = _exp1_perturbation_family_points(exp1_samples)
+        family_outcome_specs = (
+            (
+                "accuracy_drop",
+                "exp1_coefficient_plot_accuracy_drop",
+                "Accuracy Drop",
+                "accuracy drop",
+                "Only clean-correct points are included, so this measures fragility of existing knowledge",
+                True,
+            ),
+            (
+                "loglik_drift",
+                "exp1_coefficient_plot_loglik_drift",
+                "Log-Likelihood Drift",
+                "signed correct-answer log-likelihood drift",
+                "Positive values mean confidence erosion; negative values mean confidence recovery",
+                False,
+            ),
+            (
+                "loglik_erosion",
+                "exp1_coefficient_plot_loglik_erosion",
+                "Log-Likelihood Erosion",
+                "positive correct-answer log-likelihood drift",
+                "Only positive drifts contribute to this outcome",
+                False,
+            ),
+            (
+                "loglik_recovery",
+                "exp1_coefficient_plot_loglik_recovery",
+                "Log-Likelihood Recovery",
+                "negative correct-answer log-likelihood drift",
+                "More negative values indicate stronger confidence recovery",
+                False,
+            ),
+            (
+                "loglik_volatility",
+                "exp1_coefficient_plot_loglik_volatility",
+                "Log-Likelihood Volatility",
+                "absolute correct-answer log-likelihood drift",
+                "Higher values mean larger movement away from zero regardless of sign",
+                False,
+            ),
+        )
+        for family in sorted(family_points):
+            family_label = family.replace("_", " ").title()
+            raw_points = family_points[family]
+            for y_key, filename_prefix, title_suffix, outcome_label, note, gate_clean_correct in family_outcome_specs:
+                points = raw_points
+                if gate_clean_correct:
+                    points = [
+                        point
+                        for point in raw_points
+                        if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
+                    ]
+                pooled = summarize_multivariate_regression(
+                    points,
+                    y_key=y_key,
+                    x_keys=[
+                        "complexity_score_residual",
+                        "prompt_complexity_score",
+                        "option_hardness_score",
+                    ],
+                )
+                within = summarize_multivariate_regression(
+                    points,
+                    y_key=y_key,
+                    x_keys=[
+                        "complexity_score_residual",
+                        "prompt_complexity_score",
+                        "option_hardness_score",
+                    ],
+                    group_key="image_id",
+                    demean_by_group=True,
+                )
+                regression = pooled if pooled.get("predictors") else within
+                comparison = within if pooled.get("predictors") and within.get("predictors") else None
+                if not regression or not regression.get("predictors"):
+                    continue
+                plot_coefficient_forest(
+                    regression,
+                    plots_dir / f"{filename_prefix}_{_safe_name(family)}.png",
+                    title=f"Coefficient Plot: {family_label} {title_suffix}",
+                    subtitle="Predictors for one perturbation family",
+                    primary_label="Pooled OLS" if pooled.get("predictors") else "Within-Image Fixed Effects",
+                    comparison_label="Within-Image Fixed Effects" if comparison is not None else None,
+                    comparison_regression=comparison,
+                    metadata=_plot_metadata(
+                        experiment="1",
+                        what=f"Perturbation-family-specific horse race for {outcome_label}",
+                        aggregation="per-image per-level single-perturbation observations",
+                        x="standardized coefficient with 95% CI",
+                        y="predictor",
+                        selection=f"family={family}",
+                        note=note,
+                        profile=profile,
+                    ),
+                )
     if exp1_detail:
         levels, perturbations, matrix = _exp1_level_perturbation_matrix(exp1_detail)
         _plot_heatmap(
@@ -3386,6 +3689,23 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             suppress_dc=suppress_dc,
         )
         plot_effective_bandwidth(exp2_summary, plots_dir / "exp2_bandwidth.png")
+        _plot_wordy_control_pair_comparison(
+            {
+                level: float(stats.get("mean_bandwidth", np.nan))
+                for level, stats in exp2_summary.get("per_level", {}).items()
+            },
+            plots_dir / "exp2_wordy_control_bandwidth.png",
+            title="Wordy Control Comparison: Effective Bandwidth",
+            ylabel="Effective Bandwidth",
+            metadata=_plot_metadata(
+                experiment="2",
+                what="Base level vs matched wordy control for effective bandwidth",
+                aggregation="level-wise sample average",
+                x="matched base/control pair",
+                y="effective bandwidth G(t)",
+                profile=profile,
+            ),
+        )
         _plot_exp2_group_spectra(
             exp2_summary,
             plots_dir / "exp2_group_spectra.png",
@@ -3522,6 +3842,40 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             suppress_dc=suppress_dc,
         )
         _plot_exp3_pre_post(exp3_summary, plots_dir / "exp3_pre_post_drift.png")
+        _plot_wordy_control_pair_comparison(
+            {
+                level: float(stats.get("mean_post_drift_all", np.nan))
+                for level, stats in exp3_summary.get("per_level", {}).items()
+            },
+            plots_dir / "exp3_wordy_control_post_drift.png",
+            title="Wordy Control Comparison: Post-Fusion Drift",
+            ylabel="Mean Post-Fusion Drift ΔZ_all",
+            metadata=_plot_metadata(
+                experiment="3",
+                what="Base level vs matched wordy control for task-conditioned post-fusion drift",
+                aggregation="level-wise average over perturbation observations",
+                x="matched base/control pair",
+                y="mean post-fusion drift ΔZ_all",
+                profile=profile,
+            ),
+        )
+        _plot_wordy_control_pair_comparison(
+            {
+                level: float(stats.get("mean_response_amplification", np.nan))
+                for level, stats in exp3_summary.get("per_level", {}).items()
+            },
+            plots_dir / "exp3_wordy_control_response_amplification.png",
+            title="Wordy Control Comparison: Response Amplification",
+            ylabel="Mean Response Amplification",
+            metadata=_plot_metadata(
+                experiment="3",
+                what="Base level vs matched wordy control for response amplification",
+                aggregation="level-wise average over perturbation observations",
+                x="matched base/control pair",
+                y="mean response amplification",
+                profile=profile,
+            ),
+        )
         _plot_exp3_group_weighted_amplification(
             exp3_summary,
             plots_dir / "exp3_group_weighted_amplification.png",
@@ -3726,6 +4080,24 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             )
     if exp4_summary:
         _plot_exp4_critical_cutoffs(exp4_summary, plots_dir / "exp4_critical_cutoffs.png")
+        for mode in ("lowpass", "highpass"):
+            _plot_wordy_control_pair_comparison(
+                {
+                    level: float(stats.get("critical_cutoff", np.nan))
+                    for level, stats in exp4_summary.get("per_mode", {}).get(mode, {}).items()
+                },
+                plots_dir / f"exp4_wordy_control_critical_cutoff_{mode}.png",
+                title=f"Wordy Control Comparison: Critical Cutoff ({mode})",
+                ylabel="Critical Cutoff",
+                metadata=_plot_metadata(
+                    experiment="4",
+                    what=f"Base level vs matched wordy control for critical cutoff ({mode})",
+                    aggregation="level-wise cutoff estimate",
+                    x="matched base/control pair",
+                    y="critical cutoff",
+                    profile=profile,
+                ),
+            )
     if exp4_complexity:
         _plot_exp4_complexity_modes(
             exp4_complexity,
@@ -3879,6 +4251,21 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
+        _plot_exp5_wordy_control_comparison(
+            exp5_grouped,
+            plots_dir / "exp5_wordy_control_comparison.png",
+            f"Wordy Control Comparison ({_exp5_source_label('image_space')})",
+            actual_label=_exp5_target_label("accuracy_drop"),
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Base level vs matched wordy control for predicted sensitivity and observed accuracy drop",
+                aggregation="level-wise mean over grouped perturbation points",
+                x="matched base/control pair",
+                y=_exp5_target_label('accuracy_drop'),
+                note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
+        )
     if exp5_vision_grouped and exp5_summary:
         vision_summary = exp5_summary.get("vision_feature_space", {}).get("primary_group_summary", exp5_summary.get("vision_feature_space", {}))
         plot_overlap_scatter(
@@ -3955,6 +4342,21 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 aggregation="level x perturbation average over samples",
                 x="perturbation type",
                 y="task level",
+                note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
+        )
+        _plot_exp5_wordy_control_comparison(
+            exp5_vision_grouped,
+            plots_dir / "exp5_wordy_control_comparison_vision.png",
+            f"Wordy Control Comparison ({_exp5_source_label('vision_feature_space')})",
+            actual_label=_exp5_target_label("accuracy_drop"),
+            metadata=_plot_metadata(
+                experiment="5",
+                what="Base level vs matched wordy control for predicted sensitivity and observed accuracy drop",
+                aggregation="level-wise mean over grouped perturbation points",
+                x="matched base/control pair",
+                y=_exp5_target_label('accuracy_drop'),
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
                 profile=profile,
             ),

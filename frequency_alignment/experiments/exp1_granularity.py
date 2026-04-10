@@ -1,10 +1,9 @@
 """Experiment 1: Task Granularity Spectrum.
 
-For each image at each of 4 granularity levels (L1-coarse through L4-very-fine),
-measure VLM accuracy degradation under perturbations.  The central hypothesis is
-that sensitivity scales monotonically with task granularity: coarse tasks are
-robust because they rely on low-frequency features, while fine-grained tasks are
-fragile because they require broad spectral support.
+For each image across the multilevel VQA hierarchy, measure VLM accuracy
+degradation under perturbations. The central hypothesis is still evaluated on
+the primary L1-L4 granularity ladder, while wordy control levels can be carried
+through the summaries and plots for comparison.
 
 Outputs:
     exp1/summary.json          -- aggregate metrics and hypothesis tests
@@ -40,6 +39,7 @@ from ..analysis.statistics import (
     spearman_correlation,
 )
 from ..data.base import (
+    ALL_VQA_LEVEL_NAMES,
     ExperimentResult,
     GranularityLevel,
     GranularitySample,
@@ -181,17 +181,74 @@ def _build_perturbation_complexity_points(per_sample: List[Dict[str, Any]]) -> D
             }
             for perturbation in level_data.get("perturbations", []):
                 name = str(perturbation.get("name") or perturbation.get("perturbation") or "unknown")
+                drift = float(perturbation.get("loglik_drift", 0.0) or 0.0)
                 point = dict(base)
                 point.update(
                     {
                         "perturbation": name,
                         "accuracy_drop": float(perturbation.get("accuracy_drop", 0.0) or 0.0),
+                        "loglik_drift": drift,
+                        "loglik_erosion": max(drift, 0.0),
+                        "loglik_recovery": min(drift, 0.0),
+                        "loglik_volatility": abs(drift),
                     }
                 )
                 grouped[name].append(point)
     for points in grouped.values():
         attach_complexity_residual(points)
     return grouped
+
+
+def _summarize_perturbation_specific_horse_races(
+    perturbation_points: Dict[str, List[Dict[str, Any]]],
+    *,
+    y_key: str,
+    gate_clean_correct: bool = False,
+) -> Dict[str, Any]:
+    by_perturbation: Dict[str, Any] = {}
+    for perturbation_name, points in sorted(perturbation_points.items()):
+        used_points = points
+        filter_payload: Dict[str, Any] = {
+            "n_points_used": len(points),
+            "n_points_total": len(points),
+        }
+        if gate_clean_correct:
+            used_points = [
+                point
+                for point in points
+                if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
+            ]
+            filter_payload.update(
+                {
+                    "clean_accuracy_required": 1.0,
+                    "n_points_used": len(used_points),
+                    "n_points_total": len(points),
+                }
+            )
+        by_perturbation[perturbation_name] = {
+            "filter": filter_payload,
+            "pooled": summarize_multivariate_regression(
+                used_points,
+                y_key=y_key,
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+            ),
+            "within_image": summarize_multivariate_regression(
+                used_points,
+                y_key=y_key,
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                group_key="image_id",
+                demean_by_group=True,
+            ),
+        }
+    return by_perturbation
 
 
 def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -512,7 +569,7 @@ def _aggregate_results(
 
     # Build aggregate dict
     agg: Dict[str, Any] = {"per_level": {}}
-    levels_ordered = sorted(level_drops.keys())
+    levels_ordered = [level_key for level_key in ALL_VQA_LEVEL_NAMES if level_key in level_drops]
 
     for lk in levels_ordered:
         drops = level_drops[lk]
@@ -829,40 +886,37 @@ def _run_hypothesis_tests(
             ),
         }
         if perturbation_points:
-            by_perturbation: Dict[str, Any] = {}
-            for perturbation_name, points in sorted(perturbation_points.items()):
-                gated_points = [
-                    point for point in points
-                    if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
-                ]
-                by_perturbation[perturbation_name] = {
-                    "filter": {
-                        "clean_accuracy_required": 1.0,
-                        "n_points_used": len(gated_points),
-                        "n_points_total": len(points),
-                    },
-                    "pooled": summarize_multivariate_regression(
-                        gated_points,
-                        y_key="accuracy_drop",
-                        x_keys=[
-                            "complexity_score_residual",
-                            "prompt_complexity_score",
-                            "option_hardness_score",
-                        ],
-                    ),
-                    "within_image": summarize_multivariate_regression(
-                        gated_points,
-                        y_key="accuracy_drop",
-                        x_keys=[
-                            "complexity_score_residual",
-                            "prompt_complexity_score",
-                            "option_hardness_score",
-                        ],
-                        group_key="image_id",
-                        demean_by_group=True,
-                    ),
-                }
-            tests["continuous_complexity"]["horse_race_mean_accuracy_drop_by_perturbation"] = by_perturbation
+            tests["continuous_complexity"]["horse_race_mean_accuracy_drop_by_perturbation"] = (
+                _summarize_perturbation_specific_horse_races(
+                    perturbation_points,
+                    y_key="accuracy_drop",
+                    gate_clean_correct=True,
+                )
+            )
+            tests["continuous_complexity"]["horse_race_mean_loglik_drift_by_perturbation"] = (
+                _summarize_perturbation_specific_horse_races(
+                    perturbation_points,
+                    y_key="loglik_drift",
+                )
+            )
+            tests["continuous_complexity"]["horse_race_mean_loglik_erosion_by_perturbation"] = (
+                _summarize_perturbation_specific_horse_races(
+                    perturbation_points,
+                    y_key="loglik_erosion",
+                )
+            )
+            tests["continuous_complexity"]["horse_race_mean_loglik_recovery_by_perturbation"] = (
+                _summarize_perturbation_specific_horse_races(
+                    perturbation_points,
+                    y_key="loglik_recovery",
+                )
+            )
+            tests["continuous_complexity"]["horse_race_mean_loglik_volatility_by_perturbation"] = (
+                _summarize_perturbation_specific_horse_races(
+                    perturbation_points,
+                    y_key="loglik_volatility",
+                )
+            )
 
     return tests
 

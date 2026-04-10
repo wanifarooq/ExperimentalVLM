@@ -1,4 +1,4 @@
-"""GQA dataset loader with 5-level granularity question generation.
+"""GQA dataset loader with primary and wordy-control granularity questions.
 
 Downloads GQA scene graphs and images, then generates questions at four
 granularity levels from the same image:
@@ -8,6 +8,9 @@ granularity levels from the same image:
 - **L3 (Fine)**: Spatial relationship -- "Is the {obj1} to the {relation} of {obj2}?"
 - **L4 (Very Fine)**: Compositional MCQ -- combines attributes + spatial reasoning
 - **L5 (Wordy-Simpleton)**: L1 semantics with redundant filler text
+- **L6 (Wordy-Medium)**: L2 semantics with redundant filler text
+- **L7 (Wordy-Fine)**: L3 semantics with redundant filler text
+- **L8 (Wordy-Very-Fine)**: L4 semantics with redundant filler text
 
 GQA scene graph structure (per image)::
 
@@ -53,11 +56,11 @@ from .base import (
     LevelData,
     VERIFICATION_VQA_LEVELS,
 )
-from .complexity import build_semantic_complexity
+from .complexity import build_semantic_complexity, refresh_prompt_load
 
 logger = logging.getLogger(__name__)
 
-_DATASET_CACHE_VERSION = "gqa_multilevel_v2"
+_DATASET_CACHE_VERSION = "gqa_multilevel_v3"
 _DATASET_MEMO: Dict[str, List[GranularitySample]] = {}
 
 _WORDY_FILLER_PREFIX = (
@@ -360,6 +363,44 @@ def _compute_option_hardness(
     }
 
 
+def _wordify_question(question: str) -> str:
+    base = str(question or "").strip()
+    if not base:
+        return base
+    return f"{_WORDY_FILLER_PREFIX}{base} {_WORDY_FILLER_SUFFIX}"
+
+
+def _build_wordy_variant(
+    base_level: LevelData,
+    *,
+    level: GranularityLevel,
+    question_type: str,
+) -> LevelData:
+    question = _wordify_question(base_level.question)
+    complexity = refresh_prompt_load(
+        {
+            "semantic_atoms": list(base_level.semantic_atoms),
+            "prompt_semantic_atoms": list(base_level.prompt_semantic_atoms),
+            "semantic_atom_counts": dict(base_level.semantic_atom_counts),
+            "question_complexity_score": float(base_level.question_complexity_score),
+            "prompt_complexity_score": float(base_level.prompt_complexity_score),
+            "complexity_score": float(base_level.complexity_score),
+        },
+        question_text=question,
+        options=base_level.options,
+    )
+    return LevelData(
+        level=level,
+        question=question,
+        options=dict(base_level.options),
+        answer_label=base_level.answer_label,
+        question_type=question_type,
+        option_hardness_score=float(base_level.option_hardness_score),
+        option_hardness_components=dict(base_level.option_hardness_components),
+        **complexity,
+    )
+
+
 def _build_object_presence_question(
     sg: dict,
     obj_id: str,
@@ -468,6 +509,18 @@ def build_l5_question(
         question_type="object_presence_wordy_control",
         desired_answer_label=desired_answer_label,
         wordy=True,
+    )
+
+
+def build_l6_question(base_level: LevelData) -> Optional[LevelData]:
+    """L6: L2 semantics with redundant filler text."""
+
+    if base_level is None:
+        return None
+    return _build_wordy_variant(
+        base_level,
+        level=GranularityLevel.L6_WORDY_MEDIUM,
+        question_type=f"{base_level.question_type}_wordy_control",
     )
 
 
@@ -597,6 +650,18 @@ def build_l3_question(
     )
 
 
+def build_l7_question(base_level: LevelData) -> Optional[LevelData]:
+    """L7: L3 semantics with redundant filler text."""
+
+    if base_level is None:
+        return None
+    return _build_wordy_variant(
+        base_level,
+        level=GranularityLevel.L7_WORDY_FINE,
+        question_type=f"{base_level.question_type}_wordy_control",
+    )
+
+
 def build_l4_question(
     sg: dict,
     objects: dict,
@@ -674,6 +739,18 @@ def build_l4_question(
         option_hardness_score=option_hardness_score,
         option_hardness_components=option_hardness_components,
         **complexity,
+    )
+
+
+def build_l8_question(base_level: LevelData) -> Optional[LevelData]:
+    """L8: L4 semantics with redundant filler text."""
+
+    if base_level is None:
+        return None
+    return _build_wordy_variant(
+        base_level,
+        level=GranularityLevel.L8_WORDY_VERY_FINE,
+        question_type=f"{base_level.question_type}_wordy_control",
     )
 
 
@@ -932,11 +1009,11 @@ def build_granularity_dataset(
     split: str = "val",
     allow_download: bool = True,
 ) -> List[GranularitySample]:
-    """Build the 5-level granularity dataset from GQA.
+    """Build the multilevel granularity dataset from GQA.
 
     Downloads scene graphs and images if needed, generates questions at
-    all primary levels plus the L5 control, and returns only images where all levels were
-    successfully constructed.
+    all primary levels plus the wordy controls, and returns only images where
+    all levels were successfully constructed.
 
     Args:
         cache_dir: Root cache directory.
@@ -946,7 +1023,7 @@ def build_granularity_dataset(
         allow_download: Whether to download missing data.
 
     Returns:
-        List of :class:`GranularitySample`, each with L1-L5 questions.
+        List of :class:`GranularitySample`, each with L1-L8 questions.
     """
     cache_key = _dataset_cache_key(
         split=split,
@@ -1037,13 +1114,19 @@ def build_granularity_dataset(
                 q = build_l2_question(sg, obj_id, obj, rng)
                 if q is not None:
                     levels[GranularityLevel.L2_MEDIUM] = q
+                    q_wordy = build_l6_question(q)
+                    if q_wordy is not None:
+                        levels[GranularityLevel.L6_WORDY_MEDIUM] = q_wordy
 
             if GranularityLevel.L3_FINE not in levels:
                 q = build_l3_question(sg, obj_id, obj, objects, rng)
                 if q is not None:
                     levels[GranularityLevel.L3_FINE] = q
+                    q_wordy = build_l7_question(q)
+                    if q_wordy is not None:
+                        levels[GranularityLevel.L7_WORDY_FINE] = q_wordy
 
-            if len(levels) >= 4:
+            if len(levels) >= 6:
                 break
 
         # L4 uses the full scene graph
@@ -1051,6 +1134,9 @@ def build_granularity_dataset(
             q = build_l4_question(sg, objects, rng)
             if q is not None:
                 levels[GranularityLevel.L4_VERY_FINE] = q
+                q_wordy = build_l8_question(q)
+                if q_wordy is not None:
+                    levels[GranularityLevel.L8_WORDY_VERY_FINE] = q_wordy
 
         # Only keep images where all levels were generated
         sample = GranularitySample(

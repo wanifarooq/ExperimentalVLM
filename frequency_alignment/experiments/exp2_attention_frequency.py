@@ -45,7 +45,7 @@ from ..analysis.statistics import (
     spearman_correlation,
     bootstrap_ci,
 )
-from ..data.base import ExperimentResult, GranularityLevel, PRIMARY_VQA_LEVEL_NAMES
+from ..data.base import ExperimentResult, GranularityLevel, ALL_VQA_LEVEL_NAMES, PRIMARY_VQA_LEVEL_NAMES
 from ..data.complexity import ensure_level_complexity
 from ..data.complexity import (
     OPTION_HARDNESS_SCORE_DEFINITION,
@@ -596,8 +596,9 @@ def run_exp2(
         "effective_num_bands": int(effective_band_count),
         "prompt_controls": prompt_controls,
     }
-    level_order = list(PRIMARY_VQA_LEVEL_NAMES)
+    level_order = list(ALL_VQA_LEVEL_NAMES)
     present_levels = [lk for lk in level_order if lk in level_bandwidths]
+    primary_present_levels = [lk for lk in PRIMARY_VQA_LEVEL_NAMES if lk in level_bandwidths]
 
     for lk in present_levels:
         bws = level_bandwidths[lk]
@@ -727,9 +728,9 @@ def run_exp2(
     tests: Dict[str, Any] = {}
 
     # H1: Bandwidth increases with granularity
-    if len(present_levels) >= 2:
-        ranks = list(range(1, len(present_levels) + 1))
-        mean_bws = [np.mean(level_bandwidths[lk]) for lk in present_levels]
+    if len(primary_present_levels) >= 2:
+        ranks = list(range(1, len(primary_present_levels) + 1))
+        mean_bws = [np.mean(level_bandwidths[lk]) for lk in primary_present_levels]
 
         rho, p = spearman_correlation(ranks, mean_bws)
         tests["spearman_bandwidth_vs_granularity"] = {
@@ -737,12 +738,12 @@ def run_exp2(
             "p_value": p,
             "target": "rho > 0.8 (bandwidth increases with granularity)",
             "passed": rho > 0.8,
-            "values": dict(zip(present_levels, mean_bws)),
+            "values": dict(zip(primary_present_levels, mean_bws)),
         }
 
         for group_name in LAYER_GROUP_ORDER:
             group_present = [
-                lk for lk in present_levels if level_group_bandwidths[group_name].get(lk)
+                lk for lk in primary_present_levels if level_group_bandwidths[group_name].get(lk)
             ]
             if len(group_present) < 2:
                 continue
@@ -758,7 +759,7 @@ def run_exp2(
             }
 
     # H2: ANOVA on bandwidths across levels
-    groups = [level_bandwidths[lk] for lk in present_levels if level_bandwidths[lk]]
+    groups = [level_bandwidths[lk] for lk in primary_present_levels if level_bandwidths[lk]]
     if len(groups) >= 2:
         f_stat, p_anova = one_way_anova(*groups)
         tests["anova_bandwidth_across_levels"] = {

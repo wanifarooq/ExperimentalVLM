@@ -179,6 +179,29 @@ def build_semantic_complexity(
     }
 
 
+def refresh_prompt_load(
+    existing_complexity: Mapping[str, Any],
+    *,
+    question_text: str,
+    options: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
+    """Keep semantic-program complexity fixed while recomputing prompt load."""
+
+    payload = dict(existing_complexity)
+    question_load_atoms = _question_load_atoms(question_text)
+    option_atoms = _option_atoms(options)
+    prompt_atoms = question_load_atoms + list(option_atoms)
+    counts = dict(payload.get("semantic_atom_counts", {}) or {})
+    counts["option_atoms"] = len(option_atoms)
+    counts["prompt_atoms_total"] = len(prompt_atoms)
+    payload["prompt_semantic_atoms"] = prompt_atoms
+    payload["semantic_atom_counts"] = counts
+    payload["prompt_complexity_score"] = (
+        float(len(prompt_atoms)) if prompt_atoms else float(len(question_load_atoms))
+    )
+    return payload
+
+
 def fallback_text_complexity(
     question: str,
     options: Optional[Mapping[str, str]] = None,
