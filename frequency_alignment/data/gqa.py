@@ -7,10 +7,10 @@ granularity levels from the same image:
 - **L2 (Medium)**: Attribute recognition -- "What {attr_type} is the {object}?"
 - **L3 (Fine)**: Spatial relationship -- "Is the {obj1} to the {relation} of {obj2}?"
 - **L4 (Very Fine)**: Compositional MCQ -- combines attributes + spatial reasoning
-- **L5 (Wordy-Simpleton)**: L1 semantics with redundant filler text
-- **L6 (Wordy-Medium)**: L2 semantics with redundant filler text
-- **L7 (Wordy-Fine)**: L3 semantics with redundant filler text
-- **L8 (Wordy-Very-Fine)**: L4 semantics with redundant filler text
+- **L5 (Wordy-Simpleton)**: L1 semantics with fixed 60-content-word filler
+- **L6 (Wordy-Medium)**: L2 semantics with fixed 60-content-word filler
+- **L7 (Wordy-Fine)**: L3 semantics with fixed 60-content-word filler
+- **L8 (Wordy-Very-Fine)**: L4 semantics with fixed 60-content-word filler
 
 GQA scene graph structure (per image)::
 
@@ -56,21 +56,47 @@ from .base import (
     LevelData,
     VERIFICATION_VQA_LEVELS,
 )
-from .complexity import build_semantic_complexity, refresh_prompt_load
+from .complexity import (
+    build_semantic_complexity,
+    prompt_content_word_count,
+    question_content_words,
+    refresh_prompt_load,
+)
 
 logger = logging.getLogger(__name__)
 
-_DATASET_CACHE_VERSION = "gqa_multilevel_v3"
+_DATASET_CACHE_VERSION = "gqa_multilevel_v4"
 _DATASET_MEMO: Dict[str, List[GranularitySample]] = {}
+_WORDY_TARGET_PROMPT_CONTENT_WORDS = 60
 
 _WORDY_FILLER_PREFIX = (
-    "Please consider the visual scene carefully, without overthinking any hidden trick, "
-    "and answer the following in a straightforward way after taking a moment to reflect on "
-    "what is plainly visible. "
+    "Moving forward with the analysis of this specific visual instance, please consider the "
+    "scene carefully and answer the following question in a straightforward way. "
 )
 _WORDY_FILLER_SUFFIX = (
-    "In other words, even though this may sound longer than necessary, the question is still "
-    "asking only about the obvious visible presence of the object, so respond accordingly."
+    "This extra wording is only neutral context and does not add any new visual requirement."
+)
+_WORDY_NEUTRAL_FILLER_WORDS = (
+    "context",
+    "review",
+    "observation",
+    "perspective",
+    "analysis",
+    "instance",
+    "scene",
+    "visual",
+    "careful",
+    "straightforward",
+    "response",
+    "neutral",
+    "polite",
+    "steady",
+    "focused",
+    "general",
+    "supportive",
+    "ordinary",
+    "plain",
+    "background",
 )
 
 # ---------------------------------------------------------------------------
@@ -363,11 +389,59 @@ def _compute_option_hardness(
     }
 
 
-def _wordify_question(question: str) -> str:
+def _neutral_filler_words(num_words: int) -> str:
+    if num_words <= 0:
+        return ""
+    words = [
+        _WORDY_NEUTRAL_FILLER_WORDS[idx % len(_WORDY_NEUTRAL_FILLER_WORDS)]
+        for idx in range(num_words)
+    ]
+    return " ".join(words)
+
+
+def _normalize_wordy_prompt_length(
+    question: str,
+    *,
+    options: Optional[Dict[str, str]],
+    target_content_words: int = _WORDY_TARGET_PROMPT_CONTENT_WORDS,
+) -> str:
+    """Pad a wordy question so question + option content words hit a fixed target."""
+
+    normalized = " ".join(str(question or "").strip().split())
+    if not normalized:
+        return normalized
+    current = prompt_content_word_count(normalized, options)
+    if current >= target_content_words:
+        return normalized
+    needed = target_content_words - current
+    padded = f"{normalized} {_neutral_filler_words(needed)}.".strip()
+    final_count = prompt_content_word_count(padded, options)
+    if final_count < target_content_words:
+        padded = (
+            f"{padded.rstrip('.')} "
+            f"{_neutral_filler_words(target_content_words - final_count)}."
+        )
+    elif final_count > target_content_words:
+        words = question_content_words(_neutral_filler_words(needed))
+        overage = final_count - target_content_words
+        keep = max(0, len(words) - overage)
+        padded = f"{normalized} {' '.join(words[:keep])}.".strip()
+    return padded
+
+
+def _wordify_question(question: str, options: Optional[Dict[str, str]] = None) -> str:
     base = str(question or "").strip()
     if not base:
         return base
-    return f"{_WORDY_FILLER_PREFIX}{base} {_WORDY_FILLER_SUFFIX}"
+    candidates = [
+        f"{_WORDY_FILLER_PREFIX}{base} {_WORDY_FILLER_SUFFIX}",
+        f"Please consider this specific visual instance carefully. {base}",
+        base,
+    ]
+    for candidate in candidates:
+        if prompt_content_word_count(candidate, options) <= _WORDY_TARGET_PROMPT_CONTENT_WORDS:
+            return _normalize_wordy_prompt_length(candidate, options=options)
+    return base
 
 
 def _build_wordy_variant(
@@ -376,7 +450,7 @@ def _build_wordy_variant(
     level: GranularityLevel,
     question_type: str,
 ) -> LevelData:
-    question = _wordify_question(base_level.question)
+    question = _wordify_question(base_level.question, options=base_level.options)
     complexity = refresh_prompt_load(
         {
             "semantic_atoms": list(base_level.semantic_atoms),
@@ -389,6 +463,11 @@ def _build_wordy_variant(
         question_text=question,
         options=base_level.options,
     )
+    counts = dict(complexity.get("semantic_atom_counts", {}) or {})
+    counts["wordy_target_prompt_content_words"] = _WORDY_TARGET_PROMPT_CONTENT_WORDS
+    counts["wordy_prompt_content_words"] = prompt_content_word_count(question, base_level.options)
+    counts["wordy_question_content_words"] = len(question_content_words(question))
+    complexity["semantic_atom_counts"] = counts
     return LevelData(
         level=level,
         question=question,
@@ -437,10 +516,7 @@ def _build_object_presence_question(
         options = {"A": "yes", "B": "no"}
         name = absent_name
         grounding_candidates = 0
-    if wordy:
-        question = f"{_WORDY_FILLER_PREFIX}{base_question} {_WORDY_FILLER_SUFFIX}"
-    else:
-        question = base_question
+    question = _wordify_question(base_question, options=options) if wordy else base_question
     complexity = build_semantic_complexity(
         entity_names=[name],
         reasoning_ops=["exist"],
@@ -449,6 +525,12 @@ def _build_object_presence_question(
         question_text=question,
         options=options,
     )
+    if wordy:
+        counts = dict(complexity.get("semantic_atom_counts", {}) or {})
+        counts["wordy_target_prompt_content_words"] = _WORDY_TARGET_PROMPT_CONTENT_WORDS
+        counts["wordy_prompt_content_words"] = prompt_content_word_count(question, options)
+        counts["wordy_question_content_words"] = len(question_content_words(question))
+        complexity["semantic_atom_counts"] = counts
     option_hardness_score, option_hardness_components = _compute_option_hardness(
         options=options,
         answer_label=answer,

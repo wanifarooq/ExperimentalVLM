@@ -18,6 +18,7 @@ from ..analysis.continuous import (
     summarize_multivariate_regression,
 )
 from ..analysis.spectral import spectral_band_centers
+from ..analysis.statistics import paired_wordy_mirror_ttests
 from ..data.base import ALL_VQA_LEVEL_NAMES, PRIMARY_VQA_LEVEL_NAMES, WORDY_CONTROL_LEVEL_NAME_PAIRS
 from ..data.complexity import (
     SEMANTIC_COMPLEXITY_SCORE_FORMULA,
@@ -68,6 +69,7 @@ _COEFFICIENT_LABELS = {
     "complexity_score_residual": "Residualized\nSemantic Logic",
     "prompt_complexity_score": "Prompt Load",
     "option_hardness_score": "Option Hardness",
+    "prediction_entropy": "Prediction Entropy\n(Clean Confusion)",
     "clean_accuracy": "Clean Accuracy\n(Baseline)",
 }
 _COEFFICIENT_COLORS = {
@@ -75,6 +77,7 @@ _COEFFICIENT_COLORS = {
     "complexity_score_residual": "#2ca02c",
     "prompt_complexity_score": "#7f7f7f",
     "option_hardness_score": "#ff7f0e",
+    "prediction_entropy": "#17becf",
     "clean_accuracy": "#1f77b4",
 }
 _DEFAULT_PLOT_PROFILE = "exhaustive"
@@ -147,6 +150,27 @@ def _metadata_lines(*parts: Optional[str]) -> List[str]:
     return [str(part) for part in parts if part]
 
 
+def _optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        value_float = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value_float if np.isfinite(value_float) else None
+
+
+def _horse_race_predictor_keys(points: Sequence[Dict[str, Any]]) -> List[str]:
+    keys = [
+        "complexity_score_residual",
+        "prompt_complexity_score",
+        "option_hardness_score",
+    ]
+    if any(_optional_float(point.get("prediction_entropy")) is not None for point in points):
+        keys.append("prediction_entropy")
+    return keys
+
+
 def _plot_metadata(
     *,
     experiment: Optional[str] = None,
@@ -176,15 +200,25 @@ def _set_plot_metadata(fig: plt.Figure, lines: Optional[Sequence[str]]) -> None:
     setattr(fig, "_fa_metadata_lines", [str(line) for line in lines if str(line).strip()])
 
 
-def _complexity_axis_label() -> str:
+def _complexity_axis_label(x_key: str = "complexity_score_residual") -> str:
+    if x_key == "complexity_score_residual":
+        return "Residualized Semantic Logic"
+    if x_key == "prompt_complexity_score":
+        return "Prompt Load"
+    if x_key == "option_hardness_score":
+        return "Option Hardness"
+    if x_key == "prediction_entropy":
+        return "Prediction Entropy"
     return SEMANTIC_COMPLEXITY_SCORE_LABEL
 
 
-def _complexity_plot_note() -> str:
-    return (
-        "Semantic score = "
-        + SEMANTIC_COMPLEXITY_SCORE_FORMULA
-    )
+def _complexity_plot_note(x_key: str = "complexity_score_residual") -> str:
+    if x_key == "complexity_score_residual":
+        return (
+            "X-axis is residual(semantic complexity ~ prompt load); raw semantic formula = "
+            + SEMANTIC_COMPLEXITY_SCORE_FORMULA
+        )
+    return "Semantic score = " + SEMANTIC_COMPLEXITY_SCORE_FORMULA
 
 
 def _tight_layout(fig: plt.Figure, *, metadata_bottom: float = 0.08, top: float = 0.97) -> None:
@@ -354,6 +388,17 @@ def _representative_sample_limit(config: Optional[Dict[str, Any]], profile: str)
         except (TypeError, ValueError):
             pass
     return 3 if _is_exhaustive_profile(profile) else 2
+
+
+def _sample_scatter_point_limit(config: Optional[Dict[str, Any]], profile: str) -> int:
+    plotting = config.get("plotting", {}) if isinstance(config, dict) else {}
+    raw_value = plotting.get("max_sample_scatter_points")
+    if raw_value is not None:
+        try:
+            return max(100, int(raw_value))
+        except (TypeError, ValueError):
+            pass
+    return 5000 if _is_exhaustive_profile(profile) else 2500
 
 
 def _analysis_suppress_dc(config: Optional[Dict[str, Any]]) -> bool:
@@ -585,6 +630,93 @@ def _plot_wordy_control_pair_comparison(
         ylim=ylim,
         metadata=metadata,
     )
+
+
+def _plot_linguistic_stabilization_effect(
+    mirror_tests: Dict[str, Any],
+    out_path: Path,
+    *,
+    profile: str = _DEFAULT_PLOT_PROFILE,
+) -> None:
+    outcomes = mirror_tests.get("outcomes", {}) if isinstance(mirror_tests, dict) else {}
+    if not outcomes:
+        return
+    outcome_specs = [
+        ("mean_accuracy_drop", "Accuracy Drop"),
+        ("mean_loglik_drift", "Log-Likelihood Drift"),
+        ("mean_loglik_erosion", "Log-Likelihood Erosion"),
+        ("mean_loglik_volatility", "Log-Likelihood Volatility"),
+    ]
+    valid_specs = [
+        (key, label)
+        for key, label in outcome_specs
+        if outcomes.get(key, {}).get("pairs")
+    ]
+    if not valid_specs:
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(13.0, 8.8), squeeze=False)
+    axes_arr = axes.ravel()
+    for axis in axes_arr[len(valid_specs):]:
+        axis.axis("off")
+
+    for axis, (outcome_key, label) in zip(axes_arr, valid_specs):
+        pair_payload = outcomes.get(outcome_key, {}).get("pairs", {})
+        labels: List[str] = []
+        centers: List[float] = []
+        lower_err: List[float] = []
+        upper_err: List[float] = []
+        colors: List[str] = []
+        for base_level, control_level in WORDY_CONTROL_LEVEL_NAME_PAIRS:
+            pair_key = f"{base_level}__{control_level}"
+            stats = pair_payload.get(pair_key)
+            if not stats or int(stats.get("n_pairs", 0) or 0) <= 0:
+                continue
+            center = float(stats.get("mean_stabilization_effect", 0.0) or 0.0)
+            lower = float(stats.get("ci_95_lower", center) or center)
+            upper = float(stats.get("ci_95_upper", center) or center)
+            labels.append(_WORDY_PAIR_LABELS.get(base_level, f"{base_level} vs {control_level}"))
+            centers.append(center)
+            lower_err.append(max(0.0, center - lower))
+            upper_err.append(max(0.0, upper - center))
+            colors.append(_LEVEL_COLORS.get(base_level, "#4c78a8"))
+        if not centers:
+            axis.axis("off")
+            continue
+        x = np.arange(len(centers))
+        axis.axhline(0.0, color="#555555", linestyle="--", linewidth=1.0, alpha=0.8)
+        axis.bar(x, centers, color=colors, alpha=0.86, width=0.65)
+        axis.errorbar(
+            x,
+            centers,
+            yerr=np.vstack([lower_err, upper_err]),
+            fmt="none",
+            ecolor="#333333",
+            elinewidth=1.4,
+            capsize=4,
+        )
+        axis.set_xticks(x)
+        axis.set_xticklabels(labels, fontsize=9)
+        axis.set_title(label, fontsize=11)
+        axis.set_ylabel("Base - Wordy", fontsize=10)
+        axis.grid(axis="y", alpha=0.2, linewidth=0.6)
+        _apply_style(axis)
+
+    fig.suptitle("Linguistic Stabilization Effect: Terse vs Wordy Mirrors", fontsize=14, y=0.99)
+    _set_plot_metadata(
+        fig,
+        _plot_metadata(
+            experiment="1",
+            what="Paired mirror test for wordy-control stabilization",
+            aggregation="paired within-image L1-L4 base levels minus L5-L8 wordy mirrors",
+            x="matched terse/wordy level pair",
+            y="base outcome minus wordy outcome",
+            note="Positive bars mean the wordy prompt reduced the measured drop or drift; error bars are 95% paired-delta CIs",
+            profile=profile,
+        ),
+    )
+    _tight_layout(fig, metadata_bottom=0.08, top=0.95)
+    _save_fig(fig, out_path)
 
 
 def _plot_distribution_with_points(
@@ -1000,9 +1132,17 @@ def plot_overlap_scatter(
     y_label: str = "Observed Accuracy Drop",
     scale_mode: str = "raw",
     metadata: Optional[Sequence[str]] = None,
+    max_points: Optional[int] = None,
 ) -> None:
     if not scatter_data:
         return
+
+    original_count = len(scatter_data)
+    if max_points is not None and original_count > max_points > 0:
+        rng = np.random.default_rng(42)
+        keep = np.sort(rng.choice(original_count, size=int(max_points), replace=False))
+        scatter_data = [scatter_data[int(idx)] for idx in keep]
+    displayed_count = len(scatter_data)
 
     preds = np.asarray([item["predicted"] for item in scatter_data], dtype=float)
     actuals = np.asarray([item["actual"] for item in scatter_data], dtype=float)
@@ -1026,14 +1166,18 @@ def plot_overlap_scatter(
         scale_note = "X uses zscore(log1p(overlap)); Y uses zscore(observed target); raw metrics unchanged"
 
     fig, ax = plt.subplots(figsize=(7.1, 6.0))
+    grouped_indices: Dict[str, List[int]] = defaultdict(list)
     for idx, item in enumerate(scatter_data):
         level = item.get("level")
         if level is None:
             label = item.get("label", "")
             level = label.split("|", 1)[0] if "|" in label else "unknown"
+        grouped_indices[str(level)].append(idx)
+    for level, indices in grouped_indices.items():
+        idx_arr = np.asarray(indices, dtype=int)
         ax.scatter(
-            plot_x[idx],
-            plot_y[idx],
+            plot_x[idx_arr],
+            plot_y[idx_arr],
             s=point_size,
             alpha=alpha,
             color=_LEVEL_COLORS.get(level, "#999"),
@@ -1057,16 +1201,20 @@ def plot_overlap_scatter(
     ]
     ax.legend(handles=handles, fontsize=9, loc="upper left")
     _apply_style(ax)
+    metadata_lines = list(metadata) if metadata else _metadata_lines(
+        "View=scatter",
+        f"X={x_label}",
+        f"Y={displayed_y_label}",
+        f"Points={displayed_count}",
+        scale_note,
+    )
+    if displayed_count != original_count:
+        metadata_lines.append(
+            f"VisualSample={displayed_count} of {original_count}; correlation in title uses all source points"
+        )
     _set_plot_metadata(
         fig,
-        metadata
-        or _metadata_lines(
-            "View=scatter",
-            f"X={x_label}",
-            f"Y={displayed_y_label}",
-            f"Points={len(scatter_data)}",
-            scale_note,
-        ),
+        metadata_lines,
     )
     _tight_layout(fig)
     _save_fig(fig, out_path)
@@ -1186,7 +1334,7 @@ def _plot_complexity_scatter_on_axis(
     ax: plt.Axes,
     points: Sequence[Dict[str, Any]],
     *,
-    x_key: str = "complexity_score",
+    x_key: str = "complexity_score_residual",
     y_key: str,
     y_label: str,
     title: str,
@@ -1243,7 +1391,7 @@ def _plot_complexity_scatter_on_axis(
             label="Linear fit",
         )
 
-    ax.set_xlabel(_complexity_axis_label(), fontsize=10)
+    ax.set_xlabel(_complexity_axis_label(x_key), fontsize=10)
     ax.set_ylabel(y_label, fontsize=10)
     ax.set_title(title, fontsize=12)
     ax.grid(alpha=0.2, linewidth=0.6)
@@ -1258,14 +1406,20 @@ def plot_complexity_scatter(
     out_path: Path,
     title: str,
     metadata: Optional[Sequence[str]] = None,
+    x_key: str = "complexity_score_residual",
 ) -> None:
-    valid = _complexity_valid_points(points, x_key="complexity_score", y_key=y_key)
+    resolved_x_key = x_key
+    valid = _complexity_valid_points(points, x_key=resolved_x_key, y_key=y_key)
+    if not valid and resolved_x_key != "complexity_score":
+        resolved_x_key = "complexity_score"
+        valid = _complexity_valid_points(points, x_key=resolved_x_key, y_key=y_key)
     if not valid:
         return
     fig, ax = plt.subplots(figsize=(7.8, 5.6))
     _plot_complexity_scatter_on_axis(
         ax,
         valid,
+        x_key=resolved_x_key,
         y_key=y_key,
         y_label=y_label,
         title=title,
@@ -1278,11 +1432,11 @@ def plot_complexity_scatter(
         metadata
         or _metadata_lines(
             "View=scatter",
-            f"X={_complexity_axis_label().lower()}",
+            f"X={_complexity_axis_label(resolved_x_key).lower()}",
             f"Y={y_label}",
             "Points=per-image per-level summaries",
             "Black line=mean by exact score; dashed line=linear fit",
-            _complexity_plot_note(),
+            _complexity_plot_note(resolved_x_key),
         ),
     )
     _tight_layout(fig)
@@ -1300,10 +1454,13 @@ def _plot_exp2_complexity_groups(
         ("mid", "bandwidth_mid", "Mid"),
         ("late", "bandwidth_late", "Late"),
     ]
+    x_key = "complexity_score_residual"
+    if not any(_complexity_valid_points(points, x_key=x_key, y_key=y_key) for _, y_key, _ in panels):
+        x_key = "complexity_score"
     valid_panels = [
         (group_name, y_key, title)
         for group_name, y_key, title in panels
-        if _complexity_valid_points(points, x_key="complexity_score", y_key=y_key)
+        if _complexity_valid_points(points, x_key=x_key, y_key=y_key)
     ]
     if not valid_panels:
         return
@@ -1317,6 +1474,7 @@ def _plot_exp2_complexity_groups(
         _plot_complexity_scatter_on_axis(
             axis,
             points,
+            x_key=x_key,
             y_key=y_key,
             y_label="Effective Bandwidth G(t)",
             title=panel_title,
@@ -1325,18 +1483,18 @@ def _plot_exp2_complexity_groups(
     handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8)
-    fig.suptitle("Bandwidth vs Semantic Program Complexity by Layer Group", fontsize=14, y=0.99)
+    fig.suptitle("Bandwidth vs Residualized Semantic Logic by Layer Group", fontsize=14, y=0.99)
     _set_plot_metadata(
         fig,
         _plot_metadata(
             experiment="2",
-            what="Continuous semantic complexity vs effective bandwidth",
+            what="Residualized semantic logic vs effective bandwidth",
             aggregation="per-image per-level points",
-            x=_complexity_axis_label().lower(),
+            x=_complexity_axis_label(x_key).lower(),
             y="effective bandwidth G(t)",
             note=(
                 "Black line is mean by exact score; dashed line is linear fit; "
-                + _complexity_plot_note()
+                + _complexity_plot_note(x_key)
             ),
             profile=profile,
         ),
@@ -1351,11 +1509,21 @@ def _plot_exp4_complexity_modes(
     profile: str = _DEFAULT_PLOT_PROFILE,
 ) -> None:
     mode_order = ["lowpass", "highpass"]
+    x_key = "complexity_score_residual"
+    if not any(
+        _complexity_valid_points(
+            [point for point in points if point.get("mode") == mode],
+            x_key=x_key,
+            y_key="critical_cutoff",
+        )
+        for mode in mode_order
+    ):
+        x_key = "complexity_score"
     valid_modes = [
         mode for mode in mode_order
         if _complexity_valid_points(
             [point for point in points if point.get("mode") == mode],
-            x_key="complexity_score",
+            x_key=x_key,
             y_key="critical_cutoff",
         )
     ]
@@ -1369,6 +1537,7 @@ def _plot_exp4_complexity_modes(
         _plot_complexity_scatter_on_axis(
             axis,
             mode_points,
+            x_key=x_key,
             y_key="critical_cutoff",
             y_label="Critical Cutoff",
             title=mode.capitalize(),
@@ -1377,18 +1546,18 @@ def _plot_exp4_complexity_modes(
     handles, labels = axes_arr[0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8, title="Series", title_fontsize=8)
-    fig.suptitle("Critical Cutoff vs Semantic Program Complexity", fontsize=14, y=0.99)
+    fig.suptitle("Critical Cutoff vs Residualized Semantic Logic", fontsize=14, y=0.99)
     _set_plot_metadata(
         fig,
         _plot_metadata(
             experiment="4",
-            what="Continuous semantic complexity vs critical cutoff",
+            what="Residualized semantic logic vs critical cutoff",
             aggregation="per-image per-level points",
-            x=_complexity_axis_label().lower(),
+            x=_complexity_axis_label(x_key).lower(),
             y="critical cutoff",
             note=(
                 "Black line is mean by exact score; dashed line is linear fit; "
-                + _complexity_plot_note()
+                + _complexity_plot_note(x_key)
             ),
             profile=profile,
         ),
@@ -1471,6 +1640,7 @@ def plot_coefficient_forest(
             "complexity_score",
             "prompt_complexity_score",
             "option_hardness_score",
+            "prediction_entropy",
             "clean_accuracy",
         )
         if key in predictor_keys
@@ -1546,7 +1716,7 @@ def plot_coefficient_forest(
             "View=coefficient plot",
             "Dots=standardized coefficients",
             "Bars=approximate 95% CI from regression stderr",
-            "Predictors=residualized semantic logic, prompt load, option hardness, optional clean-accuracy baseline",
+            "Predictors=residualized semantic logic, prompt load, option hardness, prediction entropy when available",
             "Series=pooled and within-image fixed effects when available",
         ),
     )
@@ -1655,7 +1825,13 @@ def plot_coefficient_forest_series(
     fig, axes = plt.subplots(nrows, 1, figsize=(8.6, max(3.0 * nrows, 4.2)), squeeze=False)
     order = [
         key
-        for key in ("complexity_score_residual", "complexity_score", "prompt_complexity_score", "option_hardness_score")
+        for key in (
+            "complexity_score_residual",
+            "complexity_score",
+            "prompt_complexity_score",
+            "option_hardness_score",
+            "prediction_entropy",
+        )
     ]
     for axis, (name, reg) in zip(axes.ravel(), items):
         predictors = reg.get("predictors", {})
@@ -1696,7 +1872,7 @@ def plot_coefficient_forest_series(
             "Panels=one perturbation per subplot",
             "Dots=standardized coefficients",
             "Bars=approximate 95% CI",
-            "Predictors=residualized semantic logic, prompt load, option hardness",
+            "Predictors=residualized semantic logic, prompt load, option hardness, prediction entropy when available",
         ),
     )
     _tight_layout(fig, metadata_bottom=0.07, top=0.97)
@@ -1781,15 +1957,48 @@ def _exp1_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str],
 
 
 def _select_exp1_samples(records: List[Dict[str, Any]], max_samples: int = 3) -> List[Dict[str, Any]]:
+    def _mean_drop(record: Dict[str, Any], level: Optional[str] = None) -> float:
+        values: List[float] = []
+        levels = [level] if level else list(record.get("levels", {}).keys())
+        for level_key in levels:
+            level_data = record.get("levels", {}).get(level_key, {})
+            values.extend(
+                float(item.get("accuracy_drop", 0.0))
+                for item in level_data.get("perturbations", [])
+            )
+        return float(np.mean(values)) if values else float("-inf")
+
+    selected: List[Dict[str, Any]] = []
+    seen_ids = set()
+
+    for level in ("L1_COARSE", "L4_VERY_FINE"):
+        candidates = [record for record in records if _mean_drop(record, level) > float("-inf")]
+        candidates.sort(key=lambda record: _mean_drop(record, level), reverse=True)
+        for record in candidates:
+            image_id = str(record.get("image_id"))
+            if image_id in seen_ids:
+                continue
+            selected.append(record)
+            seen_ids.add(image_id)
+            break
+        if len(selected) >= max_samples:
+            return selected[:max_samples]
+
     scored: List[Tuple[float, Dict[str, Any]]] = []
     for record in records:
-        values = []
-        for level_data in record.get("levels", {}).values():
-            values.extend(float(item.get("accuracy_drop", 0.0)) for item in level_data.get("perturbations", []))
-        if values:
-            scored.append((float(np.mean(values)), record))
+        score = _mean_drop(record)
+        if score > float("-inf"):
+            scored.append((score, record))
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [record for _, record in scored[:max_samples]]
+    for _, record in scored:
+        image_id = str(record.get("image_id"))
+        if image_id in seen_ids:
+            continue
+        selected.append(record)
+        seen_ids.add(image_id)
+        if len(selected) >= max_samples:
+            break
+    return selected[:max_samples]
 
 
 def _exp1_sample_spectra(record: Dict[str, Any], key: str) -> Dict[str, Dict[str, Sequence[float]]]:
@@ -1860,6 +2069,7 @@ def _exp1_perturbation_family_points(
                 "option_hardness_score": float(
                     level_data.get("option_hardness_score", 0.0) or 0.0
                 ),
+                "prediction_entropy": _optional_float(level_data.get("prediction_entropy")),
                 "clean_accuracy": clean_accuracy,
             }
             for perturbation in level_data.get("perturbations", []):
@@ -3149,6 +3359,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     profile = _plot_profile(config)
     exhaustive = _is_exhaustive_profile(profile)
     sample_limit = _representative_sample_limit(config, profile)
+    sample_scatter_limit = _sample_scatter_point_limit(config, profile)
     suppress_dc = _analysis_suppress_dc(config)
 
     exp1_summary = _load_json(results_dir / "exp1" / "summary.json")
@@ -3165,14 +3376,17 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         for record in (exp2_samples or [])
         if record.get("image_id") is not None
     }
-    selected_exp1_records = _select_exp1_samples(exp1_samples, max_samples=sample_limit) if exp1_samples else []
+    selected_exp1_records = (
+        _select_exp1_samples(exp1_samples, max_samples=min(sample_limit, 3))
+        if exp1_samples
+        else []
+    )
     preferred_sample_ids = [
         image_id
         for image_id in (_record_image_id(record) for record in selected_exp1_records)
         if image_id is not None
     ]
     if exp1_summary:
-        plot_granularity_curves(exp1_summary, plots_dir / "exp1_granularity_curves.png")
         per_level = exp1_summary.get("per_level", {})
         _plot_wordy_control_pair_comparison(
             {level: float(stats.get("mean_accuracy_drop", np.nan)) for level, stats in per_level.items()},
@@ -3224,14 +3438,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             y_key="mean_accuracy_drop",
             y_label="Mean Accuracy Drop",
             out_path=plots_dir / "exp1_complexity_accuracy_drop.png",
-            title="Mean Accuracy Drop vs Semantic Complexity",
+            title="Mean Accuracy Drop vs Residualized Semantic Logic",
             metadata=_plot_metadata(
                 experiment="1",
-                what="Continuous semantic complexity vs robustness degradation",
+                what="Residualized semantic logic vs robustness degradation",
                 aggregation="per-image per-level average over perturbations",
-                x="semantic complexity score",
+                x="residualized semantic logic",
                 y="mean gated accuracy drop",
-                note="Black line is mean by exact score; dashed line is linear fit",
+                note="X is residual(semantic complexity ~ prompt load); black line is mean by exact residual score; dashed line is linear fit",
                 profile=profile,
             ),
         )
@@ -3240,14 +3454,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             y_key="mean_loglik_drift",
             y_label="Mean Log-Likelihood Drift",
             out_path=plots_dir / "exp1_complexity_loglik_drift.png",
-            title="Log-Likelihood Drift vs Semantic Complexity",
+            title="Log-Likelihood Drift vs Residualized Semantic Logic",
             metadata=_plot_metadata(
                 experiment="1",
-                what="Continuous semantic complexity vs confidence erosion",
+                what="Residualized semantic logic vs confidence erosion",
                 aggregation="per-image per-level average over perturbations",
-                x="semantic complexity score",
+                x="residualized semantic logic",
                 y="mean correct-answer log-likelihood drift",
-                note="Black line is mean by exact score; dashed line is linear fit",
+                note="X is residual(semantic complexity ~ prompt load); black line is mean by exact residual score; dashed line is linear fit",
                 profile=profile,
             ),
         )
@@ -3256,14 +3470,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             y_key="mean_loglik_erosion",
             y_label="Mean Log-Likelihood Erosion",
             out_path=plots_dir / "exp1_complexity_loglik_erosion.png",
-            title="Log-Likelihood Erosion vs Semantic Complexity",
+            title="Log-Likelihood Erosion vs Residualized Semantic Logic",
             metadata=_plot_metadata(
                 experiment="1",
-                what="Continuous semantic complexity vs directional confidence erosion",
+                what="Residualized semantic logic vs directional confidence erosion",
                 aggregation="per-image per-level average over perturbations",
-                x="semantic complexity score",
+                x="residualized semantic logic",
                 y="mean positive correct-answer log-likelihood drift",
-                note="Only positive drifts contribute; black line is mean by exact score; dashed line is linear fit",
+                note="Only positive drifts contribute; X is residual(semantic complexity ~ prompt load); dashed line is linear fit",
                 profile=profile,
             ),
         )
@@ -3272,14 +3486,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             y_key="mean_loglik_recovery",
             y_label="Mean Log-Likelihood Recovery",
             out_path=plots_dir / "exp1_complexity_loglik_recovery.png",
-            title="Log-Likelihood Recovery vs Semantic Complexity",
+            title="Log-Likelihood Recovery vs Residualized Semantic Logic",
             metadata=_plot_metadata(
                 experiment="1",
-                what="Continuous semantic complexity vs directional confidence recovery",
+                what="Residualized semantic logic vs directional confidence recovery",
                 aggregation="per-image per-level average over perturbations",
-                x="semantic complexity score",
+                x="residualized semantic logic",
                 y="mean negative correct-answer log-likelihood drift",
-                note="Only negative drifts contribute; black line is mean by exact score; dashed line is linear fit",
+                note="Only negative drifts contribute; X is residual(semantic complexity ~ prompt load); dashed line is linear fit",
                 profile=profile,
             ),
         )
@@ -3288,19 +3502,37 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             y_key="mean_loglik_volatility",
             y_label="Mean Log-Likelihood Volatility",
             out_path=plots_dir / "exp1_complexity_loglik_volatility.png",
-            title="Log-Likelihood Volatility vs Semantic Complexity",
+            title="Log-Likelihood Volatility vs Residualized Semantic Logic",
             metadata=_plot_metadata(
                 experiment="1",
-                what="Continuous semantic complexity vs absolute confidence movement",
+                what="Residualized semantic logic vs absolute confidence movement",
                 aggregation="per-image per-level average over perturbations",
-                x="semantic complexity score",
+                x="residualized semantic logic",
                 y="mean absolute correct-answer log-likelihood drift",
-                note="Black line is mean by exact score; dashed line is linear fit",
+                note="X is residual(semantic complexity ~ prompt load); black line is mean by exact residual score; dashed line is linear fit",
                 profile=profile,
             ),
         )
     if exp1_tests:
         cc = exp1_tests.get("continuous_complexity", {})
+        mirror_tests = cc.get("wordy_mirror_paired_tests")
+        if not mirror_tests and exp1_complexity:
+            mirror_tests = paired_wordy_mirror_ttests(
+                exp1_complexity,
+                y_keys=[
+                    "mean_accuracy_drop",
+                    "mean_loglik_drift",
+                    "mean_loglik_erosion",
+                    "mean_loglik_recovery",
+                    "mean_loglik_volatility",
+                ],
+            )
+        if mirror_tests:
+            _plot_linguistic_stabilization_effect(
+                mirror_tests,
+                plots_dir / "exp1_linguistic_stabilization_effect.png",
+                profile=profile,
+            )
         accuracy_reg_pooled = cc.get("horse_race_mean_accuracy_drop")
         accuracy_reg_within = cc.get("horse_race_mean_accuracy_drop_within_image")
         accuracy_reg = accuracy_reg_pooled or accuracy_reg_within
@@ -3315,7 +3547,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 comparison_regression=accuracy_reg_within if accuracy_reg_pooled else None,
                 metadata=_plot_metadata(
                     experiment="1",
-                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness on gated fragility",
+                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness vs prediction entropy on gated fragility",
                     aggregation="multivariate regression over per-image per-level averages",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
@@ -3337,7 +3569,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 comparison_regression=loglik_reg_within if loglik_reg_pooled else None,
                 metadata=_plot_metadata(
                     experiment="1",
-                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness",
+                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness vs prediction entropy",
                     aggregation="multivariate regression over per-image per-level averages",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
@@ -3487,23 +3719,16 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         for point in raw_points
                         if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
                     ]
+                predictor_keys = _horse_race_predictor_keys(points)
                 pooled = summarize_multivariate_regression(
                     points,
                     y_key=y_key,
-                    x_keys=[
-                        "complexity_score_residual",
-                        "prompt_complexity_score",
-                        "option_hardness_score",
-                    ],
+                    x_keys=predictor_keys,
                 )
                 within = summarize_multivariate_regression(
                     points,
                     y_key=y_key,
-                    x_keys=[
-                        "complexity_score_residual",
-                        "prompt_complexity_score",
-                        "option_hardness_score",
-                    ],
+                    x_keys=predictor_keys,
                     group_key="image_id",
                     demean_by_group=True,
                 )
@@ -3737,7 +3962,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     comparison_regression=bandwidth_reg_within if bandwidth_reg_pooled else None,
                     metadata=_plot_metadata(
                         experiment="2",
-                        what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                        what="Relative impact of residualized semantic logic vs prompt load vs option hardness",
                         aggregation="multivariate regression over per-image per-level bandwidth",
                         x="standardized coefficient with 95% CI",
                         y="predictor",
@@ -3890,14 +4115,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             y_key="mean_post_drift_all",
             y_label="Mean Post-Fusion Drift ΔZ_all",
             out_path=plots_dir / "exp3_complexity_post_drift_all.png",
-            title="Post-Fusion Drift vs Semantic Complexity",
+            title="Post-Fusion Drift vs Residualized Semantic Logic",
             metadata=_plot_metadata(
                 experiment="3",
-                what="Continuous semantic complexity vs task-conditioned post-fusion response",
+                what="Residualized semantic logic vs task-conditioned post-fusion response",
                 aggregation="per-image per-level average over perturbations",
-                x="semantic complexity score",
+                x="residualized semantic logic",
                 y="mean post-fusion drift ΔZ_all",
-                note="Black line is mean by exact score; dashed line is linear fit",
+                note="X is residual(semantic complexity ~ prompt load); black line is mean by exact residual score; dashed line is linear fit",
                 profile=profile,
             ),
         )
@@ -3906,19 +4131,18 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             y_key="mean_response_amplification",
             y_label="Mean Response Amplification",
             out_path=plots_dir / "exp3_complexity_response_amplification.png",
-            title="Response Amplification vs Semantic Complexity",
+            title="Response Amplification vs Residualized Semantic Logic",
             metadata=_plot_metadata(
                 experiment="3",
-                what="Continuous semantic complexity vs response amplification",
+                what="Residualized semantic logic vs response amplification",
                 aggregation="per-image per-level average over perturbations",
-                x="semantic complexity score",
+                x="residualized semantic logic",
                 y="mean response amplification",
-                note="Black line is mean by exact score; dashed line is linear fit",
+                note="X is residual(semantic complexity ~ prompt load); black line is mean by exact residual score; dashed line is linear fit",
                 profile=profile,
             ),
         )
     if exp3_tests:
-        _plot_exp3_group_correlations(exp3_tests, plots_dir / "exp3_group_correlations.png")
         cc = exp3_tests.get("continuous_complexity", {})
         post_reg_pooled = cc.get("horse_race_mean_post_drift_all")
         post_reg_within = cc.get("horse_race_mean_post_drift_all_within_image")
@@ -3934,7 +4158,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 comparison_regression=post_reg_within if post_reg_pooled else None,
                 metadata=_plot_metadata(
                     experiment="3",
-                    what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness",
                     aggregation="multivariate regression over per-image per-level mean post-fusion drift",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
@@ -3974,7 +4198,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 comparison_regression=amp_reg_within if amp_reg_pooled else None,
                 metadata=_plot_metadata(
                     experiment="3",
-                    what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness",
                     aggregation="multivariate regression over per-image per-level mean response amplification",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
@@ -4122,7 +4346,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     comparison_regression=regression_within if regression_pooled else None,
                     metadata=_plot_metadata(
                         experiment="4",
-                        what="Relative impact of semantic complexity vs prompt load vs option hardness",
+                        what="Relative impact of residualized semantic logic vs prompt load vs option hardness",
                         aggregation=f"multivariate regression over per-image per-level critical cutoff ({mode})",
                         x="standardized coefficient with 95% CI",
                         y="predictor",
@@ -4428,6 +4652,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             title=f"Overlap vs Accuracy Drop (per sample, {_exp5_source_label('image_space')})",
             point_size=20,
             alpha=0.45,
+            max_points=sample_scatter_limit,
             y_label=_exp5_target_label("accuracy_drop"),
             metadata=_plot_metadata(
                 experiment="5",
@@ -4446,6 +4671,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             title=f"Comparable Bridge: Overlap vs Accuracy Drop (per sample, {_exp5_source_label('image_space')})",
             point_size=20,
             alpha=0.45,
+            max_points=sample_scatter_limit,
             y_label=_exp5_target_label("accuracy_drop"),
             scale_mode="bridge",
             metadata=_plot_metadata(
@@ -4467,6 +4693,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             title=f"Overlap vs Accuracy Drop (per sample, {_exp5_source_label('vision_feature_space')})",
             point_size=20,
             alpha=0.45,
+            max_points=sample_scatter_limit,
             y_label=_exp5_target_label("accuracy_drop"),
             metadata=_plot_metadata(
                 experiment="5",
@@ -4485,6 +4712,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             title=f"Comparable Bridge: Overlap vs Accuracy Drop (per sample, {_exp5_source_label('vision_feature_space')})",
             point_size=20,
             alpha=0.45,
+            max_points=sample_scatter_limit,
             y_label=_exp5_target_label("accuracy_drop"),
             scale_mode="bridge",
             metadata=_plot_metadata(
@@ -4574,6 +4802,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     title=f"Overlap vs Accuracy Drop ({_exp5_source_label(source_name)}, {group_name}, per sample)",
                     point_size=20,
                     alpha=0.45,
+                    max_points=sample_scatter_limit,
                     y_label=_exp5_target_label("accuracy_drop"),
                     metadata=_plot_metadata(
                         experiment="5",
@@ -4692,6 +4921,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     title=f"Overlap vs {_exp5_target_label(target_name)} ({_exp5_source_label(source_name)}, {primary_group}, per sample)",
                     point_size=20,
                     alpha=0.45,
+                    max_points=sample_scatter_limit,
                     y_label=_exp5_target_label(target_name),
                     scale_mode="zscore" if target_name == "loglik_erosion" else "raw",
                     metadata=_plot_metadata(
@@ -4716,6 +4946,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     title=f"Comparable Bridge: Overlap vs {_exp5_target_label(target_name)} ({_exp5_source_label(source_name)}, {primary_group}, per sample)",
                     point_size=20,
                     alpha=0.45,
+                    max_points=sample_scatter_limit,
                     y_label=_exp5_target_label(target_name),
                     scale_mode="bridge",
                     metadata=_plot_metadata(

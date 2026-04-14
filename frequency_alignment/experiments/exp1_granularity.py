@@ -36,6 +36,7 @@ from ..analysis.statistics import (
     cohens_d,
     monotonicity_test,
     one_way_anova,
+    paired_wordy_mirror_ttests,
     spearman_correlation,
 )
 from ..data.base import (
@@ -83,6 +84,48 @@ def _predict_label(
 def _is_correct(scores: Dict[str, float], answer_label: str) -> bool:
     """Check if the top-scoring label matches the ground truth."""
     return _predict_label(scores) == answer_label
+
+
+def _prediction_entropy(scores: Dict[str, float]) -> Optional[float]:
+    """Entropy of the model's option distribution after softmaxing scores."""
+
+    if not scores:
+        return None
+    values = np.asarray([float(value) for value in scores.values()], dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None
+    shifted = values - float(np.max(values))
+    weights = np.exp(shifted)
+    total = float(np.sum(weights))
+    if total <= 0.0 or not np.isfinite(total):
+        return None
+    probs = weights / total
+    entropy = -float(np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0))))
+    return entropy
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        value_float = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value_float if np.isfinite(value_float) else None
+
+
+def _horse_race_predictors(points: List[Dict[str, Any]]) -> List[str]:
+    """Use entropy control when available, while preserving old-result compatibility."""
+
+    predictors = [
+        "complexity_score_residual",
+        "prompt_complexity_score",
+        "option_hardness_score",
+    ]
+    if any(_optional_float(point.get("prediction_entropy")) is not None for point in points):
+        predictors.append("prediction_entropy")
+    return predictors
 
 
 def _compute_cosine_drift(
@@ -145,6 +188,7 @@ def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str,
                 "option_hardness_score": float(
                     level_data.get("option_hardness_score", 0.0) or 0.0
                 ),
+                "prediction_entropy": _optional_float(level_data.get("prediction_entropy")),
                 "clean_accuracy": 1.0 if level_data.get("clean", {}).get("correct", False) else 0.0,
                 "mean_accuracy_drop": float(np.mean(drops)) if drops else 0.0,
                 "mean_loglik_drift": float(np.mean(drifts)) if drifts else 0.0,
@@ -177,6 +221,7 @@ def _build_perturbation_complexity_points(per_sample: List[Dict[str, Any]]) -> D
                 "option_hardness_score": float(
                     level_data.get("option_hardness_score", 0.0) or 0.0
                 ),
+                "prediction_entropy": _optional_float(level_data.get("prediction_entropy")),
                 "clean_accuracy": clean_accuracy,
             }
             for perturbation in level_data.get("perturbations", []):
@@ -225,25 +270,18 @@ def _summarize_perturbation_specific_horse_races(
                     "n_points_total": len(points),
                 }
             )
+        predictors = _horse_race_predictors(used_points)
         by_perturbation[perturbation_name] = {
             "filter": filter_payload,
             "pooled": summarize_multivariate_regression(
                 used_points,
                 y_key=y_key,
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=predictors,
             ),
             "within_image": summarize_multivariate_regression(
                 used_points,
                 y_key=y_key,
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=predictors,
                 group_key="image_id",
                 demean_by_group=True,
             ),
@@ -266,6 +304,8 @@ def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
         "control_score_definition": PROMPT_COMPLEXITY_SCORE_DEFINITION,
         "option_hardness_score_name": OPTION_HARDNESS_SCORE_NAME,
         "option_hardness_score_definition": OPTION_HARDNESS_SCORE_DEFINITION,
+        "prediction_entropy_score_name": "Clean Prediction Entropy",
+        "prediction_entropy_score_definition": "Entropy of the clean-image MCQ option distribution after softmaxing model option scores.",
         "logic_residual_key": "complexity_score_residual",
         "logic_residual_definition": "Residual of semantic complexity after linear regression on prompt load.",
         "score_min": float(min(complexity_values)) if complexity_values else 0.0,
@@ -314,6 +354,16 @@ def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
         "mean_loglik_drift_by_option_hardness": summarize_by_score(
             points,
             score_key="option_hardness_score",
+            value_key="mean_loglik_drift",
+        ),
+        "mean_accuracy_drop_by_prediction_entropy": summarize_by_score(
+            points,
+            score_key="prediction_entropy",
+            value_key="mean_accuracy_drop",
+        ),
+        "mean_loglik_drift_by_prediction_entropy": summarize_by_score(
+            points,
+            score_key="prediction_entropy",
             value_key="mean_loglik_drift",
         ),
     }
@@ -446,9 +496,12 @@ def _evaluate_sample(
             )
             clean_pred = _predict_label(clean_scores)
             clean_correct = _is_correct(clean_scores, level_data.answer_label)
+            clean_entropy = _prediction_entropy(clean_scores)
+            level_record["prediction_entropy"] = clean_entropy
             level_record["clean"] = {
                 "predicted": clean_pred,
                 "correct": clean_correct,
+                "prediction_entropy": clean_entropy,
                 "scores": {k: float(v) for k, v in clean_scores.items()},
             }
             if clean_dirichlet is not None:
@@ -479,6 +532,7 @@ def _evaluate_sample(
                 pert_record["scores"] = {
                     k: float(v) for k, v in pert_scores.items()
                 }
+                pert_record["prediction_entropy"] = _prediction_entropy(pert_scores)
                 # Accuracy drop (1 if correct→wrong, 0 if stayed same)
                 pert_record["accuracy_drop"] = (
                     1.0 if level_record["clean"].get("correct") and not pert_correct
@@ -720,6 +774,8 @@ def _run_hypothesis_tests(
             for point in complexity_points
             if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
         ]
+        accuracy_predictors = _horse_race_predictors(accuracy_drop_points)
+        all_predictors = _horse_race_predictors(complexity_points)
         tests["continuous_complexity"] = {
             "accuracy_drop_horse_race_filter": {
                 "description": "Accuracy-drop horse races use only image-level points where the clean answer was correct.",
@@ -727,6 +783,21 @@ def _run_hypothesis_tests(
                 "n_points_used": len(accuracy_drop_points),
                 "n_points_total": len(complexity_points),
             },
+            "prediction_entropy_control": {
+                "description": "Clean-image MCQ prediction entropy controls for model uncertainty before perturbation.",
+                "formula": "H = -sum_i p_i log(p_i), where p_i = softmax(option_score_i)",
+                "included_in_horse_race": "prediction_entropy" in all_predictors,
+            },
+            "wordy_mirror_paired_tests": paired_wordy_mirror_ttests(
+                complexity_points,
+                y_keys=[
+                    "mean_accuracy_drop",
+                    "mean_loglik_drift",
+                    "mean_loglik_erosion",
+                    "mean_loglik_recovery",
+                    "mean_loglik_volatility",
+                ],
+            ),
             "mean_accuracy_drop_vs_complexity": summarize_linear_trend(
                 complexity_points,
                 x_key="complexity_score",
@@ -772,6 +843,16 @@ def _run_hypothesis_tests(
                 x_key="option_hardness_score",
                 y_key="mean_loglik_drift",
             ),
+            "mean_accuracy_drop_vs_prediction_entropy": summarize_linear_trend(
+                complexity_points,
+                x_key="prediction_entropy",
+                y_key="mean_accuracy_drop",
+            ),
+            "mean_loglik_drift_vs_prediction_entropy": summarize_linear_trend(
+                complexity_points,
+                x_key="prediction_entropy",
+                y_key="mean_loglik_drift",
+            ),
             "mean_accuracy_drop_vs_complexity_fixed_effects": summarize_fixed_effects_trend(
                 complexity_points,
                 group_key="image_id",
@@ -787,100 +868,60 @@ def _run_hypothesis_tests(
             "horse_race_mean_accuracy_drop": summarize_multivariate_regression(
                 accuracy_drop_points,
                 y_key="mean_accuracy_drop",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=accuracy_predictors,
             ),
             "horse_race_mean_accuracy_drop_within_image": summarize_multivariate_regression(
                 accuracy_drop_points,
                 y_key="mean_accuracy_drop",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=accuracy_predictors,
                 group_key="image_id",
                 demean_by_group=True,
             ),
             "horse_race_mean_loglik_drift": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_drift",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=all_predictors,
             ),
             "horse_race_mean_loglik_drift_within_image": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_drift",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=all_predictors,
                 group_key="image_id",
                 demean_by_group=True,
             ),
             "horse_race_mean_loglik_erosion": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_erosion",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=all_predictors,
             ),
             "horse_race_mean_loglik_erosion_within_image": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_erosion",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=all_predictors,
                 group_key="image_id",
                 demean_by_group=True,
             ),
             "horse_race_mean_loglik_recovery": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_recovery",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=all_predictors,
             ),
             "horse_race_mean_loglik_recovery_within_image": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_recovery",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=all_predictors,
                 group_key="image_id",
                 demean_by_group=True,
             ),
             "horse_race_mean_loglik_volatility": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_volatility",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=all_predictors,
             ),
             "horse_race_mean_loglik_volatility_within_image": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_volatility",
-                x_keys=[
-                    "complexity_score_residual",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=all_predictors,
                 group_key="image_id",
                 demean_by_group=True,
             ),

@@ -110,6 +110,27 @@ def _question_load_atoms(question_text: str) -> List[str]:
     ]
 
 
+def question_content_words(question_text: str) -> List[str]:
+    """Content-word tokens used by the prompt-load control."""
+
+    return _question_load_atoms(question_text)
+
+
+def option_content_words(options: Optional[Mapping[str, str]]) -> List[str]:
+    """Answer-option content tokens used by the prompt-load control."""
+
+    return _option_atoms(options)
+
+
+def prompt_content_word_count(
+    question_text: str,
+    options: Optional[Mapping[str, str]] = None,
+) -> int:
+    """Content-word count for the full MCQ prompt proxy."""
+
+    return len(question_content_words(question_text)) + len(option_content_words(options))
+
+
 def build_semantic_complexity(
     *,
     entity_names: Sequence[str] = (),
