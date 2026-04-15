@@ -21,7 +21,7 @@ from ..utils.layer_groups import LAYER_GROUP_ORDER
 logger = logging.getLogger(__name__)
 
 FILTER_ANALYSIS_ORDER = ("overall",) + LAYER_GROUP_ORDER
-PRIMARY_TARGET = "accuracy_drop"
+PRIMARY_TARGET = "loglik_volatility"
 TARGET_SPECS: Dict[str, Dict[str, Any]] = {
     "accuracy_drop": {
         "grouped_key": "accuracy_drop",
@@ -35,10 +35,16 @@ TARGET_SPECS: Dict[str, Dict[str, Any]] = {
         "label": "Correct-Answer Log-Likelihood Erosion",
         "supports_sample": True,
     },
+    "loglik_volatility": {
+        "grouped_key": "loglik_volatility",
+        "sample_key": "loglik_volatility",
+        "label": "Correct-Answer Log-Likelihood Volatility",
+        "supports_sample": True,
+    },
     "net_drop": {
         "grouped_key": "net_drop",
         "sample_key": "net_change",
-        "label": "Net Accuracy Change",
+        "label": "Net Accuracy Drop (CI - IC)",
         "supports_sample": True,
     },
     "relative_accuracy_drop": {
@@ -114,7 +120,10 @@ def _build_overlap_pairs(
         lambda: {
             "predicted": [],
             "accuracy_drop": [],
+            "loglik_drift": [],
             "loglik_erosion": [],
+            "loglik_recovery": [],
+            "loglik_volatility": [],
             "net_change": [],
             "clean_correct": [],
             "perturbed_correct": [],
@@ -144,7 +153,10 @@ def _build_overlap_pairs(
                 ic = 1.0 if clean_correct < 0.5 and perturbed_correct > 0.5 else 0.0
                 net_change = ci - ic
                 accuracy_drop = float(perturbation.get("accuracy_drop", ci))
-                loglik_erosion = float(perturbation.get("loglik_drift", 0.0))
+                loglik_drift = float(perturbation.get("loglik_drift", 0.0))
+                loglik_erosion = max(loglik_drift, 0.0)
+                loglik_recovery = min(loglik_drift, 0.0)
+                loglik_volatility = abs(loglik_drift)
                 predicted = compute_spectral_overlap(W_t, delta_f)
 
                 pair = {
@@ -155,7 +167,9 @@ def _build_overlap_pairs(
                     "actual": accuracy_drop,
                     "accuracy_drop": accuracy_drop,
                     "loglik_erosion": loglik_erosion,
-                    "loglik_drift": loglik_erosion,
+                    "loglik_drift": loglik_drift,
+                    "loglik_recovery": loglik_recovery,
+                    "loglik_volatility": loglik_volatility,
                     "net_change": net_change,
                     "clean_correct": clean_correct,
                     "perturbed_correct": perturbed_correct,
@@ -170,7 +184,10 @@ def _build_overlap_pairs(
                 key = (level_key, pair["perturbation"])
                 grouped[key]["predicted"].append(predicted)
                 grouped[key]["accuracy_drop"].append(accuracy_drop)
+                grouped[key]["loglik_drift"].append(loglik_drift)
                 grouped[key]["loglik_erosion"].append(loglik_erosion)
+                grouped[key]["loglik_recovery"].append(loglik_recovery)
+                grouped[key]["loglik_volatility"].append(loglik_volatility)
                 grouped[key]["net_change"].append(net_change)
                 grouped[key]["clean_correct"].append(clean_correct)
                 grouped[key]["perturbed_correct"].append(perturbed_correct)
@@ -195,8 +212,12 @@ def _build_overlap_pairs(
                 "actual": float(np.mean(values["accuracy_drop"])),
                 "accuracy_drop": float(np.mean(values["accuracy_drop"])),
                 "loglik_erosion": float(np.mean(values["loglik_erosion"])),
-                "loglik_drift": float(np.mean(values["loglik_erosion"])),
-                "mean_loglik_drift": float(np.mean(values["loglik_erosion"])),
+                "loglik_drift": float(np.mean(values["loglik_drift"])),
+                "mean_loglik_drift": float(np.mean(values["loglik_drift"])),
+                "loglik_recovery": float(np.mean(values["loglik_recovery"])),
+                "mean_loglik_recovery": float(np.mean(values["loglik_recovery"])),
+                "loglik_volatility": float(np.mean(values["loglik_volatility"])),
+                "mean_loglik_volatility": float(np.mean(values["loglik_volatility"])),
                 "net_drop": net_drop,
                 "clean_accuracy": clean_accuracy,
                 "perturbed_accuracy": perturbed_accuracy,
@@ -562,6 +583,7 @@ def run_exp5(
         )
 
     logger.info("-" * 40)
+    primary_target_label = TARGET_SPECS.get(PRIMARY_TARGET, {}).get("label", PRIMARY_TARGET)
     for source_spec in source_specs:
         source_name = source_spec["name"]
         source_analyses = analyses.get(source_name)
@@ -574,9 +596,10 @@ def run_exp5(
             acc_summary = analysis["target_analyses"].get(PRIMARY_TARGET, {}).get("summary")
             if acc_summary is not None:
                 logger.info(
-                    "  %s/%s grouped Pearson r (accuracy) = %.3f",
+                    "  %s/%s grouped Pearson r (%s) = %.3f",
                     source_name,
                     group_name,
+                    primary_target_label,
                     acc_summary["pearson_r_grouped"],
                 )
             loglik_summary = analysis["target_analyses"].get("loglik_erosion", {}).get("summary")
@@ -592,9 +615,10 @@ def run_exp5(
             acc_summary = primary_analysis["target_analyses"].get(PRIMARY_TARGET, {}).get("summary")
             if acc_summary is not None and acc_summary["pearson_r_sample"] is not None:
                 logger.info(
-                    "  %s/%s sample Pearson r (accuracy) = %.3f",
+                    "  %s/%s sample Pearson r (%s) = %.3f",
                     source_name,
                     primary_group,
+                    primary_target_label,
                     acc_summary["pearson_r_sample"],
                 )
     logger.info("-" * 40)

@@ -4,7 +4,7 @@ Harness for testing visual-language model robustness to common image perturbatio
 
 ## Frequency Alignment Project
 
-The active research pipeline lives in `frequency_alignment/`. It tests the hypothesis that language conditioning acts as a task-specific spectral filter `W_t`, and that robustness depends on overlap between this filter and perturbation energy. The current implementation uses GQA same-image levels `L1-L4`, fixed-length wordy controls `L5-L8`, residualized semantic-complexity regressions, prediction-entropy and option-hardness controls, paired mirror tests, directional log-likelihood drift metrics, Exp 3 post-fusion drift, and Exp 5 spectral-overlap prediction.
+The active research pipeline lives in `frequency_alignment/`. It tests the hypothesis that language conditioning acts as a task-specific spectral filter `W_t`, and that robustness depends on overlap between this filter and perturbation energy. The current implementation uses GQA same-image levels `L1-L4`, matched wordy controls `L5-L8`, residualized semantic-complexity regressions, prediction-entropy and option-hardness controls, paired mirror tests, directional log-likelihood drift metrics, Exp 3 post-fusion drift, and Exp 5 spectral-overlap prediction.
 
 For the current scientific design and hypotheses, see `frequency_alignment/RESEARCH_PLAN_FREQUENCY_ALIGNMENT.md`.
 

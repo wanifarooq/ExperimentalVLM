@@ -307,7 +307,10 @@ def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
         "prediction_entropy_score_name": "Clean Prediction Entropy",
         "prediction_entropy_score_definition": "Entropy of the clean-image MCQ option distribution after softmaxing model option scores.",
         "logic_residual_key": "complexity_score_residual",
-        "logic_residual_definition": "Residual of semantic complexity after linear regression on prompt load.",
+        "logic_residual_definition": (
+            "Residual of semantic complexity after non-negative linear regression "
+            "on prompt load, fit on primary L1-L4 and applied to wordy controls."
+        ),
         "score_min": float(min(complexity_values)) if complexity_values else 0.0,
         "score_max": float(max(complexity_values)) if complexity_values else 0.0,
         "num_points": len(points),
@@ -538,7 +541,7 @@ def _evaluate_sample(
                     1.0 if level_record["clean"].get("correct") and not pert_correct
                     else 0.0
                 )
-                # Score drift: absolute change in log-likelihood of correct answer
+                # Signed correct-answer drift: positive means confidence erosion.
                 if level_data.answer_label in clean_scores:
                     clean_ll = clean_scores[level_data.answer_label]
                     pert_ll = pert_scores.get(level_data.answer_label, clean_ll)

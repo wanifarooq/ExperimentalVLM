@@ -89,7 +89,7 @@ python3 -m frequency_alignment.run_experiment \
   - `L6`: L2 semantics with inflated prompt load
   - `L7`: L3 semantics with inflated prompt load
   - `L8`: L4 semantics with inflated prompt load
-- The GQA loader normalizes every wordy-control prompt to exactly 60 prompt-load content words, counting question content plus non-boolean option content. This makes length constant inside `L5-L8`.
+- The GQA loader makes each wordy-control prompt longer than its matched base prompt with neutral filler text, without imposing a fixed word or token cap.
 - Primary monotonic granularity tests remain on `L1-L4`; descriptive and control plots can include `L5-L8`.
 - Stores a continuous semantic complexity score per task based on a structured semantic program with a grounding-ambiguity term.
 - Stores `complexity_score_residual`, the residualized semantic-logic variable used in horse-race regressions after regressing semantic complexity on prompt load.
@@ -147,6 +147,7 @@ python3 -m frequency_alignment.run_experiment \
 - Reports grouped and sample-level overlap correlations against:
   - `accuracy_drop`
   - `loglik_erosion`
+  - `loglik_volatility`
   - `net_drop`
   - grouped `relative_accuracy_drop`
 - Treats the `late` filter group as the primary hypothesis test and the others as controls.
@@ -231,7 +232,7 @@ nohup python3 -m frequency_alignment.run_experiment \
 - `gqa`
   - Main dataset for experiments `1-5`.
   - The code generates same-image `L1-L4` primary tasks plus `L5-L8` wordy controls from scene graphs.
-  - Wordy controls are regenerated with cache version `gqa_multilevel_v4` and have fixed 60-content-word prompt load.
+  - Wordy controls are regenerated with cache version `gqa_multilevel_v5` and use neutral filler text that increases prompt load without changing the structured semantic program.
   - Verification levels are balanced to 50% yes and 50% no when possible.
   - The loader uses an in-memory and on-disk granularity cache under `.hf_cache/gqa/granularity_cache/`, with early stopping once enough balanced valid samples are found.
 - `partimagenet`
@@ -284,7 +285,6 @@ Representative plot families include:
 
 - `exp1_coefficient_plot_*`: overall horse-race coefficient plots.
 - `exp1_coefficient_plot_*_by_perturbation.png`: perturbation-specific horse races.
-- `supplementary_exp1_horse_race*_by_perturbation.png`: supplementary perturbation-specific coefficient series.
 - `exp1_linguistic_stabilization_effect.png`: paired mirror plot showing `base - wordy` drift/drop deltas for `L1/L5`, `L2/L6`, `L3/L7`, and `L4/L8`.
 - `exp*_wordy_control_*.png`: matched `L1/L5`, `L2/L6`, `L3/L7`, `L4/L8` comparisons.
 - `exp5_level_perturbation_predicted_vs_observed*.png`: Exp 5 predicted-vs-observed bars by level and perturbation.

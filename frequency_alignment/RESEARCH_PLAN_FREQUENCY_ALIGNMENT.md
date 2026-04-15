@@ -13,7 +13,7 @@ Current model profiles in code and configs:
 
 Implementation clarifications that supersede older references below:
 - The main VQA dataset path is now `GQA` scene graphs. The loader builds same-image primary levels `L1-L4` plus matched wordy controls `L5-L8`. Primary hypothesis tests remain on `L1-L4`; descriptive plots and control comparisons include `L5-L8`.
-- `L5-L8` are prompt-load controls: `L5` repeats L1 semantics with long filler wording, `L6` repeats L2 semantics, `L7` repeats L3 semantics, and `L8` repeats L4 semantics. Their full prompt-load proxy is normalized to exactly 60 content words, including non-boolean option content, so length is fixed inside the wordy mirror set.
+- `L5-L8` are prompt-load controls: `L5` repeats L1 semantics with long filler wording, `L6` repeats L2 semantics, `L7` repeats L3 semantics, and `L8` repeats L4 semantics. Their prompt-load proxy is required to exceed the matched base prompt, but there is no fixed word or token cap.
 - Experiment 1 now stores both raw and relative perturbation spectra in image space (`delta_f`, `delta_f_relative`) and, when enabled, the matching raw and relative vision-feature spectra (`delta_f_vision`, `delta_f_vision_relative`).
 - Experiment 1 stores signed and directional correct-answer log-likelihood metrics: `loglik_drift`, `loglik_erosion`, `loglik_recovery`, and `loglik_volatility`.
 - Experiments `1`, `2`, `3`, `4`, and `5` now keep discrete level labels but also attach a continuous semantic complexity score based on a structured semantic program plus a grounding-ambiguity term. Prompt/load complexity and MCQ option hardness are tracked separately as controls.
@@ -25,7 +25,7 @@ Implementation clarifications that supersede older references below:
 - Experiment 2 does not rely on a named encoder-decoder cross-attention block. It derives the effective language-to-vision attention map from the self-attention slice, supports optional FFT windowing before the 2D FFT, and computes `W_t` separately for `overall`, `early`, `mid`, and `late` layer groups. The current configs default this windowing to `none`.
 - Experiment 2 also includes prompt-only controls (`empty_language`, `random_language`) so task-conditioned filters can be compared against semantically weak prompts.
 - Experiment 3 now uses a late decoder hidden state as the default post-fusion representation, treats pre-fusion band drift as the controlled perturbation input, and measures the task-conditioned post-fusion response with an all-token scalar drift. It then tests whether that response follows the overlap between `W_t` and the pre-fusion drift profile for `overall`, `early`, `mid`, and `late`, with `late` treated as the main post-fusion comparison.
-- Experiment 5 now runs overlap prediction on both image-space and vision-feature perturbation spectra, keeps both raw and relative normalization branches, and evaluates multiple targets: `accuracy_drop`, `loglik_erosion`, `net_drop`, and grouped `relative_accuracy_drop`.
+- Experiment 5 now runs overlap prediction on both image-space and vision-feature perturbation spectra, keeps both raw and relative normalization branches, and evaluates multiple targets: `accuracy_drop`, `loglik_erosion`, `loglik_volatility`, `net_drop`, and grouped `relative_accuracy_drop`.
 - Experiment 5 also keeps a standardized "comparable bridge" analysis in parallel with the raw overlap results: the prediction is transformed with `log1p` and both prediction and observed target are z-scored so effect sizes can be compared on a common scale. This does not replace the raw overlap metrics; it complements them.
 - Spectral binning is adaptive by default: the runner probes the model patch grid, resolves one linear radial bin count for the run, and freezes it so all spectra remain aligned. DC suppression and log-scale plotting are config/visualization choices, not fixed theory assumptions.
 - Complexity scatter plots use residualized semantic logic on the x-axis when available, so wordy controls do not visually collapse the semantic trend.
@@ -232,12 +232,12 @@ The current GQA implementation also creates matched wordy controls:
 
 | Level | Control Type | Semantic Program | Purpose |
 |-------|--------------|------------------|---------|
-| L5 | Wordy-simpleton | Same as L1 | Fixed 60-content-word prompt load, low semantic complexity |
-| L6 | Wordy-medium | Same as L2 | Fixed 60-content-word prompt load at attribute-query semantics |
-| L7 | Wordy-fine | Same as L3 | Fixed 60-content-word prompt load at relationship-verify semantics |
-| L8 | Wordy-very-fine | Same as L4 | Fixed 60-content-word prompt load at compositional MCQ semantics |
+| L5 | Wordy-simpleton | Same as L1 | More prompt load than L1, low semantic complexity |
+| L6 | Wordy-medium | Same as L2 | More prompt load than L2 at attribute-query semantics |
+| L7 | Wordy-fine | Same as L3 | More prompt load than L3 at relationship-verify semantics |
+| L8 | Wordy-very-fine | Same as L4 | More prompt load than L4 at compositional MCQ semantics |
 
-The primary granularity hypothesis is still evaluated on `L1-L4`. The `L5-L8` controls are used to test whether long prompts alone explain the effect; because their prompt load is equalized, any `L5` to `L8` trend inside the wordy set is attributed to semantic logic rather than length.
+The primary granularity hypothesis is still evaluated on `L1-L4`. The `L5-L8` controls are used to test whether long prompts alone explain the effect; their semantic programs are copied from matched base levels, while residualized logic is fit on `L1-L4` and then applied to the wordy mirrors.
 
 For segmentation variant:
 | Level | Task Type | Example Prompt | Granularity |
@@ -386,6 +386,7 @@ For segmentation variant:
 5. Compare `S_pred` against multiple observed targets from Experiment 1:
    - `accuracy_drop`
    - `loglik_erosion`
+   - `loglik_volatility`
    - `net_drop = (N_CI - N_IC) / N_total`
    - grouped `relative_accuracy_drop = (Acc_clean - Acc_pert) / max(Acc_clean, ε)`
 6. Compute both grouped correlations over `(level, perturbation)` pairs and raw per-sample correlations.
@@ -583,7 +584,7 @@ For segmentation variant:
 - Combine `W_t(ω)` from Experiment 2 with image-space and vision-feature perturbation spectra from Experiment 1
 - Run both raw and relative-normalized overlap calculations
 - Compute predicted sensitivity for `overall`, `early`, `mid`, and `late` filter groups
-- Correlate the predictions with `accuracy_drop`, `loglik_erosion`, `net_drop`, and grouped `relative_accuracy_drop`
+- Correlate the predictions with `accuracy_drop`, `loglik_erosion`, `loglik_volatility`, `net_drop`, and grouped `relative_accuracy_drop`
 - Treat the `late` branch as the main test and the others as controls
 - Target: grouped Pearson `r > 0.7` on the primary branch, with consistent positive controls
 

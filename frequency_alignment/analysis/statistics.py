@@ -119,15 +119,13 @@ def paired_wordy_mirror_ttests(
     the wordy prompt reduced the outcome relative to its terse semantic mirror.
     """
 
-    pairs = tuple(
-        level_pairs
-        or (
-            ("L1_COARSE", "L5_WORDY_SIMPLETON"),
-            ("L2_MEDIUM", "L6_WORDY_MEDIUM"),
-            ("L3_FINE", "L7_WORDY_FINE"),
-            ("L4_VERY_FINE", "L8_WORDY_VERY_FINE"),
-        )
+    default_pairs = (
+        ("L1_COARSE", "L5_WORDY_SIMPLETON"),
+        ("L2_MEDIUM", "L6_WORDY_MEDIUM"),
+        ("L3_FINE", "L7_WORDY_FINE"),
+        ("L4_VERY_FINE", "L8_WORDY_VERY_FINE"),
     )
+    pairs = tuple(default_pairs if level_pairs is None else level_pairs)
     grouped_values: Dict[Tuple[str, str, str], List[float]] = {}
     for point in points:
         group = point.get(group_key)

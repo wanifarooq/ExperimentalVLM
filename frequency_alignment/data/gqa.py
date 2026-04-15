@@ -7,10 +7,10 @@ granularity levels from the same image:
 - **L2 (Medium)**: Attribute recognition -- "What {attr_type} is the {object}?"
 - **L3 (Fine)**: Spatial relationship -- "Is the {obj1} to the {relation} of {obj2}?"
 - **L4 (Very Fine)**: Compositional MCQ -- combines attributes + spatial reasoning
-- **L5 (Wordy-Simpleton)**: L1 semantics with fixed 60-content-word filler
-- **L6 (Wordy-Medium)**: L2 semantics with fixed 60-content-word filler
-- **L7 (Wordy-Fine)**: L3 semantics with fixed 60-content-word filler
-- **L8 (Wordy-Very-Fine)**: L4 semantics with fixed 60-content-word filler
+- **L5 (Wordy-Simpleton)**: L1 semantics with extra neutral filler
+- **L6 (Wordy-Medium)**: L2 semantics with extra neutral filler
+- **L7 (Wordy-Fine)**: L3 semantics with extra neutral filler
+- **L8 (Wordy-Very-Fine)**: L4 semantics with extra neutral filler
 
 GQA scene graph structure (per image)::
 
@@ -65,16 +65,15 @@ from .complexity import (
 
 logger = logging.getLogger(__name__)
 
-_DATASET_CACHE_VERSION = "gqa_multilevel_v4"
+_DATASET_CACHE_VERSION = "gqa_multilevel_v5"
 _DATASET_MEMO: Dict[str, List[GranularitySample]] = {}
-_WORDY_TARGET_PROMPT_CONTENT_WORDS = 60
+_WORDY_MIN_EXTRA_PROMPT_CONTENT_WORDS = 12
 
 _WORDY_FILLER_PREFIX = (
-    "Moving forward with the analysis of this specific visual instance, please consider the "
-    "scene carefully and answer the following question in a straightforward way. "
+    "Please read the following question carefully and answer the same question directly. "
 )
 _WORDY_FILLER_SUFFIX = (
-    "This extra wording is only neutral context and does not add any new visual requirement."
+    "The extra wording is only polite framing and should not change what you are being asked to answer."
 )
 _WORDY_NEUTRAL_FILLER_WORDS = (
     "context",
@@ -399,49 +398,48 @@ def _neutral_filler_words(num_words: int) -> str:
     return " ".join(words)
 
 
-def _normalize_wordy_prompt_length(
+def _ensure_wordier_prompt(
     question: str,
     *,
     options: Optional[Dict[str, str]],
-    target_content_words: int = _WORDY_TARGET_PROMPT_CONTENT_WORDS,
+    base_prompt_content_words: int,
 ) -> str:
-    """Pad a wordy question so question + option content words hit a fixed target."""
+    """Pad only as needed so the wordy prompt is longer than its base prompt."""
 
     normalized = " ".join(str(question or "").strip().split())
     if not normalized:
         return normalized
     current = prompt_content_word_count(normalized, options)
+    target_content_words = max(
+        int(base_prompt_content_words) + 1,
+        int(base_prompt_content_words) + _WORDY_MIN_EXTRA_PROMPT_CONTENT_WORDS,
+    )
     if current >= target_content_words:
         return normalized
     needed = target_content_words - current
-    padded = f"{normalized} {_neutral_filler_words(needed)}.".strip()
-    final_count = prompt_content_word_count(padded, options)
-    if final_count < target_content_words:
-        padded = (
-            f"{padded.rstrip('.')} "
-            f"{_neutral_filler_words(target_content_words - final_count)}."
-        )
-    elif final_count > target_content_words:
-        words = question_content_words(_neutral_filler_words(needed))
-        overage = final_count - target_content_words
-        keep = max(0, len(words) - overage)
-        padded = f"{normalized} {' '.join(words[:keep])}.".strip()
-    return padded
+    return f"{normalized} {_neutral_filler_words(needed)}.".strip()
 
 
-def _wordify_question(question: str, options: Optional[Dict[str, str]] = None) -> str:
+def _wordify_question(
+    question: str,
+    options: Optional[Dict[str, str]] = None,
+    *,
+    base_prompt_content_words: Optional[int] = None,
+) -> str:
     base = str(question or "").strip()
     if not base:
         return base
-    candidates = [
-        f"{_WORDY_FILLER_PREFIX}{base} {_WORDY_FILLER_SUFFIX}",
-        f"Please consider this specific visual instance carefully. {base}",
-        base,
-    ]
-    for candidate in candidates:
-        if prompt_content_word_count(candidate, options) <= _WORDY_TARGET_PROMPT_CONTENT_WORDS:
-            return _normalize_wordy_prompt_length(candidate, options=options)
-    return base
+    base_prompt_content_words = (
+        int(base_prompt_content_words)
+        if base_prompt_content_words is not None
+        else prompt_content_word_count(base, options)
+    )
+    candidate = f"{_WORDY_FILLER_PREFIX}{base} {_WORDY_FILLER_SUFFIX}"
+    return _ensure_wordier_prompt(
+        candidate,
+        options=options,
+        base_prompt_content_words=base_prompt_content_words,
+    )
 
 
 def _build_wordy_variant(
@@ -450,7 +448,16 @@ def _build_wordy_variant(
     level: GranularityLevel,
     question_type: str,
 ) -> LevelData:
-    question = _wordify_question(base_level.question, options=base_level.options)
+    base_prompt_content_words = int(
+        base_level.prompt_complexity_score
+        if base_level.prompt_complexity_score is not None
+        else prompt_content_word_count(base_level.question, base_level.options)
+    )
+    question = _wordify_question(
+        base_level.question,
+        options=base_level.options,
+        base_prompt_content_words=base_prompt_content_words,
+    )
     complexity = refresh_prompt_load(
         {
             "semantic_atoms": list(base_level.semantic_atoms),
@@ -464,7 +471,8 @@ def _build_wordy_variant(
         options=base_level.options,
     )
     counts = dict(complexity.get("semantic_atom_counts", {}) or {})
-    counts["wordy_target_prompt_content_words"] = _WORDY_TARGET_PROMPT_CONTENT_WORDS
+    counts["wordy_base_prompt_content_words"] = base_prompt_content_words
+    counts["wordy_min_extra_prompt_content_words"] = _WORDY_MIN_EXTRA_PROMPT_CONTENT_WORDS
     counts["wordy_prompt_content_words"] = prompt_content_word_count(question, base_level.options)
     counts["wordy_question_content_words"] = len(question_content_words(question))
     complexity["semantic_atom_counts"] = counts
@@ -516,7 +524,16 @@ def _build_object_presence_question(
         options = {"A": "yes", "B": "no"}
         name = absent_name
         grounding_candidates = 0
-    question = _wordify_question(base_question, options=options) if wordy else base_question
+    base_prompt_content_words = prompt_content_word_count(base_question, options)
+    question = (
+        _wordify_question(
+            base_question,
+            options=options,
+            base_prompt_content_words=base_prompt_content_words,
+        )
+        if wordy
+        else base_question
+    )
     complexity = build_semantic_complexity(
         entity_names=[name],
         reasoning_ops=["exist"],
@@ -527,7 +544,8 @@ def _build_object_presence_question(
     )
     if wordy:
         counts = dict(complexity.get("semantic_atom_counts", {}) or {})
-        counts["wordy_target_prompt_content_words"] = _WORDY_TARGET_PROMPT_CONTENT_WORDS
+        counts["wordy_base_prompt_content_words"] = base_prompt_content_words
+        counts["wordy_min_extra_prompt_content_words"] = _WORDY_MIN_EXTRA_PROMPT_CONTENT_WORDS
         counts["wordy_prompt_content_words"] = prompt_content_word_count(question, options)
         counts["wordy_question_content_words"] = len(question_content_words(question))
         complexity["semantic_atom_counts"] = counts
@@ -581,16 +599,29 @@ def build_l5_question(
 ) -> Optional[LevelData]:
     """L5 (Wordy-Simpleton): L1 semantics with redundant filler text."""
 
-    return _build_object_presence_question(
+    base_level = _build_object_presence_question(
         sg,
         obj_id,
         obj,
         rng,
         all_object_names,
-        level=GranularityLevel.L5_WORDY_SIMPLETON,
-        question_type="object_presence_wordy_control",
+        level=GranularityLevel.L1_COARSE,
+        question_type="object_presence",
         desired_answer_label=desired_answer_label,
-        wordy=True,
+        wordy=False,
+    )
+    return build_l5_from_base(base_level)
+
+
+def build_l5_from_base(base_level: Optional[LevelData]) -> Optional[LevelData]:
+    """L5: exact wordy mirror of an already-built L1 question."""
+
+    if base_level is None:
+        return None
+    return _build_wordy_variant(
+        base_level,
+        level=GranularityLevel.L5_WORDY_SIMPLETON,
+        question_type=f"{base_level.question_type}_wordy_control",
     )
 
 
@@ -1183,14 +1214,9 @@ def build_granularity_dataset(
                 q = build_l1_question(sg, obj_id, obj, rng, all_names)
                 if q is not None:
                     levels[GranularityLevel.L1_COARSE] = q
-
-            if GranularityLevel.L5_WORDY_SIMPLETON not in levels:
-                desired_answer = None
-                if GranularityLevel.L1_COARSE in levels:
-                    desired_answer = levels[GranularityLevel.L1_COARSE].answer_label
-                q = build_l5_question(sg, obj_id, obj, rng, all_names, desired_answer_label=desired_answer)
-                if q is not None:
-                    levels[GranularityLevel.L5_WORDY_SIMPLETON] = q
+                    q_wordy = build_l5_from_base(q)
+                    if q_wordy is not None:
+                        levels[GranularityLevel.L5_WORDY_SIMPLETON] = q_wordy
 
             if GranularityLevel.L2_MEDIUM not in levels:
                 q = build_l2_question(sg, obj_id, obj, rng)
@@ -1222,13 +1248,13 @@ def build_granularity_dataset(
 
         # Only keep images where all levels were generated
         sample = GranularitySample(
-                image_id=image_id,
-                image_path=img_path,
-                levels=levels,
-                dataset="gqa",
-                split=split,
-                metadata={"num_objects": len(objects)},
-            )
+            image_id=image_id,
+            image_path=img_path,
+            levels=levels,
+            dataset="gqa",
+            split=split,
+            metadata={"num_objects": len(objects)},
+        )
         if sample.has_all_levels(list(ALL_VQA_LEVELS)):
             candidate_samples.append(sample)
             pattern = _verification_pattern(sample)
@@ -1259,8 +1285,8 @@ def build_granularity_dataset(
         rng=rng,
     )
     logger.info(
-        "Built %d complete balanced samples (all 5 levels) after scanning %d/%d scene graphs",
-        len(samples), scanned_count, len(scene_graphs)
+        "Built %d complete balanced samples (all %d levels) after scanning %d/%d scene graphs",
+        len(samples), len(ALL_VQA_LEVELS), scanned_count, len(scene_graphs)
     )
     _DATASET_MEMO[cache_key] = list(samples)
     _save_cached_dataset(cache_path, cache_key, samples)

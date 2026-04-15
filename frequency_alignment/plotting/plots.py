@@ -61,7 +61,8 @@ _EXP2_CONTROL_COLORS = {
 _EXP5_TARGET_LABELS = {
     "accuracy_drop": "Observed Accuracy Drop",
     "loglik_erosion": "Correct-Answer Log-Likelihood Erosion",
-    "net_drop": "Net Accuracy Change",
+    "loglik_volatility": "Correct-Answer Log-Likelihood Volatility",
+    "net_drop": "Net Accuracy Drop (CI - IC)",
     "relative_accuracy_drop": "Relative Accuracy Drop",
 }
 _COEFFICIENT_LABELS = {
@@ -92,58 +93,60 @@ _WORDY_PAIR_LABELS = {
     "L3_FINE": "L3 vs L7",
     "L4_VERY_FINE": "L4 vs L8",
 }
+
+
+def _wordy_pair_note(level_pairs: Optional[Sequence[Tuple[str, str]]]) -> str:
+    pairs = list(WORDY_CONTROL_LEVEL_NAME_PAIRS if level_pairs is None else level_pairs)
+    labels = [_WORDY_PAIR_LABELS.get(base, f"{base} vs {control}") for base, control in pairs]
+    if len(pairs) == len(WORDY_CONTROL_LEVEL_NAME_PAIRS):
+        return f"Validated matched pairs shown: {', '.join(labels)}"
+    if labels:
+        return f"Validated matched pairs shown: {', '.join(labels)}; invalid stale mirror pairs skipped"
+    return "No validated matched wordy pairs available; plot skipped"
+
+
 _EXP1_PERTURBATION_OUTCOME_SPECS = (
-            (
-                "accuracy_drop",
-                "horse_race_mean_accuracy_drop_by_perturbation",
-                "exp1_coefficient_plot_accuracy_drop_by_perturbation.png",
-                "Coefficient Plot Series: Accuracy Drop by Perturbation",
-                "supplementary_exp1_horse_race_by_perturbation.png",
-                "Supplementary: Horse Race by Individual Perturbation",
-                "gated accuracy drop",
-                "Only clean-correct points are included in each perturbation-specific regression",
-            ),
-            (
-                "loglik_drift",
-                "horse_race_mean_loglik_drift_by_perturbation",
-                "exp1_coefficient_plot_loglik_drift_by_perturbation.png",
-                "Coefficient Plot Series: Log-Likelihood Drift by Perturbation",
-                "supplementary_exp1_horse_race_loglik_drift_by_perturbation.png",
-                "Supplementary: Log-Likelihood Drift by Individual Perturbation",
-                "signed correct-answer log-likelihood drift",
-                "Positive values mean confidence erosion; negative values mean confidence recovery",
-            ),
-            (
-                "loglik_erosion",
-                "horse_race_mean_loglik_erosion_by_perturbation",
-                "exp1_coefficient_plot_loglik_erosion_by_perturbation.png",
-                "Coefficient Plot Series: Log-Likelihood Erosion by Perturbation",
-                "supplementary_exp1_horse_race_loglik_erosion_by_perturbation.png",
-                "Supplementary: Log-Likelihood Erosion by Individual Perturbation",
-                "positive correct-answer log-likelihood drift",
-                "Only positive drifts contribute to this outcome",
-            ),
-            (
-                "loglik_recovery",
-                "horse_race_mean_loglik_recovery_by_perturbation",
-                "exp1_coefficient_plot_loglik_recovery_by_perturbation.png",
-                "Coefficient Plot Series: Log-Likelihood Recovery by Perturbation",
-                "supplementary_exp1_horse_race_loglik_recovery_by_perturbation.png",
-                "Supplementary: Log-Likelihood Recovery by Individual Perturbation",
-                "negative correct-answer log-likelihood drift",
-                "More negative values indicate stronger confidence recovery",
-            ),
-            (
-                "loglik_volatility",
-                "horse_race_mean_loglik_volatility_by_perturbation",
-                "exp1_coefficient_plot_loglik_volatility_by_perturbation.png",
-                "Coefficient Plot Series: Log-Likelihood Volatility by Perturbation",
-                "supplementary_exp1_horse_race_loglik_volatility_by_perturbation.png",
-                "Supplementary: Log-Likelihood Volatility by Individual Perturbation",
-                "absolute correct-answer log-likelihood drift",
-                "Higher values mean larger movement away from zero regardless of sign",
-            ),
-        )
+    (
+        "accuracy_drop",
+        "horse_race_mean_accuracy_drop_by_perturbation",
+        "exp1_coefficient_plot_accuracy_drop_by_perturbation.png",
+        "Coefficient Plot Series: Accuracy Drop by Perturbation",
+        "gated accuracy drop",
+        "Only clean-correct points are included in each perturbation-specific regression",
+    ),
+    (
+        "loglik_drift",
+        "horse_race_mean_loglik_drift_by_perturbation",
+        "exp1_coefficient_plot_loglik_drift_by_perturbation.png",
+        "Coefficient Plot Series: Log-Likelihood Drift by Perturbation",
+        "signed correct-answer log-likelihood drift",
+        "Positive values mean confidence erosion; negative values mean confidence recovery",
+    ),
+    (
+        "loglik_erosion",
+        "horse_race_mean_loglik_erosion_by_perturbation",
+        "exp1_coefficient_plot_loglik_erosion_by_perturbation.png",
+        "Coefficient Plot Series: Log-Likelihood Erosion by Perturbation",
+        "positive correct-answer log-likelihood drift",
+        "Only positive drifts contribute to this outcome",
+    ),
+    (
+        "loglik_recovery",
+        "horse_race_mean_loglik_recovery_by_perturbation",
+        "exp1_coefficient_plot_loglik_recovery_by_perturbation.png",
+        "Coefficient Plot Series: Log-Likelihood Recovery by Perturbation",
+        "negative correct-answer log-likelihood drift",
+        "More negative values indicate stronger confidence recovery",
+    ),
+    (
+        "loglik_volatility",
+        "horse_race_mean_loglik_volatility_by_perturbation",
+        "exp1_coefficient_plot_loglik_volatility_by_perturbation.png",
+        "Coefficient Plot Series: Log-Likelihood Volatility by Perturbation",
+        "absolute correct-answer log-likelihood drift",
+        "Higher values mean larger movement away from zero regardless of sign",
+    ),
+)
 
 
 def _metadata_lines(*parts: Optional[str]) -> List[str]:
@@ -349,6 +352,17 @@ def _exp5_target_label(target_key: str) -> str:
     return _EXP5_TARGET_LABELS.get(target_key, target_key.replace("_", " ").title())
 
 
+def _exp5_target_scale_mode(target_key: str) -> str:
+    return "raw"
+
+
+def _exp5_target_scale_note(source_name: str, group_name: str, target_name: str) -> str:
+    note = f"Source={_exp5_source_label(source_name)}; group={group_name}"
+    if _exp5_target_scale_mode(target_name) == "zscore":
+        note += "; axes z-scored for display only"
+    return note
+
+
 def _exp5_source_label(source_name: str) -> str:
     mapping = {
         "image_space": "Image-space (relative)",
@@ -388,6 +402,12 @@ def _representative_sample_limit(config: Optional[Dict[str, Any]], profile: str)
         except (TypeError, ValueError):
             pass
     return 3 if _is_exhaustive_profile(profile) else 2
+
+
+def _representative_profile_limit(sample_limit: int) -> int:
+    """Keep per-image profile plots representative instead of flooding the folder."""
+
+    return max(0, min(int(sample_limit), 3))
 
 
 def _sample_scatter_point_limit(config: Optional[Dict[str, Any]], profile: str) -> int:
@@ -605,11 +625,13 @@ def _plot_wordy_control_pair_comparison(
     ylim: Optional[Tuple[float, float]] = None,
     base_label: str = "Base",
     control_label: str = "Wordy Control",
+    level_pairs: Optional[Sequence[Tuple[str, str]]] = None,
 ) -> None:
     pair_labels: List[str] = []
     base_values: List[float] = []
     control_values: List[float] = []
-    for base_level, control_level in WORDY_CONTROL_LEVEL_NAME_PAIRS:
+    pairs = WORDY_CONTROL_LEVEL_NAME_PAIRS if level_pairs is None else level_pairs
+    for base_level, control_level in pairs:
         if base_level not in values_by_level or control_level not in values_by_level:
             continue
         pair_labels.append(_WORDY_PAIR_LABELS.get(base_level, f"{base_level} vs {control_level}"))
@@ -637,6 +659,7 @@ def _plot_linguistic_stabilization_effect(
     out_path: Path,
     *,
     profile: str = _DEFAULT_PLOT_PROFILE,
+    level_pairs: Optional[Sequence[Tuple[str, str]]] = None,
 ) -> None:
     outcomes = mirror_tests.get("outcomes", {}) if isinstance(mirror_tests, dict) else {}
     if not outcomes:
@@ -667,7 +690,8 @@ def _plot_linguistic_stabilization_effect(
         lower_err: List[float] = []
         upper_err: List[float] = []
         colors: List[str] = []
-        for base_level, control_level in WORDY_CONTROL_LEVEL_NAME_PAIRS:
+        pairs = WORDY_CONTROL_LEVEL_NAME_PAIRS if level_pairs is None else level_pairs
+        for base_level, control_level in pairs:
             pair_key = f"{base_level}__{control_level}"
             stats = pair_payload.get(pair_key)
             if not stats or int(stats.get("n_pairs", 0) or 0) <= 0:
@@ -717,6 +741,57 @@ def _plot_linguistic_stabilization_effect(
     )
     _tight_layout(fig, metadata_bottom=0.08, top=0.95)
     _save_fig(fig, out_path)
+
+
+def _valid_wordy_mirror_pairs(
+    exp1_samples: Sequence[Dict[str, Any]],
+    *,
+    min_valid_rate: float = 0.99,
+) -> List[Tuple[str, str]]:
+    """Return wordy mirror pairs that are exact enough for paired plots."""
+
+    if not exp1_samples:
+        return list(WORDY_CONTROL_LEVEL_NAME_PAIRS)
+
+    valid_pairs: List[Tuple[str, str]] = []
+    for base_level, control_level in WORDY_CONTROL_LEVEL_NAME_PAIRS:
+        total = 0
+        valid = 0
+        for record in exp1_samples:
+            levels = record.get("levels", {})
+            base = levels.get(base_level)
+            control = levels.get(control_level)
+            if not isinstance(base, dict) or not isinstance(control, dict):
+                continue
+            total += 1
+            base_question = str(base.get("question") or "").strip()
+            control_question = str(control.get("question") or "").strip()
+            same_answer = base.get("answer_label") == control.get("answer_label")
+            same_options = dict(base.get("options", {}) or {}) == dict(control.get("options", {}) or {})
+            base_complexity = float(base.get("complexity_score", 0.0) or 0.0)
+            control_complexity = float(control.get("complexity_score", 0.0) or 0.0)
+            base_prompt = float(base.get("prompt_complexity_score", 0.0) or 0.0)
+            control_prompt = float(control.get("prompt_complexity_score", 0.0) or 0.0)
+            same_semantics = abs(base_complexity - control_complexity) <= 1e-9
+            wordier = control_prompt > base_prompt
+            wraps_base_question = bool(base_question) and base_question in control_question
+            if same_answer and same_options and same_semantics and wordier and wraps_base_question:
+                valid += 1
+        if total == 0:
+            continue
+        valid_rate = valid / total
+        if valid_rate >= min_valid_rate:
+            valid_pairs.append((base_level, control_level))
+        else:
+            logger.warning(
+                "Skipping wordy mirror pair %s/%s in paired plots: valid=%d/%d (%.1f%%)",
+                base_level,
+                control_level,
+                valid,
+                total,
+                100.0 * valid_rate,
+            )
+    return valid_pairs
 
 
 def _plot_distribution_with_points(
@@ -2049,48 +2124,61 @@ def _exp1_sample_metric_matrix(record: Dict[str, Any], key: str) -> Tuple[List[s
 def _exp1_perturbation_family_points(
     records: Sequence[Dict[str, Any]],
 ) -> Dict[str, List[Dict[str, Any]]]:
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    family_buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for record in records:
         image_id = str(record.get("image_id"))
         for level_key, level_data in record.get("levels", {}).items():
             clean_accuracy = 1.0 if level_data.get("clean", {}).get("correct", False) else 0.0
-            base = {
-                "image_id": image_id,
-                "level": level_key,
-                "question": level_data.get("question"),
-                "question_type": level_data.get("question_type"),
-                "complexity_score": float(level_data.get("complexity_score", 0.0) or 0.0),
-                "question_complexity_score": float(
-                    level_data.get("question_complexity_score", 0.0) or 0.0
-                ),
-                "prompt_complexity_score": float(
-                    level_data.get("prompt_complexity_score", 0.0) or 0.0
-                ),
-                "option_hardness_score": float(
-                    level_data.get("option_hardness_score", 0.0) or 0.0
-                ),
-                "prediction_entropy": _optional_float(level_data.get("prediction_entropy")),
-                "clean_accuracy": clean_accuracy,
-            }
+            by_family: Dict[str, Dict[str, Any]] = {}
             for perturbation in level_data.get("perturbations", []):
                 family = str(perturbation.get("family") or "unknown")
-                point = dict(base)
                 loglik_drift = perturbation.get("loglik_drift")
                 drift = float(loglik_drift) if loglik_drift is not None else 0.0
-                point.update(
+                bucket = by_family.setdefault(
+                    family,
                     {
-                        "perturbation_family": family,
-                        "perturbation_name": str(
-                            perturbation.get("name") or perturbation.get("perturbation") or family
-                        ),
-                        "accuracy_drop": float(perturbation.get("accuracy_drop", 0.0) or 0.0),
-                        "loglik_drift": drift,
-                        "loglik_erosion": max(drift, 0.0),
-                        "loglik_recovery": min(drift, 0.0),
-                        "loglik_volatility": abs(drift),
-                    }
+                        "accuracy_drop": [],
+                        "loglik_drift": [],
+                        "loglik_erosion": [],
+                        "loglik_recovery": [],
+                        "loglik_volatility": [],
+                    },
                 )
-                grouped.setdefault(family, []).append(point)
+                bucket["accuracy_drop"].append(float(perturbation.get("accuracy_drop", 0.0) or 0.0))
+                bucket["loglik_drift"].append(drift)
+                bucket["loglik_erosion"].append(max(drift, 0.0))
+                bucket["loglik_recovery"].append(min(drift, 0.0))
+                bucket["loglik_volatility"].append(abs(drift))
+
+            for family, values in by_family.items():
+                point = {
+                    "image_id": image_id,
+                    "level": level_key,
+                    "question": level_data.get("question"),
+                    "question_type": level_data.get("question_type"),
+                    "complexity_score": float(level_data.get("complexity_score", 0.0) or 0.0),
+                    "question_complexity_score": float(
+                        level_data.get("question_complexity_score", 0.0) or 0.0
+                    ),
+                    "prompt_complexity_score": float(
+                        level_data.get("prompt_complexity_score", 0.0) or 0.0
+                    ),
+                    "option_hardness_score": float(
+                        level_data.get("option_hardness_score", 0.0) or 0.0
+                    ),
+                    "prediction_entropy": _optional_float(level_data.get("prediction_entropy")),
+                    "clean_accuracy": clean_accuracy,
+                    "perturbation_family": family,
+                    "num_perturbations": len(values["accuracy_drop"]),
+                    "accuracy_drop": float(np.mean(values["accuracy_drop"])),
+                    "loglik_drift": float(np.mean(values["loglik_drift"])),
+                    "loglik_erosion": float(np.mean(values["loglik_erosion"])),
+                    "loglik_recovery": float(np.mean(values["loglik_recovery"])),
+                    "loglik_volatility": float(np.mean(values["loglik_volatility"])),
+                }
+                family_buckets[family].append(point)
+
+    grouped = dict(family_buckets)
     for points in grouped.values():
         attach_complexity_residual(points)
     return grouped
@@ -3149,6 +3237,7 @@ def _plot_exp5_wordy_control_comparison(
     *,
     actual_label: str = "Observed Accuracy Drop",
     metadata: Optional[Sequence[str]] = None,
+    level_pairs: Optional[Sequence[Tuple[str, str]]] = None,
 ) -> None:
     if not grouped_pairs:
         return
@@ -3181,7 +3270,8 @@ def _plot_exp5_wordy_control_comparison(
         pair_labels: List[str] = []
         base_values: List[float] = []
         control_values: List[float] = []
-        for base_level, control_level in WORDY_CONTROL_LEVEL_NAME_PAIRS:
+        pairs = WORDY_CONTROL_LEVEL_NAME_PAIRS if level_pairs is None else level_pairs
+        for base_level, control_level in pairs:
             if base_level not in values_by_level or control_level not in values_by_level:
                 continue
             pair_labels.append(_WORDY_PAIR_LABELS.get(base_level, f"{base_level} vs {control_level}"))
@@ -3279,7 +3369,7 @@ def _plot_exp5_group_correlation(summary: Dict[str, Any], out_path: Path) -> Non
 def _plot_exp5_target_correlation(summary: Dict[str, Any], out_path: Path) -> None:
     target_order = summary.get(
         "targets",
-        ["accuracy_drop", "loglik_erosion", "net_drop", "relative_accuracy_drop"],
+        ["accuracy_drop", "loglik_erosion", "loglik_volatility", "net_drop", "relative_accuracy_drop"],
     )
     series = {}
     for source_name in ("image_space", "vision_feature_space"):
@@ -3359,6 +3449,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     profile = _plot_profile(config)
     exhaustive = _is_exhaustive_profile(profile)
     sample_limit = _representative_sample_limit(config, profile)
+    profile_sample_limit = _representative_profile_limit(sample_limit)
     sample_scatter_limit = _sample_scatter_point_limit(config, profile)
     suppress_dc = _analysis_suppress_dc(config)
 
@@ -3377,7 +3468,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         if record.get("image_id") is not None
     }
     selected_exp1_records = (
-        _select_exp1_samples(exp1_samples, max_samples=min(sample_limit, 3))
+        _select_exp1_samples(exp1_samples, max_samples=profile_sample_limit)
         if exp1_samples
         else []
     )
@@ -3386,6 +3477,8 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         for image_id in (_record_image_id(record) for record in selected_exp1_records)
         if image_id is not None
     ]
+    valid_wordy_pairs = _valid_wordy_mirror_pairs(exp1_samples)
+    wordy_pair_note = _wordy_pair_note(valid_wordy_pairs)
     if exp1_summary:
         per_level = exp1_summary.get("per_level", {})
         _plot_wordy_control_pair_comparison(
@@ -3399,9 +3492,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 aggregation="level-wise average over all perturbation evaluations",
                 x="matched base/control pair",
                 y="mean gated accuracy drop",
-                note="Compares L1 vs L5, L2 vs L6, L3 vs L7, and L4 vs L8",
+                note=wordy_pair_note,
                 profile=profile,
             ),
+            level_pairs=valid_wordy_pairs,
         )
         _plot_wordy_control_pair_comparison(
             {level: float(stats.get("mean_loglik_drift", np.nan)) for level, stats in per_level.items()},
@@ -3414,9 +3508,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 aggregation="level-wise average over all perturbation evaluations",
                 x="matched base/control pair",
                 y="mean correct-answer log-likelihood drift",
-                note="Positive values mean confidence erosion",
+                note=f"Positive values mean confidence erosion. {wordy_pair_note}",
                 profile=profile,
             ),
+            level_pairs=valid_wordy_pairs,
         )
         _plot_wordy_control_pair_comparison(
             {level: float(stats.get("mean_loglik_volatility", np.nan)) for level, stats in per_level.items()},
@@ -3429,8 +3524,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 aggregation="level-wise average over all perturbation evaluations",
                 x="matched base/control pair",
                 y="mean absolute correct-answer log-likelihood drift",
+                note=wordy_pair_note,
                 profile=profile,
             ),
+            level_pairs=valid_wordy_pairs,
         )
     if exp1_complexity:
         plot_complexity_scatter(
@@ -3516,9 +3613,22 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     if exp1_tests:
         cc = exp1_tests.get("continuous_complexity", {})
         mirror_tests = cc.get("wordy_mirror_paired_tests")
-        if not mirror_tests and exp1_complexity:
+        if exp1_complexity and len(valid_wordy_pairs) != len(WORDY_CONTROL_LEVEL_NAME_PAIRS):
             mirror_tests = paired_wordy_mirror_ttests(
                 exp1_complexity,
+                level_pairs=valid_wordy_pairs,
+                y_keys=[
+                    "mean_accuracy_drop",
+                    "mean_loglik_drift",
+                    "mean_loglik_erosion",
+                    "mean_loglik_recovery",
+                    "mean_loglik_volatility",
+                ],
+            )
+        elif not mirror_tests and exp1_complexity:
+            mirror_tests = paired_wordy_mirror_ttests(
+                exp1_complexity,
+                level_pairs=valid_wordy_pairs,
                 y_keys=[
                     "mean_accuracy_drop",
                     "mean_loglik_drift",
@@ -3532,6 +3642,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 mirror_tests,
                 plots_dir / "exp1_linguistic_stabilization_effect.png",
                 profile=profile,
+                level_pairs=valid_wordy_pairs,
             )
         accuracy_reg_pooled = cc.get("horse_race_mean_accuracy_drop")
         accuracy_reg_within = cc.get("horse_race_mean_accuracy_drop_within_image")
@@ -3625,8 +3736,6 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             test_key,
             main_filename,
             main_title,
-            supplementary_filename,
-            supplementary_title,
             outcome_label,
             note,
         ) in _EXP1_PERTURBATION_OUTCOME_SPECS:
@@ -3650,111 +3759,98 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     profile=profile,
                 ),
             )
-            plot_coefficient_forest_series(
-                series,
-                plots_dir / supplementary_filename,
-                title=supplementary_title,
-                metadata=_plot_metadata(
-                    experiment="1",
-                    what=f"Supplementary perturbation-specific horse race for {outcome_label}",
-                    aggregation="one subplot per perturbation type",
-                    x="standardized coefficient with 95% CI",
-                    y="predictor",
-                    note=note + "; supplementary figure",
-                    profile=profile,
-                ),
-            )
     if exp1_samples:
         family_points = _exp1_perturbation_family_points(exp1_samples)
-        family_outcome_specs = (
-            (
-                "accuracy_drop",
-                "exp1_coefficient_plot_accuracy_drop",
-                "Accuracy Drop",
-                "accuracy drop",
-                "Only clean-correct points are included, so this measures fragility of existing knowledge",
-                True,
-            ),
-            (
-                "loglik_drift",
-                "exp1_coefficient_plot_loglik_drift",
-                "Log-Likelihood Drift",
-                "signed correct-answer log-likelihood drift",
-                "Positive values mean confidence erosion; negative values mean confidence recovery",
-                False,
-            ),
-            (
-                "loglik_erosion",
-                "exp1_coefficient_plot_loglik_erosion",
-                "Log-Likelihood Erosion",
-                "positive correct-answer log-likelihood drift",
-                "Only positive drifts contribute to this outcome",
-                False,
-            ),
-            (
-                "loglik_recovery",
-                "exp1_coefficient_plot_loglik_recovery",
-                "Log-Likelihood Recovery",
-                "negative correct-answer log-likelihood drift",
-                "More negative values indicate stronger confidence recovery",
-                False,
-            ),
-            (
-                "loglik_volatility",
-                "exp1_coefficient_plot_loglik_volatility",
-                "Log-Likelihood Volatility",
-                "absolute correct-answer log-likelihood drift",
-                "Higher values mean larger movement away from zero regardless of sign",
-                False,
-            ),
-        )
-        for family in sorted(family_points):
-            family_label = family.replace("_", " ").title()
-            raw_points = family_points[family]
-            for y_key, filename_prefix, title_suffix, outcome_label, note, gate_clean_correct in family_outcome_specs:
-                points = raw_points
-                if gate_clean_correct:
-                    points = [
-                        point
-                        for point in raw_points
-                        if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
-                    ]
-                predictor_keys = _horse_race_predictor_keys(points)
-                pooled = summarize_multivariate_regression(
-                    points,
-                    y_key=y_key,
-                    x_keys=predictor_keys,
-                )
-                within = summarize_multivariate_regression(
-                    points,
-                    y_key=y_key,
-                    x_keys=predictor_keys,
-                    group_key="image_id",
-                    demean_by_group=True,
-                )
-                regression = pooled if pooled.get("predictors") else within
-                comparison = within if pooled.get("predictors") and within.get("predictors") else None
-                if not regression or not regression.get("predictors"):
-                    continue
-                plot_coefficient_forest(
-                    regression,
-                    plots_dir / f"{filename_prefix}_{_safe_name(family)}.png",
-                    title=f"Coefficient Plot: {family_label} {title_suffix}",
-                    subtitle="Predictors for one perturbation family",
-                    primary_label="Pooled OLS" if pooled.get("predictors") else "Within-Image Fixed Effects",
-                    comparison_label="Within-Image Fixed Effects" if comparison is not None else None,
-                    comparison_regression=comparison,
-                    metadata=_plot_metadata(
-                        experiment="1",
-                        what=f"Perturbation-family-specific horse race for {outcome_label}",
-                        aggregation="per-image per-level single-perturbation observations",
-                        x="standardized coefficient with 95% CI",
-                        y="predictor",
-                        selection=f"family={family}",
-                        note=note,
-                        profile=profile,
-                    ),
-                )
+        if len(family_points) > 1:
+            family_outcome_specs = (
+                (
+                    "accuracy_drop",
+                    "exp1_coefficient_plot_accuracy_drop",
+                    "Accuracy Drop",
+                    "accuracy drop",
+                    "Only clean-correct points are included, so this measures fragility of existing knowledge",
+                    True,
+                ),
+                (
+                    "loglik_drift",
+                    "exp1_coefficient_plot_loglik_drift",
+                    "Log-Likelihood Drift",
+                    "signed correct-answer log-likelihood drift",
+                    "Positive values mean confidence erosion; negative values mean confidence recovery",
+                    False,
+                ),
+                (
+                    "loglik_erosion",
+                    "exp1_coefficient_plot_loglik_erosion",
+                    "Log-Likelihood Erosion",
+                    "positive correct-answer log-likelihood drift",
+                    "Only positive drifts contribute to this outcome",
+                    False,
+                ),
+                (
+                    "loglik_recovery",
+                    "exp1_coefficient_plot_loglik_recovery",
+                    "Log-Likelihood Recovery",
+                    "negative correct-answer log-likelihood drift",
+                    "More negative values indicate stronger confidence recovery",
+                    False,
+                ),
+                (
+                    "loglik_volatility",
+                    "exp1_coefficient_plot_loglik_volatility",
+                    "Log-Likelihood Volatility",
+                    "absolute correct-answer log-likelihood drift",
+                    "Higher values mean larger movement away from zero regardless of sign",
+                    False,
+                ),
+            )
+            for family in sorted(family_points):
+                family_label = family.replace("_", " ").title()
+                raw_points = family_points[family]
+                for y_key, filename_prefix, title_suffix, outcome_label, note, gate_clean_correct in family_outcome_specs:
+                    points = raw_points
+                    if gate_clean_correct:
+                        points = [
+                            point
+                            for point in raw_points
+                            if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
+                        ]
+                    predictor_keys = _horse_race_predictor_keys(points)
+                    pooled = summarize_multivariate_regression(
+                        points,
+                        y_key=y_key,
+                        x_keys=predictor_keys,
+                    )
+                    within = summarize_multivariate_regression(
+                        points,
+                        y_key=y_key,
+                        x_keys=predictor_keys,
+                        group_key="image_id",
+                        demean_by_group=True,
+                    )
+                    regression = pooled if pooled.get("predictors") else within
+                    comparison = within if pooled.get("predictors") and within.get("predictors") else None
+                    if not regression or not regression.get("predictors"):
+                        continue
+                    plot_coefficient_forest(
+                        regression,
+                        plots_dir / f"{filename_prefix}_{_safe_name(family)}.png",
+                        title=f"Coefficient Plot: {family_label} {title_suffix}",
+                        subtitle="Predictors for one perturbation family",
+                        primary_label="Pooled OLS" if pooled.get("predictors") else "Within-Image Fixed Effects",
+                        comparison_label="Within-Image Fixed Effects" if comparison is not None else None,
+                        comparison_regression=comparison,
+                        metadata=_plot_metadata(
+                            experiment="1",
+                            what=f"Perturbation-family-specific horse race for {outcome_label}",
+                            aggregation="per-image per-level average over perturbations in the selected family",
+                            x="standardized coefficient with 95% CI",
+                            y="predictor",
+                            selection=f"family={family}",
+                            note=note,
+                            profile=profile,
+                        ),
+                    )
     if exp1_detail:
         levels, perturbations, matrix = _exp1_level_perturbation_matrix(exp1_detail)
         _plot_heatmap(
@@ -3928,8 +4024,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 aggregation="level-wise sample average",
                 x="matched base/control pair",
                 y="effective bandwidth G(t)",
+                note=wordy_pair_note,
                 profile=profile,
             ),
+            level_pairs=valid_wordy_pairs,
         )
         _plot_exp2_group_spectra(
             exp2_summary,
@@ -4028,7 +4126,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         _plot_exp2_selected_samples(
             exp2_samples,
             plots_dir,
-            max_samples=sample_limit,
+            max_samples=profile_sample_limit,
             preferred_sample_ids=preferred_sample_ids,
             profile=profile,
             suppress_dc=suppress_dc,
@@ -4081,8 +4179,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 aggregation="level-wise average over perturbation observations",
                 x="matched base/control pair",
                 y="mean post-fusion drift ΔZ_all",
+                note=wordy_pair_note,
                 profile=profile,
             ),
+            level_pairs=valid_wordy_pairs,
         )
         _plot_wordy_control_pair_comparison(
             {
@@ -4098,8 +4198,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 aggregation="level-wise average over perturbation observations",
                 x="matched base/control pair",
                 y="mean response amplification",
+                note=wordy_pair_note,
                 profile=profile,
             ),
+            level_pairs=valid_wordy_pairs,
         )
         _plot_exp3_group_weighted_amplification(
             exp3_summary,
@@ -4249,7 +4351,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         for record in _select_records_by_preferred_ids(
             exp3_samples,
             preferred_sample_ids,
-            max_samples=sample_limit,
+            max_samples=profile_sample_limit,
             fallback_selector=_select_exp3_samples,
         ):
             sample_id = str(record.get("image_id"))
@@ -4319,8 +4421,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     aggregation="level-wise cutoff estimate",
                     x="matched base/control pair",
                     y="critical cutoff",
+                    note=wordy_pair_note,
                     profile=profile,
                 ),
+                level_pairs=valid_wordy_pairs,
             )
     if exp4_complexity:
         _plot_exp4_complexity_modes(
@@ -4395,20 +4499,22 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
     exp5_sample_by_group = _load_json(results_dir / "exp5" / "sample_scatter_data_by_group.json")
     exp5_grouped_by_group_and_target = _load_json(results_dir / "exp5" / "scatter_data_by_group_and_target.json")
     exp5_sample_by_group_and_target = _load_json(results_dir / "exp5" / "sample_scatter_data_by_group_and_target.json")
+    exp5_primary_target = str((exp5_summary or {}).get("primary_target") or "accuracy_drop")
+    exp5_primary_target_label = _exp5_target_label(exp5_primary_target)
     if exp5_grouped and exp5_summary:
         image_summary = exp5_summary.get("image_space", {}).get("primary_group_summary", exp5_summary.get("image_space", exp5_summary))
         plot_overlap_scatter(
             exp5_grouped,
             image_summary.get("pearson_r_grouped", 0.0),
             plots_dir / "exp5_overlap_scatter.png",
-            title=f"Overlap vs Accuracy Drop (grouped, {_exp5_source_label('image_space')})",
-            y_label=_exp5_target_label("accuracy_drop"),
+            title=f"Overlap vs {exp5_primary_target_label} (grouped, {_exp5_source_label('image_space')})",
+            y_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Predicted overlap vs observed accuracy drop",
+                what=f"Predicted overlap vs {exp5_primary_target_label}",
                 aggregation="grouped by level and perturbation",
                 x="predicted spectral overlap S_pred",
-                y=_exp5_target_label("accuracy_drop"),
+                y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
                 profile=profile,
             ),
@@ -4417,15 +4523,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_grouped,
             image_summary.get("comparable_bridge_grouped", {}).get("pearson_r", 0.0),
             plots_dir / "exp5_bridge_scatter.png",
-            title=f"Comparable Bridge: Overlap vs Accuracy Drop (grouped, {_exp5_source_label('image_space')})",
-            y_label=_exp5_target_label("accuracy_drop"),
+            title=f"Comparable Bridge: Overlap vs {exp5_primary_target_label} (grouped, {_exp5_source_label('image_space')})",
+            y_label=exp5_primary_target_label,
             scale_mode="bridge",
             metadata=_plot_metadata(
                 experiment="5",
-                what="Comparable-bridge view of predicted overlap vs observed accuracy drop",
+                what=f"Comparable-bridge view of predicted overlap vs {exp5_primary_target_label}",
                 aggregation="grouped by level and perturbation",
                 x="zscore(log1p(predicted spectral overlap))",
-                y=f"zscore({_exp5_target_label('accuracy_drop').lower()})",
+                y=f"zscore({exp5_primary_target_label.lower()})",
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
                 profile=profile,
             ),
@@ -4433,14 +4539,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         plot_overlap_scatter_grid_by_level(
             exp5_grouped,
             plots_dir / "exp5_overlap_scatter_by_level.png",
-            title=f"Overlap vs Accuracy Drop by Level ({_exp5_source_label('image_space')})",
-            y_label=_exp5_target_label("accuracy_drop"),
+            title=f"Overlap vs {exp5_primary_target_label} by Level ({_exp5_source_label('image_space')})",
+            y_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Predicted overlap vs observed accuracy drop split by level",
+                what=f"Predicted overlap vs {exp5_primary_target_label} split by level",
                 aggregation="grouped by perturbation within each level",
                 x="predicted spectral overlap S_pred",
-                y=_exp5_target_label("accuracy_drop"),
+                y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
                 profile=profile,
             ),
@@ -4449,13 +4555,13 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_grouped,
             plots_dir / "exp5_level_perturbation_predicted_vs_observed.png",
             f"Predicted vs Observed by Level and Perturbation ({_exp5_source_label('image_space')})",
-            actual_label=_exp5_target_label("accuracy_drop"),
+            actual_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Predicted overlap and observed accuracy drop split by level and perturbation",
+                what=f"Predicted overlap and observed {exp5_primary_target_label} split by level and perturbation",
                 aggregation="grouped by level and perturbation",
                 x="perturbation type",
-                y=_exp5_target_label("accuracy_drop"),
+                y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
                 profile=profile,
             ),
@@ -4463,11 +4569,11 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         _plot_exp5_heatmaps(
             exp5_grouped,
             plots_dir / "exp5_grouped_heatmap_image.png",
-            f"Grouped Overlap vs Drop ({_exp5_source_label('image_space')})",
-            actual_label=_exp5_target_label("accuracy_drop"),
+            f"Grouped Overlap vs {exp5_primary_target_label} ({_exp5_source_label('image_space')})",
+            actual_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Grouped predicted overlap, observed accuracy drop, and residual",
+                what=f"Grouped predicted overlap, observed {exp5_primary_target_label}, and residual",
                 aggregation="level x perturbation average over samples",
                 x="perturbation type",
                 y="task level",
@@ -4479,16 +4585,17 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_grouped,
             plots_dir / "exp5_wordy_control_comparison.png",
             f"Wordy Control Comparison ({_exp5_source_label('image_space')})",
-            actual_label=_exp5_target_label("accuracy_drop"),
+            actual_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Base level vs matched wordy control for predicted sensitivity and observed accuracy drop",
+                what=f"Base level vs matched wordy control for predicted sensitivity and observed {exp5_primary_target_label}",
                 aggregation="level-wise mean over grouped perturbation points",
                 x="matched base/control pair",
-                y=_exp5_target_label('accuracy_drop'),
-                note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                y=exp5_primary_target_label,
+                note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}; {wordy_pair_note}",
                 profile=profile,
             ),
+            level_pairs=valid_wordy_pairs,
         )
     if exp5_vision_grouped and exp5_summary:
         vision_summary = exp5_summary.get("vision_feature_space", {}).get("primary_group_summary", exp5_summary.get("vision_feature_space", {}))
@@ -4496,14 +4603,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_vision_grouped,
             vision_summary.get("pearson_r_grouped", 0.0),
             plots_dir / "exp5_overlap_scatter_vision.png",
-            title=f"Overlap vs Accuracy Drop (grouped, {_exp5_source_label('vision_feature_space')})",
-            y_label=_exp5_target_label("accuracy_drop"),
+            title=f"Overlap vs {exp5_primary_target_label} (grouped, {_exp5_source_label('vision_feature_space')})",
+            y_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Predicted overlap vs observed accuracy drop",
+                what=f"Predicted overlap vs {exp5_primary_target_label}",
                 aggregation="grouped by level and perturbation",
                 x="predicted spectral overlap S_pred",
-                y=_exp5_target_label("accuracy_drop"),
+                y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
                 profile=profile,
             ),
@@ -4512,15 +4619,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_vision_grouped,
             vision_summary.get("comparable_bridge_grouped", {}).get("pearson_r", 0.0),
             plots_dir / "exp5_bridge_scatter_vision.png",
-            title=f"Comparable Bridge: Overlap vs Accuracy Drop (grouped, {_exp5_source_label('vision_feature_space')})",
-            y_label=_exp5_target_label("accuracy_drop"),
+            title=f"Comparable Bridge: Overlap vs {exp5_primary_target_label} (grouped, {_exp5_source_label('vision_feature_space')})",
+            y_label=exp5_primary_target_label,
             scale_mode="bridge",
             metadata=_plot_metadata(
                 experiment="5",
-                what="Comparable-bridge view of predicted overlap vs observed accuracy drop",
+                what=f"Comparable-bridge view of predicted overlap vs {exp5_primary_target_label}",
                 aggregation="grouped by level and perturbation",
                 x="zscore(log1p(predicted spectral overlap))",
-                y=f"zscore({_exp5_target_label('accuracy_drop').lower()})",
+                y=f"zscore({exp5_primary_target_label.lower()})",
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
                 profile=profile,
             ),
@@ -4528,14 +4635,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         plot_overlap_scatter_grid_by_level(
             exp5_vision_grouped,
             plots_dir / "exp5_overlap_scatter_vision_by_level.png",
-            title=f"Overlap vs Accuracy Drop by Level ({_exp5_source_label('vision_feature_space')})",
-            y_label=_exp5_target_label("accuracy_drop"),
+            title=f"Overlap vs {exp5_primary_target_label} by Level ({_exp5_source_label('vision_feature_space')})",
+            y_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Predicted overlap vs observed accuracy drop split by level",
+                what=f"Predicted overlap vs {exp5_primary_target_label} split by level",
                 aggregation="grouped by perturbation within each level",
                 x="predicted spectral overlap S_pred",
-                y=_exp5_target_label("accuracy_drop"),
+                y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
                 profile=profile,
             ),
@@ -4544,13 +4651,13 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_vision_grouped,
             plots_dir / "exp5_level_perturbation_predicted_vs_observed_vision.png",
             f"Predicted vs Observed by Level and Perturbation ({_exp5_source_label('vision_feature_space')})",
-            actual_label=_exp5_target_label("accuracy_drop"),
+            actual_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Predicted overlap and observed accuracy drop split by level and perturbation",
+                what=f"Predicted overlap and observed {exp5_primary_target_label} split by level and perturbation",
                 aggregation="grouped by level and perturbation",
                 x="perturbation type",
-                y=_exp5_target_label("accuracy_drop"),
+                y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
                 profile=profile,
             ),
@@ -4558,11 +4665,11 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         _plot_exp5_heatmaps(
             exp5_vision_grouped,
             plots_dir / "exp5_grouped_heatmap_vision.png",
-            f"Grouped Overlap vs Drop ({_exp5_source_label('vision_feature_space')})",
-            actual_label=_exp5_target_label("accuracy_drop"),
+            f"Grouped Overlap vs {exp5_primary_target_label} ({_exp5_source_label('vision_feature_space')})",
+            actual_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Grouped predicted overlap, observed accuracy drop, and residual",
+                what=f"Grouped predicted overlap, observed {exp5_primary_target_label}, and residual",
                 aggregation="level x perturbation average over samples",
                 x="perturbation type",
                 y="task level",
@@ -4574,16 +4681,17 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_vision_grouped,
             plots_dir / "exp5_wordy_control_comparison_vision.png",
             f"Wordy Control Comparison ({_exp5_source_label('vision_feature_space')})",
-            actual_label=_exp5_target_label("accuracy_drop"),
+            actual_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Base level vs matched wordy control for predicted sensitivity and observed accuracy drop",
+                what=f"Base level vs matched wordy control for predicted sensitivity and observed {exp5_primary_target_label}",
                 aggregation="level-wise mean over grouped perturbation points",
                 x="matched base/control pair",
-                y=_exp5_target_label('accuracy_drop'),
-                note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                y=exp5_primary_target_label,
+                note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}; {wordy_pair_note}",
                 profile=profile,
             ),
+            level_pairs=valid_wordy_pairs,
         )
     if exp5_summary:
         _plot_exp5_per_level_corr(exp5_summary, plots_dir / "exp5_per_level_correlation.png")
@@ -4649,17 +4757,17 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_samples,
             image_summary.get("pearson_r_sample", 0.0),
             plots_dir / "exp5_overlap_scatter_sample.png",
-            title=f"Overlap vs Accuracy Drop (per sample, {_exp5_source_label('image_space')})",
+            title=f"Overlap vs {exp5_primary_target_label} (per sample, {_exp5_source_label('image_space')})",
             point_size=20,
             alpha=0.45,
             max_points=sample_scatter_limit,
-            y_label=_exp5_target_label("accuracy_drop"),
+            y_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Predicted overlap vs observed accuracy drop",
+                what=f"Predicted overlap vs {exp5_primary_target_label}",
                 aggregation="per sample",
                 x="predicted spectral overlap S_pred",
-                y=_exp5_target_label("accuracy_drop"),
+                y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
                 profile=profile,
             ),
@@ -4668,18 +4776,18 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_samples,
             image_summary.get("comparable_bridge_sample", {}).get("pearson_r", 0.0),
             plots_dir / "exp5_bridge_scatter_sample.png",
-            title=f"Comparable Bridge: Overlap vs Accuracy Drop (per sample, {_exp5_source_label('image_space')})",
+            title=f"Comparable Bridge: Overlap vs {exp5_primary_target_label} (per sample, {_exp5_source_label('image_space')})",
             point_size=20,
             alpha=0.45,
             max_points=sample_scatter_limit,
-            y_label=_exp5_target_label("accuracy_drop"),
+            y_label=exp5_primary_target_label,
             scale_mode="bridge",
             metadata=_plot_metadata(
                 experiment="5",
-                what="Comparable-bridge view of predicted overlap vs observed accuracy drop",
+                what=f"Comparable-bridge view of predicted overlap vs {exp5_primary_target_label}",
                 aggregation="per sample",
                 x="zscore(log1p(predicted spectral overlap))",
-                y=f"zscore({_exp5_target_label('accuracy_drop').lower()})",
+                y=f"zscore({exp5_primary_target_label.lower()})",
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
                 profile=profile,
             ),
@@ -4690,17 +4798,17 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_vision_samples,
             vision_summary.get("pearson_r_sample", 0.0),
             plots_dir / "exp5_overlap_scatter_vision_sample.png",
-            title=f"Overlap vs Accuracy Drop (per sample, {_exp5_source_label('vision_feature_space')})",
+            title=f"Overlap vs {exp5_primary_target_label} (per sample, {_exp5_source_label('vision_feature_space')})",
             point_size=20,
             alpha=0.45,
             max_points=sample_scatter_limit,
-            y_label=_exp5_target_label("accuracy_drop"),
+            y_label=exp5_primary_target_label,
             metadata=_plot_metadata(
                 experiment="5",
-                what="Predicted overlap vs observed accuracy drop",
+                what=f"Predicted overlap vs {exp5_primary_target_label}",
                 aggregation="per sample",
                 x="predicted spectral overlap S_pred",
-                y=_exp5_target_label("accuracy_drop"),
+                y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
                 profile=profile,
             ),
@@ -4709,18 +4817,18 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             exp5_vision_samples,
             vision_summary.get("comparable_bridge_sample", {}).get("pearson_r", 0.0),
             plots_dir / "exp5_bridge_scatter_vision_sample.png",
-            title=f"Comparable Bridge: Overlap vs Accuracy Drop (per sample, {_exp5_source_label('vision_feature_space')})",
+            title=f"Comparable Bridge: Overlap vs {exp5_primary_target_label} (per sample, {_exp5_source_label('vision_feature_space')})",
             point_size=20,
             alpha=0.45,
             max_points=sample_scatter_limit,
-            y_label=_exp5_target_label("accuracy_drop"),
+            y_label=exp5_primary_target_label,
             scale_mode="bridge",
             metadata=_plot_metadata(
                 experiment="5",
-                what="Comparable-bridge view of predicted overlap vs observed accuracy drop",
+                what=f"Comparable-bridge view of predicted overlap vs {exp5_primary_target_label}",
                 aggregation="per sample",
                 x="zscore(log1p(predicted spectral overlap))",
-                y=f"zscore({_exp5_target_label('accuracy_drop').lower()})",
+                y=f"zscore({exp5_primary_target_label.lower()})",
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
                 profile=profile,
             ),
@@ -4740,14 +4848,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     grouped_pairs,
                     source_summary.get("pearson_r_grouped", 0.0),
                     plots_dir / f"exp5_overlap_scatter_{source_name}_{group_name}.png",
-                    title=f"Overlap vs Accuracy Drop ({_exp5_source_label(source_name)}, {group_name})",
-                    y_label=_exp5_target_label("accuracy_drop"),
+                    title=f"Overlap vs {exp5_primary_target_label} ({_exp5_source_label(source_name)}, {group_name})",
+                    y_label=exp5_primary_target_label,
                     metadata=_plot_metadata(
                         experiment="5",
-                        what="Predicted overlap vs observed accuracy drop",
+                        what=f"Predicted overlap vs {exp5_primary_target_label}",
                         aggregation="grouped by level and perturbation",
                         x="predicted spectral overlap S_pred",
-                        y=_exp5_target_label("accuracy_drop"),
+                        y=exp5_primary_target_label,
                         note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
                         profile=profile,
                     ),
@@ -4755,11 +4863,11 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 _plot_exp5_heatmaps(
                     grouped_pairs,
                     plots_dir / f"exp5_grouped_heatmap_{source_name}_{group_name}.png",
-                    f"Grouped Overlap vs Drop ({_exp5_source_label(source_name)}, {group_name})",
-                    actual_label=_exp5_target_label("accuracy_drop"),
+                    f"Grouped Overlap vs {exp5_primary_target_label} ({_exp5_source_label(source_name)}, {group_name})",
+                    actual_label=exp5_primary_target_label,
                     metadata=_plot_metadata(
                         experiment="5",
-                        what="Grouped predicted overlap, observed accuracy drop, and residual",
+                        what=f"Grouped predicted overlap, observed {exp5_primary_target_label}, and residual",
                         aggregation="level x perturbation average over samples",
                         x="perturbation type",
                         y="task level",
@@ -4771,13 +4879,13 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     grouped_pairs,
                     plots_dir / f"exp5_level_perturbation_predicted_vs_observed_{source_name}_{group_name}.png",
                     f"Predicted vs Observed by Level and Perturbation ({_exp5_source_label(source_name)}, {group_name})",
-                    actual_label=_exp5_target_label("accuracy_drop"),
+                    actual_label=exp5_primary_target_label,
                     metadata=_plot_metadata(
                         experiment="5",
-                        what="Predicted overlap and observed accuracy drop split by level and perturbation",
+                        what=f"Predicted overlap and observed {exp5_primary_target_label} split by level and perturbation",
                         aggregation="grouped by level and perturbation",
                         x="perturbation type",
-                        y=_exp5_target_label("accuracy_drop"),
+                        y=exp5_primary_target_label,
                         note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
                         profile=profile,
                     ),
@@ -4799,24 +4907,24 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     sample_pairs,
                     source_summary.get("pearson_r_sample", 0.0),
                     plots_dir / f"exp5_overlap_scatter_{source_name}_{group_name}_sample.png",
-                    title=f"Overlap vs Accuracy Drop ({_exp5_source_label(source_name)}, {group_name}, per sample)",
+                    title=f"Overlap vs {exp5_primary_target_label} ({_exp5_source_label(source_name)}, {group_name}, per sample)",
                     point_size=20,
                     alpha=0.45,
                     max_points=sample_scatter_limit,
-                    y_label=_exp5_target_label("accuracy_drop"),
+                    y_label=exp5_primary_target_label,
                     metadata=_plot_metadata(
                         experiment="5",
-                        what="Predicted overlap vs observed accuracy drop",
+                        what=f"Predicted overlap vs {exp5_primary_target_label}",
                         aggregation="per sample",
                         x="predicted spectral overlap S_pred",
-                        y=_exp5_target_label("accuracy_drop"),
+                        y=exp5_primary_target_label,
                         note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
                         profile=profile,
                     ),
                 )
     if exhaustive and exp5_grouped_by_group_and_target and exp5_summary:
         primary_group = exp5_summary.get("primary_group", "late")
-        extra_targets = [target for target in exp5_summary.get("targets", []) if target != "accuracy_drop"]
+        extra_targets = [target for target in exp5_summary.get("targets", []) if target != exp5_primary_target]
         for source_name, source_groups in exp5_grouped_by_group_and_target.items():
             if source_name.endswith("_raw"):
                 continue
@@ -4829,25 +4937,40 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 grouped_pairs = primary_group_targets.get(target_name)
                 target_summary = source_target_summaries.get(target_name, {})
                 if grouped_pairs:
+                    scale_mode = _exp5_target_scale_mode(target_name)
                     plot_overlap_scatter(
                         grouped_pairs,
                         target_summary.get("pearson_r_grouped", 0.0),
                         plots_dir / f"exp5_overlap_scatter_{source_name}_{primary_group}_{target_name}.png",
                         title=f"Overlap vs {_exp5_target_label(target_name)} ({_exp5_source_label(source_name)}, {primary_group})",
                         y_label=_exp5_target_label(target_name),
-                        scale_mode="zscore" if target_name == "loglik_erosion" else "raw",
+                        scale_mode=scale_mode,
                         metadata=_plot_metadata(
                             experiment="5",
                             what=f"Predicted overlap vs {_exp5_target_label(target_name)}",
                             aggregation="grouped by level and perturbation",
                             x="predicted spectral overlap S_pred",
                             y=_exp5_target_label(target_name),
-                            note=(
-                                f"Source={_exp5_source_label(source_name)}; group={primary_group}; "
-                                "axes z-scored for display only"
-                                if target_name == "loglik_erosion"
-                                else f"Source={_exp5_source_label(source_name)}; group={primary_group}"
-                            ),
+                            note=_exp5_target_scale_note(source_name, primary_group, target_name),
+                            profile=profile,
+                        ),
+                    )
+                    plot_overlap_scatter_grid_by_level(
+                        grouped_pairs,
+                        plots_dir / f"exp5_overlap_scatter_by_level_{source_name}_{primary_group}_{target_name}.png",
+                        title=(
+                            f"Overlap vs {_exp5_target_label(target_name)} by Level "
+                            f"({_exp5_source_label(source_name)}, {primary_group})"
+                        ),
+                        y_label=_exp5_target_label(target_name),
+                        scale_mode=scale_mode,
+                        metadata=_plot_metadata(
+                            experiment="5",
+                            what=f"Predicted overlap vs {_exp5_target_label(target_name)} split by level",
+                            aggregation="grouped by perturbation within each level",
+                            x="predicted spectral overlap S_pred",
+                            y=_exp5_target_label(target_name),
+                            note=_exp5_target_scale_note(source_name, primary_group, target_name),
                             profile=profile,
                         ),
                     )
@@ -4914,6 +5037,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 target_summary = source_target_summaries.get(target_name, {})
                 if not sample_pairs or target_summary.get("pearson_r_sample") is None:
                     continue
+                scale_mode = _exp5_target_scale_mode(target_name)
                 plot_overlap_scatter(
                     sample_pairs,
                     target_summary.get("pearson_r_sample", 0.0),
@@ -4923,19 +5047,14 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     alpha=0.45,
                     max_points=sample_scatter_limit,
                     y_label=_exp5_target_label(target_name),
-                    scale_mode="zscore" if target_name == "loglik_erosion" else "raw",
+                    scale_mode=scale_mode,
                     metadata=_plot_metadata(
                         experiment="5",
                         what=f"Predicted overlap vs {_exp5_target_label(target_name)}",
                         aggregation="per sample",
                         x="predicted spectral overlap S_pred",
                         y=_exp5_target_label(target_name),
-                        note=(
-                            f"Source={_exp5_source_label(source_name)}; group={primary_group}; "
-                            "axes z-scored for display only"
-                            if target_name == "loglik_erosion"
-                            else f"Source={_exp5_source_label(source_name)}; group={primary_group}"
-                        ),
+                        note=_exp5_target_scale_note(source_name, primary_group, target_name),
                         profile=profile,
                     ),
                 )

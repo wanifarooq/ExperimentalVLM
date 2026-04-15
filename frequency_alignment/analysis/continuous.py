@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 from scipy import stats
 
 from .statistics import pearson_correlation, spearman_correlation
+
+_PRIMARY_LEVEL_NAMES = {"L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"}
 
 
 def attach_linear_residual(
@@ -17,6 +19,8 @@ def attach_linear_residual(
     target_key: str,
     control_key: str,
     residual_key: str,
+    fit_filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    min_slope: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Attach residuals from target ~ control to each point in-place.
 
@@ -24,8 +28,11 @@ def attach_linear_residual(
     """
 
     valid_indices: List[int] = []
+    fit_indices: List[int] = []
     xs: List[float] = []
     ys: List[float] = []
+    fit_xs: List[float] = []
+    fit_ys: List[float] = []
     for idx, point in enumerate(points):
         x_val = point.get(control_key)
         y_val = point.get(target_key)
@@ -38,6 +45,10 @@ def attach_linear_residual(
         valid_indices.append(idx)
         xs.append(x_float)
         ys.append(y_float)
+        if fit_filter is None or bool(fit_filter(point)):
+            fit_indices.append(idx)
+            fit_xs.append(x_float)
+            fit_ys.append(y_float)
 
     for point in points:
         point[residual_key] = None
@@ -51,19 +62,34 @@ def attach_linear_residual(
             "slope": 0.0,
             "intercept": 0.0,
             "r_squared": 0.0,
+            "fit_n": 0,
+            "applied_n": 0,
         }
+
+    if not fit_indices:
+        fit_indices = list(valid_indices)
+        fit_xs = list(xs)
+        fit_ys = list(ys)
 
     x_arr = np.asarray(xs, dtype=np.float64)
     y_arr = np.asarray(ys, dtype=np.float64)
-    design = np.column_stack([np.ones(x_arr.size, dtype=np.float64), x_arr])
-    beta, _, _, _ = np.linalg.lstsq(design, y_arr, rcond=None)
-    fitted = design @ beta
-    residuals = y_arr - fitted
-    y_mean = float(np.mean(y_arr))
-    tss = float(np.sum((y_arr - y_mean) ** 2))
-    rss = float(np.sum(residuals ** 2))
+    fit_x_arr = np.asarray(fit_xs, dtype=np.float64)
+    fit_y_arr = np.asarray(fit_ys, dtype=np.float64)
+    fit_design = np.column_stack([np.ones(fit_x_arr.size, dtype=np.float64), fit_x_arr])
+    beta, _, _, _ = np.linalg.lstsq(fit_design, fit_y_arr, rcond=None)
+    if min_slope is not None and float(beta[1]) < float(min_slope):
+        beta[1] = float(min_slope)
+        beta[0] = float(np.mean(fit_y_arr) - beta[1] * np.mean(fit_x_arr))
+
+    fitted_fit = fit_design @ beta
+    fit_residuals = fit_y_arr - fitted_fit
+    fit_y_mean = float(np.mean(fit_y_arr))
+    tss = float(np.sum((fit_y_arr - fit_y_mean) ** 2))
+    rss = float(np.sum(fit_residuals ** 2))
     r_squared = 1.0 - rss / tss if tss > 0 else 0.0
 
+    design = np.column_stack([np.ones(x_arr.size, dtype=np.float64), x_arr])
+    residuals = y_arr - (design @ beta)
     for idx, residual in zip(valid_indices, residuals):
         points[idx][residual_key] = float(residual)
 
@@ -72,6 +98,8 @@ def attach_linear_residual(
         "control_key": control_key,
         "residual_key": residual_key,
         "n": int(len(valid_indices)),
+        "fit_n": int(len(fit_indices)),
+        "applied_n": int(len(valid_indices)),
         "slope": float(beta[1]),
         "intercept": float(beta[0]),
         "r_squared": float(r_squared),
@@ -84,15 +112,36 @@ def attach_complexity_residual(
     complexity_key: str = "complexity_score",
     prompt_key: str = "prompt_complexity_score",
     residual_key: str = "complexity_score_residual",
+    fit_primary_levels: bool = True,
 ) -> Dict[str, Any]:
-    """Residualize semantic complexity against prompt load in-place."""
+    """Residualize semantic complexity against prompt load in-place.
 
-    return attach_linear_residual(
+    When level labels are available, the prompt-load correction is fit on the
+    primary L1-L4 ladder and then applied to wordy mirrors. The slope is kept
+    non-negative so extra filler cannot make a same-semantics wordy control
+    look more semantically complex than its terse base.
+    """
+
+    use_primary_fit = bool(fit_primary_levels) and any(
+        str(point.get("level")) in _PRIMARY_LEVEL_NAMES for point in points
+    )
+    fit_filter = (
+        (lambda point: str(point.get("level")) in _PRIMARY_LEVEL_NAMES)
+        if use_primary_fit
+        else None
+    )
+
+    summary = attach_linear_residual(
         points,
         target_key=complexity_key,
         control_key=prompt_key,
         residual_key=residual_key,
+        fit_filter=fit_filter,
+        min_slope=0.0,
     )
+    summary["fit_scope"] = "primary_levels_L1_L4" if use_primary_fit else "all_valid_points"
+    summary["slope_constraint"] = "non_negative"
+    return summary
 
 
 def summarize_linear_trend(
