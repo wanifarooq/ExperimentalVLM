@@ -34,6 +34,7 @@ from ..analysis.continuous import (
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
+from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.statistics import (
     monotonicity_test,
     spearman_correlation,
@@ -352,6 +353,29 @@ def run_exp4(
             "values": dict(zip(present_levels, cutoff_values)),
         }
 
+        wordy_present = [
+            level
+            for level in ALL_VQA_LEVEL_NAMES
+            if level in (LEVEL_VIEWS["wordy"] or set()) and level in critical_cutoffs.get(mode, {})
+        ]
+        if len(wordy_present) >= 2:
+            wordy_values = [critical_cutoffs[mode][level] for level in wordy_present]
+            wordy_mono, wordy_tau = monotonicity_test(wordy_values)
+            wordy_rho, wordy_p = spearman_correlation(range(1, len(wordy_values) + 1), wordy_values)
+            tests[f"monotonicity_{mode}_wordy"] = {
+                "is_monotonic": wordy_mono,
+                "kendall_tau": wordy_tau,
+                "values": dict(zip(wordy_present, wordy_values)),
+                "passed": wordy_tau > 0.6,
+            }
+            tests[f"spearman_cutoff_vs_granularity_{mode}_wordy"] = {
+                "rho": wordy_rho,
+                "p_value": wordy_p,
+                "passed": wordy_rho > 0.6,
+                "values": dict(zip(wordy_present, wordy_values)),
+                "target": "secondary wordy-ladder monotonicity only; no pooled monotonicity is run",
+            }
+
     tests["continuous_complexity"] = {}
     for mode in sweep_modes:
         mode_points = [point for point in complexity_points if point.get("mode") == mode]
@@ -398,6 +422,45 @@ def run_exp4(
                 demean_by_group=True,
             ),
         }
+        view_payload: Dict[str, Any] = {}
+        for view_name in LEVEL_VIEW_ORDER:
+            level_filter = LEVEL_VIEWS[view_name]
+            view_points = (
+                mode_points
+                if level_filter is None
+                else [point for point in mode_points if str(point.get("level")) in level_filter]
+            )
+            pooled = summarize_multivariate_regression(
+                view_points,
+                y_key="critical_cutoff",
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                level_filter=level_filter,
+            )
+            within = summarize_multivariate_regression(
+                view_points,
+                y_key="critical_cutoff",
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                group_key="image_id",
+                demean_by_group=True,
+                level_filter=level_filter,
+            )
+            tests["continuous_complexity"][mode][f"horse_race_critical_cutoff_{view_name}"] = pooled
+            tests["continuous_complexity"][mode][f"horse_race_critical_cutoff_within_image_{view_name}"] = within
+            view_payload[view_name] = {
+                "level_filter": sorted(level_filter) if level_filter is not None else None,
+                "n_points": len(view_points),
+                "pooled": pooled,
+                "within_image": within,
+            }
+        tests["continuous_complexity"][mode]["horse_race_critical_cutoff_views"] = view_payload
 
     # Summary: lowpass is the main test
     lp_mono = tests.get("monotonicity_lowpass", {}).get("passed", False)

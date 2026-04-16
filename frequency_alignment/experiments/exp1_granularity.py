@@ -30,6 +30,7 @@ from ..analysis.continuous import (
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
+from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.spectral import compute_feature_spectral_signature_stats
 from ..analysis.statistics import (
     bootstrap_ci,
@@ -286,7 +287,85 @@ def _summarize_perturbation_specific_horse_races(
                 demean_by_group=True,
             ),
         }
+        view_payload: Dict[str, Any] = {}
+        for view_name in LEVEL_VIEW_ORDER:
+            level_filter = LEVEL_VIEWS[view_name]
+            view_points = (
+                used_points
+                if level_filter is None
+                else [point for point in used_points if str(point.get("level")) in level_filter]
+            )
+            view_predictors = _horse_race_predictors(view_points)
+            view_payload[view_name] = {
+                "filter": {
+                    **filter_payload,
+                    "level_view": view_name,
+                    "level_filter": sorted(level_filter) if level_filter is not None else None,
+                    "n_points_used": len(view_points),
+                },
+                "pooled": summarize_multivariate_regression(
+                    view_points,
+                    y_key=y_key,
+                    x_keys=view_predictors,
+                    level_filter=level_filter,
+                ),
+                "within_image": summarize_multivariate_regression(
+                    view_points,
+                    y_key=y_key,
+                    x_keys=view_predictors,
+                    group_key="image_id",
+                    demean_by_group=True,
+                    level_filter=level_filter,
+                ),
+            }
+            by_perturbation[perturbation_name][f"pooled_{view_name}"] = view_payload[view_name]["pooled"]
+            by_perturbation[perturbation_name][f"within_image_{view_name}"] = view_payload[view_name]["within_image"]
+        by_perturbation[perturbation_name]["views"] = view_payload
     return by_perturbation
+
+
+def _add_horse_race_views(
+    payload: Dict[str, Any],
+    *,
+    base_key: str,
+    points: List[Dict[str, Any]],
+    y_key: str,
+) -> None:
+    """Add primary/wordy/pooled variants while preserving legacy keys."""
+
+    view_payload: Dict[str, Any] = {}
+    for view_name in LEVEL_VIEW_ORDER:
+        level_filter = LEVEL_VIEWS[view_name]
+        view_points = (
+            points
+            if level_filter is None
+            else [point for point in points if str(point.get("level")) in level_filter]
+        )
+        predictors = _horse_race_predictors(view_points)
+        pooled = summarize_multivariate_regression(
+            view_points,
+            y_key=y_key,
+            x_keys=predictors,
+            level_filter=level_filter,
+        )
+        within = summarize_multivariate_regression(
+            view_points,
+            y_key=y_key,
+            x_keys=predictors,
+            group_key="image_id",
+            demean_by_group=True,
+            level_filter=level_filter,
+        )
+        view_payload[view_name] = {
+            "level_filter": sorted(level_filter) if level_filter is not None else None,
+            "n_points": len(view_points),
+            "pooled": pooled,
+            "within_image": within,
+        }
+        payload[f"{base_key}_{view_name}"] = pooled
+        payload[f"{base_key}_within_image_{view_name}"] = within
+
+    payload[f"{base_key}_views"] = view_payload
 
 
 def _summarize_complexity(points: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -718,6 +797,28 @@ def _run_hypothesis_tests(
         "passed": tau > 0.6,
     }
 
+    wordy_present_levels = [
+        level for level in ALL_VQA_LEVEL_NAMES if level in (LEVEL_VIEWS["wordy"] or set()) and level in per_level
+    ]
+    if len(wordy_present_levels) >= 2:
+        wordy_ranks = list(range(1, len(wordy_present_levels) + 1))
+        wordy_drops = [per_level[level]["mean_accuracy_drop"] for level in wordy_present_levels]
+        wordy_rho, wordy_p = spearman_correlation(wordy_ranks, wordy_drops)
+        wordy_mono, wordy_tau = monotonicity_test(wordy_drops)
+        tests["spearman_drop_vs_granularity_wordy"] = {
+            "rho": wordy_rho,
+            "p_value": wordy_p,
+            "target": "secondary wordy-ladder monotonicity only; no pooled monotonicity is run",
+            "passed": wordy_rho > 0.6,
+            "values": dict(zip(wordy_present_levels, wordy_drops)),
+        }
+        tests["monotonicity_accuracy_drop_wordy"] = {
+            "is_monotonic": wordy_mono,
+            "kendall_tau": wordy_tau,
+            "values": dict(zip(wordy_present_levels, wordy_drops)),
+            "passed": wordy_tau > 0.6,
+        }
+
     # H3: ANOVA across levels — are the groups significantly different?
     # Collect per-perturbation drops grouped by level
     per_level_all_drops: Dict[str, List[float]] = defaultdict(list)
@@ -929,6 +1030,25 @@ def _run_hypothesis_tests(
                 demean_by_group=True,
             ),
         }
+        cc = tests["continuous_complexity"]
+        _add_horse_race_views(
+            cc,
+            base_key="horse_race_mean_accuracy_drop",
+            points=accuracy_drop_points,
+            y_key="mean_accuracy_drop",
+        )
+        for outcome_key in (
+            "mean_loglik_drift",
+            "mean_loglik_erosion",
+            "mean_loglik_recovery",
+            "mean_loglik_volatility",
+        ):
+            _add_horse_race_views(
+                cc,
+                base_key=f"horse_race_{outcome_key}",
+                points=complexity_points,
+                y_key=outcome_key,
+            )
         if perturbation_points:
             tests["continuous_complexity"]["horse_race_mean_accuracy_drop_by_perturbation"] = (
                 _summarize_perturbation_specific_horse_races(

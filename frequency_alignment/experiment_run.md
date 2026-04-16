@@ -1,5 +1,7 @@
 # Frequency Alignment Run Guide
 
+Last updated: April 15, 2026.
+
 ## Current Scientific Status
 
 The original hypothesis still stands: language conditioning acts like a task-specific frequency filter `W_t`, and robustness depends on the overlap between `W_t` and perturbation energy. The current code adds a stronger two-factor test around that core idea:
@@ -8,6 +10,8 @@ The original hypothesis still stands: language conditioning acts like a task-spe
 - control force: prompt load / linguistic anchoring
 - MCQ control: option hardness
 - prompt-load experimental controls: `L5-L8` wordy levels matched to `L1-L4`
+- Exp 5 primary behavioral target: correct-answer log-likelihood volatility
+- triple-view reporting: Primary (`L1-L4`), Wordy (`L5-L8`), and Pooled (`L1-L8`)
 
 So the project is now both a spectral-overlap test and a controlled test that semantic logic, not raw prompt length, is the driver of frequency-based fragility.
 
@@ -63,6 +67,8 @@ pip install -r requirements-extra.txt
 python3 -m frequency_alignment.run_experiment \
   --experiment all \
   --config frequency_alignment/configs/local_test.yaml \
+  --max-samples 5 \
+  --out-dir "frequency_alignment_outputs_dryrun_5samples_$(date +%Y%m%d_%H%M%S)" \
   -v
 
 # Full server run
@@ -74,7 +80,8 @@ python3 -m frequency_alignment.run_experiment \
 # Plot-only regeneration
 python3 -m frequency_alignment.run_experiment \
   --plot-only \
-  --config frequency_alignment/configs/default.yaml
+  --config frequency_alignment/configs/default.yaml \
+  --out-dir <existing_output_dir>
 ```
 
 `--max-samples N` is a global runtime override. It writes `N` into `data.max_samples` and every configured `experiments.exp*.max_samples` for that run, so all enabled experiments and downstream plots/tests use the processed subset from that override.
@@ -150,14 +157,17 @@ python3 -m frequency_alignment.run_experiment \
   - `loglik_volatility`
   - `net_drop`
   - grouped `relative_accuracy_drop`
-- Treats the `late` filter group as the primary hypothesis test and the others as controls.
+- Treats correct-answer `loglik_volatility` as the primary behavioral target. Accuracy drop, erosion, net drop, and relative accuracy drop are still emitted as controls.
+- Treats the `late` filter group as the primary layer-group hypothesis test and the others as controls.
 - Also saves a standardized "comparable bridge" view in parallel with the raw overlap analysis:
   - prediction uses `zscore(log1p(S_pred))`
   - observed targets use `zscore(actual)`
   - this is for effect-size comparability and visualization only; the raw overlap metrics remain intact
+- Adds a prediction-factor horse race for observed `accuracy_drop`, using `zscore(log1p(S_pred))`, `prompt_complexity_score`, and `option_hardness_score` as predictors. This is saved under `prediction_factor_horse_race` and plotted as `exp5_coefficient_plot_prediction_factors.png`.
 - Also tracks whether predicted overlap and calibrated prediction error vary continuously with semantic complexity.
 - Produces level-wise scatter grids and level-by-perturbation predicted-vs-observed plots. These use separate visual scales when prediction and observation magnitudes differ.
 - Produces wordy-control comparison plots for predicted sensitivity and observed behavior.
+- Summary aliases such as `primary_target`, `primary_group`, and `pearson_r_grouped` refer to the configured primary branch: by default `loglik_volatility` on the `late` group.
 
 ## Two-Factor Interpretation
 
@@ -169,6 +179,14 @@ Across the continuous analyses, the intended interpretation is:
 - `prediction entropy` controls for clean-answer uncertainty in Exp 1
 
 The fixed-effects and horse-race regressions are therefore the main evidence for whether semantic complexity is the real driver of frequency-based fragility after controlling for prompt length, answer-set difficulty, and clean-model uncertainty where available. The `L5-L8` wordy controls test the same idea experimentally by increasing prompt load while holding the semantic program fixed.
+
+Most regression and grouped-correlation payloads now include three views:
+
+- `primary`: only the semantic ladder `L1-L4`
+- `wordy`: only the matched wordy mirrors `L5-L8`
+- `pooled`: all levels `L1-L8`
+
+Legacy unsuffixed keys remain available for older plot loaders. Monotonicity and Spearman granularity tests are not pooled, because combining terse and wordy ladders would mix two different interventions.
 
 ### Experiment 6
 
@@ -233,6 +251,7 @@ nohup python3 -m frequency_alignment.run_experiment \
   - Main dataset for experiments `1-5`.
   - The code generates same-image `L1-L4` primary tasks plus `L5-L8` wordy controls from scene graphs.
   - Wordy controls are regenerated with cache version `gqa_multilevel_v5` and use neutral filler text that increases prompt load without changing the structured semantic program.
+  - Wordy controls are only required to be longer than the matched base prompt by at least the configured filler margin; they are not forced to a fixed 60-word length.
   - Verification levels are balanced to 50% yes and 50% no when possible.
   - The loader uses an in-memory and on-disk granularity cache under `.hf_cache/gqa/granularity_cache/`, with early stopping once enough balanced valid samples are found.
 - `partimagenet`
@@ -295,7 +314,10 @@ Representative plot families include:
 - `analysis.num_bands_mode: auto` probes the model patch grid and freezes one run-level linear radial bin count. This keeps `W_t`, `delta_f`, `delta_f_vision`, Exp 3 drift spectra, and Exp 5 overlap vectors aligned.
 - `analysis.suppress_dc` controls whether the DC band is included in the actual math. It is currently `false` in both provided configs.
 - `analysis.attention_fft_window` / `experiments.exp2.fft_window` controls optional attention-map windowing before FFT. Current configs set this to `none`.
+- `experiments.exp5.primary_layer_group` defaults to `late`; the code-level Exp 5 primary target is `loglik_volatility`.
 - Complexity scatter plots use `complexity_score_residual` on the x-axis when available, falling back to raw `complexity_score` only for older result folders.
+- Coefficient plots now include triple-view variants when the result JSON contains the `_views` regression payloads.
+- Exp 5 predicted-vs-observed scatter plots include triple-view panels for Primary, Wordy, and Pooled.
 - Spectral plots can use log scaling for visualization only; this does not change stored spectra or hypothesis tests.
 - Plot generation intentionally skips the old discrete `exp1_granularity_curves.png` and the raw Exp 3 correlation heatmap so the regression and paired-control figures stay primary.
 - `plotting.max_sample_scatter_points` can cap dense Exp 5 sample-level scatter rendering for visualization only; stored correlations still come from the full result data.

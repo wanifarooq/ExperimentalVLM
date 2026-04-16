@@ -33,6 +33,7 @@ from ..analysis.continuous import (
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
+from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.spectral import (
     compare_spectral_filters,
     compute_attention_power_spectrum_multi,
@@ -708,6 +709,45 @@ def run_exp2(
                 }
             agg["per_level"][lk]["controls"][control_name] = control_entry
 
+    def _mean_bandwidth_curve(level_names: List[str]) -> Dict[str, Any]:
+        curve: List[Dict[str, Any]] = []
+        for group_name in ("overall",) + LAYER_GROUP_ORDER:
+            values: List[float] = []
+            for level_key in level_names:
+                if level_key not in agg["per_level"]:
+                    continue
+                if group_name == "overall":
+                    value = agg["per_level"][level_key].get("mean_bandwidth")
+                else:
+                    value = (
+                        agg["per_level"][level_key]
+                        .get("layer_groups", {})
+                        .get(group_name, {})
+                        .get("mean_bandwidth")
+                    )
+                if value is not None and np.isfinite(float(value)):
+                    values.append(float(value))
+            curve.append(
+                {
+                    "group": group_name,
+                    "mean_bandwidth": float(np.mean(values)) if values else None,
+                    "num_levels": len(values),
+                }
+            )
+        return {
+            "x_axis": ["overall", *LAYER_GROUP_ORDER],
+            "values": curve,
+        }
+
+    primary_levels_for_curve = [
+        level for level in present_levels if level in (LEVEL_VIEWS["primary"] or set())
+    ]
+    wordy_levels_for_curve = [
+        level for level in present_levels if level in (LEVEL_VIEWS["wordy"] or set())
+    ]
+    agg["primary_mean_Gt_curve"] = _mean_bandwidth_curve(primary_levels_for_curve)
+    agg["wordy_mean_Gt_curve"] = _mean_bandwidth_curve(wordy_levels_for_curve)
+
     complexity_points = _build_complexity_points(per_sample)
     agg["complexity_analysis"] = _summarize_complexity(complexity_points)
 
@@ -757,6 +797,21 @@ def run_exp2(
                 "passed": group_rho > 0.8,
                 "values": dict(zip(group_present, group_means)),
             }
+
+    wordy_present_levels = [
+        level for level in present_levels if level in (LEVEL_VIEWS["wordy"] or set())
+    ]
+    if len(wordy_present_levels) >= 2:
+        ranks = list(range(1, len(wordy_present_levels) + 1))
+        mean_bws = [np.mean(level_bandwidths[lk]) for lk in wordy_present_levels]
+        rho, p = spearman_correlation(ranks, mean_bws)
+        tests["spearman_bandwidth_vs_granularity_wordy"] = {
+            "rho": rho,
+            "p_value": p,
+            "target": "secondary wordy-ladder monotonicity only; no pooled monotonicity is run",
+            "passed": rho > 0.6,
+            "values": dict(zip(wordy_present_levels, mean_bws)),
+        }
 
     # H2: ANOVA on bandwidths across levels
     groups = [level_bandwidths[lk] for lk in primary_present_levels if level_bandwidths[lk]]
@@ -845,6 +900,49 @@ def run_exp2(
             demean_by_group=True,
         ),
     }
+
+    def _add_bandwidth_regression_views(base_key: str, value_key: str) -> None:
+        view_payload: Dict[str, Any] = {}
+        for view_name in LEVEL_VIEW_ORDER:
+            level_filter = LEVEL_VIEWS[view_name]
+            view_points = (
+                complexity_points
+                if level_filter is None
+                else [point for point in complexity_points if str(point.get("level")) in level_filter]
+            )
+            pooled = summarize_multivariate_regression(
+                view_points,
+                y_key=value_key,
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                level_filter=level_filter,
+            )
+            within = summarize_multivariate_regression(
+                view_points,
+                y_key=value_key,
+                x_keys=[
+                    "complexity_score_residual",
+                    "prompt_complexity_score",
+                    "option_hardness_score",
+                ],
+                group_key="image_id",
+                demean_by_group=True,
+                level_filter=level_filter,
+            )
+            tests["continuous_complexity"][f"{base_key}_{view_name}"] = pooled
+            tests["continuous_complexity"][f"{base_key}_within_image_{view_name}"] = within
+            view_payload[view_name] = {
+                "level_filter": sorted(level_filter) if level_filter is not None else None,
+                "n_points": len(view_points),
+                "pooled": pooled,
+                "within_image": within,
+            }
+        tests["continuous_complexity"][f"{base_key}_views"] = view_payload
+
+    _add_bandwidth_regression_views("horse_race_bandwidth", "bandwidth")
     for group_name in LAYER_GROUP_ORDER:
         value_key = f"bandwidth_{group_name}"
         if any(point.get(value_key) is not None for point in complexity_points):
@@ -901,6 +999,7 @@ def run_exp2(
                     demean_by_group=True,
                 )
             )
+            _add_bandwidth_regression_views(f"horse_race_bandwidth_{group_name}", value_key)
     tests["hypothesis_supported"] = core_passed
 
     # --- Log results ---

@@ -17,6 +17,7 @@ from ..analysis.continuous import (
     attach_complexity_residual,
     summarize_multivariate_regression,
 )
+from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.spectral import spectral_band_centers
 from ..analysis.statistics import paired_wordy_mirror_ttests
 from ..data.base import ALL_VQA_LEVEL_NAMES, PRIMARY_VQA_LEVEL_NAMES, WORDY_CONTROL_LEVEL_NAME_PAIRS
@@ -66,6 +67,7 @@ _EXP5_TARGET_LABELS = {
     "relative_accuracy_drop": "Relative Accuracy Drop",
 }
 _COEFFICIENT_LABELS = {
+    "predicted_overlap_log1p_z": "Spectral Overlap\nz(log1p S_pred)",
     "complexity_score": "Semantic Complexity",
     "complexity_score_residual": "Residualized\nSemantic Logic",
     "prompt_complexity_score": "Prompt Load",
@@ -74,6 +76,7 @@ _COEFFICIENT_LABELS = {
     "clean_accuracy": "Clean Accuracy\n(Baseline)",
 }
 _COEFFICIENT_COLORS = {
+    "predicted_overlap_log1p_z": "#d62728",
     "complexity_score": "#2ca02c",
     "complexity_score_residual": "#2ca02c",
     "prompt_complexity_score": "#7f7f7f",
@@ -1518,6 +1521,59 @@ def plot_complexity_scatter(
     _save_fig(fig, out_path)
 
 
+def plot_overlap_scatter_grid_by_view(
+    scatter_data: List[Dict[str, Any]],
+    out_path: Path,
+    *,
+    title: str,
+    y_label: str = "Observed Sensitivity",
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    """Triple-view scatter grid: primary, wordy, pooled."""
+
+    if not scatter_data:
+        return
+    view_labels = {
+        "primary": "Primary (L1-L4)",
+        "wordy": "Wordy (L5-L8)",
+        "pooled": "Pooled (L1-L8)",
+    }
+    fig, axes = plt.subplots(1, 3, figsize=(15.2, 4.6), sharey=True)
+    for axis, view_name in zip(axes, LEVEL_VIEW_ORDER):
+        level_filter = LEVEL_VIEWS[view_name]
+        if level_filter is None:
+            subset = list(scatter_data)
+        else:
+            subset = [item for item in scatter_data if str(item.get("level")) in level_filter]
+        axis.axline((0, 0), slope=1, color="#777777", linestyle="--", linewidth=0.8, alpha=0.5)
+        if subset:
+            preds = np.asarray([item["predicted"] for item in subset], dtype=float)
+            actuals = np.asarray([item["actual"] for item in subset], dtype=float)
+            colors = [_LEVEL_COLORS.get(str(item.get("level")), "#444444") for item in subset]
+            axis.scatter(preds, actuals, c=colors, alpha=0.72, edgecolor="white", linewidth=0.4)
+            if len(subset) >= 2 and len(np.unique(preds)) > 1:
+                slope, intercept = np.polyfit(preds, actuals, 1)
+                xs = np.linspace(float(np.min(preds)), float(np.max(preds)), 100)
+                axis.plot(xs, slope * xs + intercept, color="#111111", linewidth=1.5)
+        axis.set_title(f"{view_labels.get(view_name, view_name)}\nn={len(subset)}", fontsize=10)
+        axis.set_xlabel("Predicted Spectral Overlap", fontsize=10)
+        _apply_style(axis)
+    axes[0].set_ylabel(y_label, fontsize=10)
+    fig.suptitle(title, fontsize=13)
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=triple-view scatter grid",
+            "Panels=primary L1-L4, wordy L5-L8, pooled L1-L8",
+            "X=predicted spectral overlap",
+            f"Y={y_label}",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
 def _plot_exp2_complexity_groups(
     points: Sequence[Dict[str, Any]],
     out_path: Path,
@@ -1711,6 +1767,7 @@ def plot_coefficient_forest(
     order = [
         key
         for key in (
+            "predicted_overlap_log1p_z",
             "complexity_score_residual",
             "complexity_score",
             "prompt_complexity_score",
@@ -1797,6 +1854,146 @@ def plot_coefficient_forest(
     )
     _tight_layout(fig)
     _save_fig(fig, out_path)
+
+
+def plot_coefficient_forest_views(
+    view_payload: Dict[str, Any],
+    out_path: Path,
+    *,
+    title: str,
+    subtitle: Optional[str] = None,
+    regression_mode: str = "pooled",
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    """Coefficient forest with Primary, Wordy, and Pooled as color/marker groups."""
+
+    series: List[Tuple[str, Dict[str, Any]]] = []
+    labels = {
+        "primary": "Primary (L1-L4)",
+        "wordy": "Wordy (L5-L8)",
+        "pooled": "Pooled (L1-L8)",
+    }
+    for view_name in LEVEL_VIEW_ORDER:
+        view_entry = view_payload.get(view_name, {}) if isinstance(view_payload, dict) else {}
+        regression = view_entry.get(regression_mode)
+        if isinstance(regression, dict) and regression.get("predictors"):
+            series.append((labels.get(view_name, view_name), regression))
+    if not series:
+        return
+
+    predictor_keys = {
+        key
+        for _, reg in series
+        for key in (reg.get("predictors", {}) if isinstance(reg, dict) else {})
+    }
+    order = [
+        key
+        for key in (
+            "predicted_overlap_log1p_z",
+            "complexity_score_residual",
+            "complexity_score",
+            "prompt_complexity_score",
+            "option_hardness_score",
+            "prediction_entropy",
+            "clean_accuracy",
+        )
+        if key in predictor_keys
+    ]
+    if not order:
+        return
+
+    y_positions = np.arange(len(order))[::-1]
+    fig_height = max(3.6, 1.3 + 0.9 * len(order))
+    fig, ax = plt.subplots(figsize=(8.8, fig_height))
+    ax.axvline(0.0, color="#555555", linestyle="--", linewidth=1.0, alpha=0.8)
+    marker_cycle = ["o", "s", "D"]
+    view_colors = ["#1f77b4", "#9467bd", "#333333"]
+    offsets = np.linspace(-0.18, 0.18, num=len(series)) if len(series) > 1 else np.array([0.0])
+    legend_handles: List[Any] = []
+    for series_idx, (series_label, reg) in enumerate(series):
+        marker = marker_cycle[series_idx % len(marker_cycle)]
+        color = view_colors[series_idx % len(view_colors)]
+        predictors = reg.get("predictors", {}) if isinstance(reg, dict) else {}
+        for idx, key in enumerate(order):
+            predictor_stats = predictors.get(key)
+            if predictor_stats is None:
+                continue
+            center, lower, upper = _standardized_beta_and_ci(predictor_stats)
+            ax.errorbar(
+                center,
+                y_positions[idx] + float(offsets[series_idx]),
+                xerr=[[center - lower], [upper - center]],
+                fmt=marker,
+                color=color,
+                ecolor=color,
+                elinewidth=2.0,
+                capsize=4,
+                markersize=8,
+                alpha=0.95,
+            )
+        legend_handles.append(
+            plt.Line2D(
+                [0],
+                [0],
+                marker=marker,
+                color=color,
+                linestyle="None",
+                markersize=8,
+                label=series_label,
+            )
+        )
+
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels([_COEFFICIENT_LABELS.get(key, key) for key in order], fontsize=10)
+    ax.set_xlabel("Standardized Coefficient (95% CI)", fontsize=11)
+    ax.set_title(title, fontsize=13)
+    if subtitle:
+        ax.text(0.0, 1.02, subtitle, transform=ax.transAxes, ha="left", va="bottom", fontsize=9, color="#555555")
+    ax.legend(handles=legend_handles, fontsize=8, loc="lower right", title="Level View", title_fontsize=8)
+    ax.grid(axis="x", alpha=0.2, linewidth=0.6)
+    _apply_style(ax)
+    _set_plot_metadata(
+        fig,
+        metadata
+        or _metadata_lines(
+            "View=triple-view coefficient plot",
+            "Dots=standardized coefficients",
+            "Panels/groups=primary, wordy, pooled",
+            f"Regression mode={regression_mode}",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def _plot_view_forest_from_payload(
+    payload: Dict[str, Any],
+    base_key: str,
+    out_path: Path,
+    *,
+    title: str,
+    note: str,
+    experiment: str,
+    profile: str,
+) -> None:
+    view_payload = payload.get(f"{base_key}_views")
+    if not isinstance(view_payload, dict):
+        return
+    plot_coefficient_forest_views(
+        view_payload,
+        out_path,
+        title=title,
+        subtitle="Primary, wordy, and pooled level views",
+        metadata=_plot_metadata(
+            experiment=experiment,
+            what="Triple-view horse race coefficients",
+            aggregation="separate regressions for primary L1-L4, wordy L5-L8, and pooled L1-L8",
+            x="standardized coefficient with 95% CI",
+            y="predictor",
+            note=note,
+            profile=profile,
+        ),
+    )
 
 
 def plot_dual_force_bars(
@@ -1901,6 +2098,7 @@ def plot_coefficient_forest_series(
     order = [
         key
         for key in (
+            "predicted_overlap_log1p_z",
             "complexity_score_residual",
             "complexity_score",
             "prompt_complexity_score",
@@ -2548,6 +2746,64 @@ def _plot_exp2_group_bandwidth(summary: Dict[str, Any], out_path: Path) -> None:
             note="Series compare early, mid, and late layer groups",
         ),
     )
+
+
+def _plot_exp2_mean_gt_curves(summary: Dict[str, Any], out_path: Path) -> None:
+    primary_curve = summary.get("primary_mean_Gt_curve", {}).get("values", [])
+    wordy_curve = summary.get("wordy_mean_Gt_curve", {}).get("values", [])
+    if not primary_curve and not wordy_curve:
+        return
+
+    groups = summary.get("primary_mean_Gt_curve", {}).get("x_axis") or ["overall", "early", "mid", "late"]
+    x = np.arange(len(groups), dtype=float)
+
+    def _curve_values(curve: List[Dict[str, Any]]) -> List[float]:
+        by_group = {str(item.get("group")): item.get("mean_bandwidth") for item in curve}
+        return [
+            float(by_group[group]) if by_group.get(group) is not None else np.nan
+            for group in groups
+        ]
+
+    fig, ax = plt.subplots(figsize=(7.8, 5.0))
+    if primary_curve:
+        ax.plot(
+            x,
+            _curve_values(primary_curve),
+            marker="o",
+            linewidth=2.4,
+            linestyle="-",
+            color="#1f77b4",
+            label="Primary Mean (L1-L4)",
+        )
+    if wordy_curve:
+        ax.plot(
+            x,
+            _curve_values(wordy_curve),
+            marker="s",
+            linewidth=2.2,
+            linestyle="--",
+            color="#9467bd",
+            label="Wordy Mean (L5-L8)",
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(group).capitalize() for group in groups], fontsize=10)
+    ax.set_ylabel("Mean Effective Bandwidth G(t)", fontsize=11)
+    ax.set_title("Semantic Convergence: Mean G(t) by Layer View", fontsize=13)
+    ax.legend(fontsize=9)
+    _apply_style(ax)
+    _set_plot_metadata(
+        fig,
+        _plot_metadata(
+            experiment="2",
+            what="Primary-vs-wordy mean effective bandwidth curves",
+            aggregation="mean over levels inside each level view",
+            x="overall/early/mid/late layer-group filter",
+            y="effective bandwidth G(t)",
+            note="Solid=primary L1-L4; dashed=wordy L5-L8",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
 
 
 def _plot_exp2_selected_samples(
@@ -3666,6 +3922,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     profile=profile,
                 ),
             )
+            _plot_view_forest_from_payload(
+                cc,
+                "horse_race_mean_accuracy_drop",
+                plots_dir / "exp1_coefficient_plot_accuracy_drop_views.png",
+                title="Triple-View Coefficients: Accuracy Drop",
+                note="Accuracy-drop regressions are filtered to clean-correct points; views separate primary, wordy, and pooled ladders",
+                experiment="1",
+                profile=profile,
+            )
         loglik_reg_pooled = cc.get("horse_race_mean_loglik_drift")
         loglik_reg_within = cc.get("horse_race_mean_loglik_drift_within_image")
         loglik_reg = loglik_reg_pooled or loglik_reg_within
@@ -3687,6 +3952,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     note="Shows pooled OLS and within-image fixed-effects when available; outcome is mean correct-answer log-likelihood drift",
                     profile=profile,
                 ),
+            )
+            _plot_view_forest_from_payload(
+                cc,
+                "horse_race_mean_loglik_drift",
+                plots_dir / "exp1_coefficient_plot_loglik_drift_views.png",
+                title="Triple-View Coefficients: Log-Likelihood Drift",
+                note="Views separate primary semantic ladder, wordy mirror ladder, and pooled analysis",
+                experiment="1",
+                profile=profile,
             )
         for outcome_key, file_name, title, note in (
             (
@@ -3730,6 +4004,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     note=note,
                     profile=profile,
                 ),
+            )
+            _plot_view_forest_from_payload(
+                cc,
+                f"horse_race_{outcome_key}",
+                plots_dir / file_name.replace(".png", "_views.png"),
+                title=title.replace("Coefficient Plot", "Triple-View Coefficients"),
+                note=f"{note}; views separate primary, wordy, and pooled ladders",
+                experiment="1",
+                profile=profile,
             )
         for (
             _outcome_key,
@@ -4035,6 +4318,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             suppress_dc=suppress_dc,
         )
         _plot_exp2_group_bandwidth(exp2_summary, plots_dir / "exp2_group_bandwidth.png")
+        _plot_exp2_mean_gt_curves(exp2_summary, plots_dir / "exp2_mean_gt_curves.png")
         _plot_exp2_control_bandwidth(exp2_summary, plots_dir / "exp2_control_bandwidth.png")
         _plot_exp2_control_divergence(exp2_summary, plots_dir / "exp2_control_divergence.png")
         _plot_exp2_control_spectra(exp2_summary, plots_dir, suppress_dc=suppress_dc)
@@ -4067,6 +4351,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         note="Shows pooled OLS and within-image fixed-effects when available; outcome is effective bandwidth G(t)",
                         profile=profile,
                     ),
+                )
+                _plot_view_forest_from_payload(
+                    cc,
+                    "horse_race_bandwidth",
+                    plots_dir / "exp2_coefficient_plot_bandwidth_views.png",
+                    title="Triple-View Coefficients: Bandwidth",
+                    note="Separate bandwidth regressions for primary, wordy, and pooled level views",
+                    experiment="2",
+                    profile=profile,
                 )
         if exhaustive:
             _plot_exp2_level_band_heatmap(
@@ -4268,6 +4561,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     profile=profile,
                 ),
             )
+            _plot_view_forest_from_payload(
+                cc,
+                "horse_race_mean_post_drift_all",
+                plots_dir / "exp3_coefficient_plot_post_drift_all_views.png",
+                title="Triple-View Coefficients: Post-Fusion Drift",
+                note="Separate regressions for primary, wordy, and pooled level views",
+                experiment="3",
+                profile=profile,
+            )
             if post_reg_within or post_reg_pooled:
                 plot_dual_force_bars(
                     post_reg_within or post_reg_pooled,
@@ -4307,6 +4609,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     note="Shows pooled OLS and within-image fixed-effects when available; outcome is mean response amplification",
                     profile=profile,
                 ),
+            )
+            _plot_view_forest_from_payload(
+                cc,
+                "horse_race_mean_response_amplification",
+                plots_dir / "exp3_coefficient_plot_response_amplification_views.png",
+                title="Triple-View Coefficients: Response Amplification",
+                note="Separate regressions for primary, wordy, and pooled level views",
+                experiment="3",
+                profile=profile,
             )
     if exp3_samples:
         if exhaustive:
@@ -4458,6 +4769,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         profile=profile,
                     ),
                 )
+                _plot_view_forest_from_payload(
+                    mode_reg,
+                    "horse_race_critical_cutoff",
+                    plots_dir / f"exp4_coefficient_plot_{mode}_views.png",
+                    title=f"Triple-View Coefficients: Critical Cutoff ({mode})",
+                    note=f"Separate critical-cutoff regressions for primary, wordy, and pooled views under {mode}",
+                    experiment="4",
+                    profile=profile,
+                )
     if exp4_samples:
         _plot_exp4_sample_curves(
             exp4_samples,
@@ -4545,6 +4865,21 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 experiment="5",
                 what=f"Predicted overlap vs {exp5_primary_target_label} split by level",
                 aggregation="grouped by perturbation within each level",
+                x="predicted spectral overlap S_pred",
+                y=exp5_primary_target_label,
+                note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
+        )
+        plot_overlap_scatter_grid_by_view(
+            exp5_grouped,
+            plots_dir / "exp5_overlap_scatter_by_view.png",
+            title=f"Overlap vs {exp5_primary_target_label} by Level View ({_exp5_source_label('image_space')})",
+            y_label=exp5_primary_target_label,
+            metadata=_plot_metadata(
+                experiment="5",
+                what=f"Predicted overlap vs {exp5_primary_target_label} split into primary, wordy, and pooled views",
+                aggregation="grouped by level and perturbation",
                 x="predicted spectral overlap S_pred",
                 y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
@@ -4647,6 +4982,21 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
+        plot_overlap_scatter_grid_by_view(
+            exp5_vision_grouped,
+            plots_dir / "exp5_overlap_scatter_vision_by_view.png",
+            title=f"Overlap vs {exp5_primary_target_label} by Level View ({_exp5_source_label('vision_feature_space')})",
+            y_label=exp5_primary_target_label,
+            metadata=_plot_metadata(
+                experiment="5",
+                what=f"Predicted overlap vs {exp5_primary_target_label} split into primary, wordy, and pooled views",
+                aggregation="grouped by level and perturbation",
+                x="predicted spectral overlap S_pred",
+                y=exp5_primary_target_label,
+                note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
+                profile=profile,
+            ),
+        )
         _plot_exp5_level_perturbation_comparison(
             exp5_vision_grouped,
             plots_dir / "exp5_level_perturbation_predicted_vs_observed_vision.png",
@@ -4694,6 +5044,29 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             level_pairs=valid_wordy_pairs,
         )
     if exp5_summary:
+        factor_payload = exp5_summary.get("prediction_factor_horse_race", {})
+        factor_regression = (
+            factor_payload.get("grouped", {}).get("regression")
+            if isinstance(factor_payload, dict)
+            else None
+        )
+        if isinstance(factor_regression, dict) and factor_regression.get("predictors"):
+            plot_coefficient_forest(
+                factor_regression,
+                plots_dir / "exp5_coefficient_plot_prediction_factors.png",
+                title="Coefficient Plot: Prediction Factors for Accuracy Drop",
+                subtitle="Spectral overlap vs linguistic and MCQ controls",
+                primary_label="Grouped OLS",
+                metadata=_plot_metadata(
+                    experiment="5",
+                    what="Multivariate horse race predicting observed accuracy drop",
+                    aggregation="grouped by level and perturbation on the primary Exp 5 branch",
+                    x="standardized coefficient with 95% CI",
+                    y="predictor",
+                    note="Predictors are zscore(log1p(S_pred)), prompt load, and option hardness",
+                    profile=profile,
+                ),
+            )
         _plot_exp5_per_level_corr(exp5_summary, plots_dir / "exp5_per_level_correlation.png")
         _plot_exp5_group_correlation(exp5_summary, plots_dir / "exp5_group_correlation.png")
         _plot_exp5_target_correlation(exp5_summary, plots_dir / "exp5_target_correlation.png")
@@ -4860,6 +5233,21 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         profile=profile,
                     ),
                 )
+                plot_overlap_scatter_grid_by_view(
+                    grouped_pairs,
+                    plots_dir / f"exp5_overlap_scatter_by_view_{source_name}_{group_name}.png",
+                    title=f"Overlap vs {exp5_primary_target_label} by Level View ({_exp5_source_label(source_name)}, {group_name})",
+                    y_label=exp5_primary_target_label,
+                    metadata=_plot_metadata(
+                        experiment="5",
+                        what=f"Predicted overlap vs {exp5_primary_target_label} split into primary, wordy, and pooled views",
+                        aggregation="grouped by level and perturbation",
+                        x="predicted spectral overlap S_pred",
+                        y=exp5_primary_target_label,
+                        note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
+                        profile=profile,
+                    ),
+                )
                 _plot_exp5_heatmaps(
                     grouped_pairs,
                     plots_dir / f"exp5_grouped_heatmap_{source_name}_{group_name}.png",
@@ -4968,6 +5356,24 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                             experiment="5",
                             what=f"Predicted overlap vs {_exp5_target_label(target_name)} split by level",
                             aggregation="grouped by perturbation within each level",
+                            x="predicted spectral overlap S_pred",
+                            y=_exp5_target_label(target_name),
+                            note=_exp5_target_scale_note(source_name, primary_group, target_name),
+                            profile=profile,
+                        ),
+                    )
+                    plot_overlap_scatter_grid_by_view(
+                        grouped_pairs,
+                        plots_dir / f"exp5_overlap_scatter_by_view_{source_name}_{primary_group}_{target_name}.png",
+                        title=(
+                            f"Overlap vs {_exp5_target_label(target_name)} by Level View "
+                            f"({_exp5_source_label(source_name)}, {primary_group})"
+                        ),
+                        y_label=_exp5_target_label(target_name),
+                        metadata=_plot_metadata(
+                            experiment="5",
+                            what=f"Predicted overlap vs {_exp5_target_label(target_name)} split into primary, wordy, and pooled views",
+                            aggregation="grouped by level and perturbation",
                             x="predicted spectral overlap S_pred",
                             y=_exp5_target_label(target_name),
                             note=_exp5_target_scale_note(source_name, primary_group, target_name),

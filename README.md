@@ -4,11 +4,21 @@ Harness for testing visual-language model robustness to common image perturbatio
 
 ## Frequency Alignment Project
 
-The active research pipeline lives in `frequency_alignment/`. It tests the hypothesis that language conditioning acts as a task-specific spectral filter `W_t`, and that robustness depends on overlap between this filter and perturbation energy. The current implementation uses GQA same-image levels `L1-L4`, matched wordy controls `L5-L8`, residualized semantic-complexity regressions, prediction-entropy and option-hardness controls, paired mirror tests, directional log-likelihood drift metrics, Exp 3 post-fusion drift, and Exp 5 spectral-overlap prediction.
+The active research pipeline lives in `frequency_alignment/`. It tests the hypothesis that language conditioning acts as a task-specific spectral filter `W_t`, and that robustness depends on the overlap between this filter and perturbation energy. The current implementation uses GQA same-image primary levels `L1-L4`, matched wordy mirrors `L5-L8`, residualized semantic-complexity regressions, prediction-entropy and option-hardness controls, paired mirror tests, directional log-likelihood drift metrics, Exp 3 all-token post-fusion drift, and Exp 5 spectral-overlap prediction with correct-answer log-likelihood volatility as the primary target.
+
+Current frequency-alignment details:
+- `L5-L8` are longer-than-base wordy mirrors of `L1-L4`; they are not padded to a fixed 60-word target.
+- Horse-race regressions use `complexity_score_residual` as the main semantic-logic variable, with prompt load, option hardness, clean accuracy, and clean prediction entropy used where appropriate as controls.
+- Aggregation now reports three analysis views where relevant: Primary (`L1-L4`), Wordy (`L5-L8`), and Pooled (`L1-L8`). Monotonicity tests are intentionally restricted to Primary and secondary Wordy ladders, not pooled.
+- Exp 2 computes `W_t` for `overall`, `early`, `mid`, and `late` layer groups, plus prompt-only controls.
+- Exp 5 treats the `late` layer group and relative-normalized image-space spectra as the main branch, while raw spectra, vision-feature spectra, and other layer groups remain controls.
+- Exp 5 also emits a prediction-factor horse race for observed accuracy drop: `zscore(log1p(S_pred))` vs prompt load vs option hardness.
 
 For the current scientific design and hypotheses, see `frequency_alignment/RESEARCH_PLAN_FREQUENCY_ALIGNMENT.md`.
 
 For commands, configs, outputs, and troubleshooting, see `frequency_alignment/experiment_run.md`.
+
+For implementation-level details, see `frequency_alignment/TECHNICAL_DOCUMENTATION.txt`.
 
 ## Features
 - Compare predictions across perturbations with MCQ log-likelihood scoring or free-text representations (`label`, `text`, `text_mcq`, `semantic` placeholder).

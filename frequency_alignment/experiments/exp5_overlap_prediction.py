@@ -10,7 +10,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..analysis.continuous import summarize_fixed_effects_trend, summarize_linear_trend
+from ..analysis.continuous import (
+    summarize_fixed_effects_trend,
+    summarize_linear_trend,
+    summarize_multivariate_regression,
+)
+from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.spectral import compute_spectral_overlap
 from ..analysis.statistics import bootstrap_ci, pearson_correlation, spearman_correlation
 from ..data.base import ALL_VQA_LEVEL_NAMES, ExperimentResult
@@ -119,6 +124,9 @@ def _build_overlap_pairs(
     grouped: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(
         lambda: {
             "predicted": [],
+            "complexity_score": [],
+            "prompt_complexity_score": [],
+            "option_hardness_score": [],
             "accuracy_drop": [],
             "loglik_drift": [],
             "loglik_erosion": [],
@@ -183,6 +191,9 @@ def _build_overlap_pairs(
 
                 key = (level_key, pair["perturbation"])
                 grouped[key]["predicted"].append(predicted)
+                grouped[key]["complexity_score"].append(complexity_score)
+                grouped[key]["prompt_complexity_score"].append(prompt_complexity_score)
+                grouped[key]["option_hardness_score"].append(option_hardness_score)
                 grouped[key]["accuracy_drop"].append(accuracy_drop)
                 grouped[key]["loglik_drift"].append(loglik_drift)
                 grouped[key]["loglik_erosion"].append(loglik_erosion)
@@ -209,6 +220,9 @@ def _build_overlap_pairs(
                 "level": level_key,
                 "perturbation": perturbation,
                 "predicted": float(np.mean(values["predicted"])),
+                "complexity_score": float(np.mean(values["complexity_score"])),
+                "prompt_complexity_score": float(np.mean(values["prompt_complexity_score"])),
+                "option_hardness_score": float(np.mean(values["option_hardness_score"])),
                 "actual": float(np.mean(values["accuracy_drop"])),
                 "accuracy_drop": float(np.mean(values["accuracy_drop"])),
                 "loglik_erosion": float(np.mean(values["loglik_erosion"])),
@@ -260,6 +274,47 @@ def _correlate(
     predicted = np.asarray([pair["predicted"] for pair in pairs], dtype=np.float64)
     actual = np.asarray([pair[actual_key] for pair in pairs], dtype=np.float64)
     return predicted, actual
+
+
+def _filter_pairs_by_level_view(
+    pairs: List[Dict[str, Any]],
+    view_name: str,
+) -> List[Dict[str, Any]]:
+    level_filter = LEVEL_VIEWS[view_name]
+    if level_filter is None:
+        return list(pairs)
+    return [pair for pair in pairs if str(pair.get("level")) in level_filter]
+
+
+def _grouped_view_correlation_summary(
+    pairs: List[Dict[str, Any]],
+    view_name: str,
+) -> Dict[str, Any]:
+    view_pairs = _filter_pairs_by_level_view(pairs, view_name)
+    if len(view_pairs) < 3:
+        return {
+            "view": view_name,
+            "level_filter": sorted(LEVEL_VIEWS[view_name]) if LEVEL_VIEWS[view_name] is not None else None,
+            "n_grouped_pairs": len(view_pairs),
+            "pearson_r_grouped": 0.0,
+            "pearson_p_grouped": 1.0,
+            "spearman_rho_grouped": 0.0,
+            "spearman_p_grouped": 1.0,
+            "passed": False,
+        }
+    pred_arr, actual_arr = _correlate(view_pairs)
+    r_pearson, p_pearson = pearson_correlation(pred_arr, actual_arr)
+    rho_spearman, p_spearman = spearman_correlation(pred_arr, actual_arr)
+    return {
+        "view": view_name,
+        "level_filter": sorted(LEVEL_VIEWS[view_name]) if LEVEL_VIEWS[view_name] is not None else None,
+        "n_grouped_pairs": len(view_pairs),
+        "pearson_r_grouped": r_pearson,
+        "pearson_p_grouped": p_pearson,
+        "spearman_rho_grouped": rho_spearman,
+        "spearman_p_grouped": p_spearman,
+        "passed": r_pearson > 0.7,
+    }
 
 
 def _zscore_array(values: np.ndarray) -> Tuple[np.ndarray, float, float]:
@@ -353,6 +408,77 @@ def _attach_prediction_error(
     return annotated, {"slope": float(slope), "intercept": float(intercept)}
 
 
+def _summarize_prediction_factor_horse_race(
+    pairs: List[Dict[str, Any]],
+    *,
+    y_key: str = "accuracy_drop",
+) -> Dict[str, Any]:
+    """Horse race: spectral overlap vs language/MCQ controls."""
+
+    rows: List[Dict[str, Any]] = []
+    raw_predicted: List[float] = []
+    candidates: List[Dict[str, Any]] = []
+    for pair in pairs:
+        y_val = pair.get(y_key)
+        predicted = pair.get("predicted")
+        prompt = pair.get("prompt_complexity_score")
+        hardness = pair.get("option_hardness_score")
+        if y_val is None or predicted is None or prompt is None or hardness is None:
+            continue
+        try:
+            y_float = float(y_val)
+            pred_float = float(predicted)
+            prompt_float = float(prompt)
+            hardness_float = float(hardness)
+        except (TypeError, ValueError):
+            continue
+        if not all(np.isfinite(v) for v in (y_float, pred_float, prompt_float, hardness_float)):
+            continue
+        candidates.append(
+            {
+                "level": pair.get("level"),
+                y_key: y_float,
+                "predicted_overlap_log1p_z": pred_float,
+                "prompt_complexity_score": prompt_float,
+                "option_hardness_score": hardness_float,
+            }
+        )
+        raw_predicted.append(pred_float)
+
+    if candidates:
+        pred_log = np.log1p(np.clip(np.asarray(raw_predicted, dtype=np.float64), 0.0, None))
+        pred_z, pred_mean, pred_std = _zscore_array(pred_log)
+        for row, z_value in zip(candidates, pred_z):
+            row["predicted_overlap_log1p_z"] = float(z_value)
+            rows.append(row)
+    else:
+        pred_mean = pred_std = 0.0
+
+    regression = summarize_multivariate_regression(
+        rows,
+        y_key=y_key,
+        x_keys=[
+            "predicted_overlap_log1p_z",
+            "prompt_complexity_score",
+            "option_hardness_score",
+        ],
+    )
+    return {
+        "description": "Multivariate horse race for observed accuracy drop: spectral overlap vs prompt load and option hardness.",
+        "outcome": y_key,
+        "predictors": [
+            "predicted_overlap_log1p_z",
+            "prompt_complexity_score",
+            "option_hardness_score",
+        ],
+        "prediction_transform": "zscore(log1p(predicted_overlap))",
+        "n_candidate_rows": len(rows),
+        "predicted_log1p_mean": float(pred_mean),
+        "predicted_log1p_std": float(pred_std),
+        "regression": regression,
+    }
+
+
 def _summarize_target(
     sample_pairs: List[Dict[str, Any]],
     grouped_pairs: List[Dict[str, Any]],
@@ -368,6 +494,10 @@ def _summarize_target(
     pred_arr, actual_arr = _correlate(grouped_target_pairs)
     r_pearson, p_pearson = pearson_correlation(pred_arr, actual_arr)
     rho_spearman, p_spearman = spearman_correlation(pred_arr, actual_arr)
+    grouped_view_summaries = {
+        view_name: _grouped_view_correlation_summary(grouped_target_pairs, view_name)
+        for view_name in LEVEL_VIEW_ORDER
+    }
 
     sample_target_pairs: List[Dict[str, Any]] = []
     sample_error_model = None
@@ -407,7 +537,17 @@ def _summarize_target(
             "p_value": p_spearman,
             "passed": rho_spearman > 0.6,
         },
+        "pearson_predicted_vs_actual_grouped_views": grouped_view_summaries,
     }
+    for view_name, view_summary in grouped_view_summaries.items():
+        tests[f"pearson_predicted_vs_actual_grouped_{view_name}"] = {
+            "r": view_summary["pearson_r_grouped"],
+            "p_value": view_summary["pearson_p_grouped"],
+            "n": view_summary["n_grouped_pairs"],
+            "target": "r > 0.7",
+            "passed": view_summary["passed"],
+            "level_filter": view_summary["level_filter"],
+        }
     if sample_r is not None:
         tests["pearson_predicted_vs_actual_sample"] = {
             "r": sample_r,
@@ -480,6 +620,13 @@ def _summarize_target(
         "spearman_rho_grouped": rho_spearman,
         "pearson_r_sample": sample_r,
         "per_level_correlation": per_level_corr,
+        "grouped_views": grouped_view_summaries,
+        "grouped_primary": grouped_view_summaries["primary"],
+        "grouped_wordy": grouped_view_summaries["wordy"],
+        "grouped_pooled": grouped_view_summaries["pooled"],
+        "pearson_r_grouped_primary": grouped_view_summaries["primary"]["pearson_r_grouped"],
+        "pearson_r_grouped_wordy": grouped_view_summaries["wordy"]["pearson_r_grouped"],
+        "pearson_r_grouped_pooled": grouped_view_summaries["pooled"]["pearson_r_grouped"],
         "sample_metric_available": sample_r is not None,
         "comparable_bridge_grouped": grouped_bridge,
         "comparable_bridge_sample": sample_bridge,
@@ -490,6 +637,9 @@ def _summarize_target(
         "n_grouped_pairs": len(grouped_target_pairs),
         "n_sample_pairs": len(sample_target_pairs),
         "pearson_r_grouped": r_pearson,
+        "pearson_r_grouped_primary": grouped_view_summaries["primary"]["pearson_r_grouped"],
+        "pearson_r_grouped_wordy": grouped_view_summaries["wordy"]["pearson_r_grouped"],
+        "pearson_r_grouped_pooled": grouped_view_summaries["pooled"]["pearson_r_grouped"],
         "pearson_p_grouped": p_pearson,
         "spearman_rho_grouped": rho_spearman,
         "spearman_p_grouped": p_spearman,
@@ -566,10 +716,22 @@ def run_exp5(
             if not target_analyses:
                 continue
 
+            prediction_factor_horse_race = {
+                "grouped": _summarize_prediction_factor_horse_race(
+                    grouped_pairs,
+                    y_key="accuracy_drop",
+                ),
+                "sample": _summarize_prediction_factor_horse_race(
+                    sample_pairs,
+                    y_key="accuracy_drop",
+                ),
+            }
+
             source_analyses[group_name] = {
                 "raw_sample_pairs": sample_pairs,
                 "raw_grouped_pairs": grouped_pairs,
                 "target_analyses": target_analyses,
+                "prediction_factor_horse_race": prediction_factor_horse_race,
             }
         if source_analyses:
             analyses[source_name] = source_analyses
@@ -659,7 +821,10 @@ def run_exp5(
             "group_summaries": {},
             "group_target_summaries": {},
             "grouped_pearson_by_group": {},
+            "grouped_pearson_views_by_group": {},
             "target_grouped_pearson_by_group": {target_name: {} for target_name in TARGET_ORDER},
+            "target_grouped_pearson_views_by_group": {target_name: {} for target_name in TARGET_ORDER},
+            "prediction_factor_horse_races": {},
         }
         source_tests: Dict[str, Any] = {
             "analysis_groups": list(FILTER_ANALYSIS_ORDER),
@@ -671,6 +836,7 @@ def run_exp5(
             "control_groups": control_groups,
             "group_tests": {},
             "group_target_tests": {},
+            "prediction_factor_horse_races": {},
         }
         scatter_payload[source_name] = {}
         sample_scatter_payload[source_name] = {}
@@ -701,6 +867,9 @@ def run_exp5(
                 source_summary["target_grouped_pearson_by_group"][target_name][group_name] = (
                     target_analysis["summary"]["pearson_r_grouped"]
                 )
+                source_summary["target_grouped_pearson_views_by_group"][target_name][group_name] = (
+                    target_analysis["summary"].get("grouped_views", {})
+                )
 
             accuracy_analysis = analysis["target_analyses"].get(PRIMARY_TARGET)
             if accuracy_analysis is None:
@@ -709,9 +878,18 @@ def run_exp5(
             source_summary["group_summaries"][group_name] = accuracy_analysis["summary"]
             source_summary["group_target_summaries"][group_name] = group_target_summaries
             source_summary["grouped_pearson_by_group"][group_name] = accuracy_analysis["summary"]["pearson_r_grouped"]
+            source_summary["grouped_pearson_views_by_group"][group_name] = accuracy_analysis["summary"].get("grouped_views", {})
+            source_summary["prediction_factor_horse_races"][group_name] = analysis.get(
+                "prediction_factor_horse_race",
+                {},
+            )
 
             source_tests["group_tests"][group_name] = accuracy_analysis["tests"]
             source_tests["group_target_tests"][group_name] = group_target_tests
+            source_tests["prediction_factor_horse_races"][group_name] = analysis.get(
+                "prediction_factor_horse_race",
+                {},
+            )
 
             scatter_payload[source_name][group_name] = accuracy_analysis["grouped_pairs"]
             sample_scatter_payload[source_name][group_name] = accuracy_analysis["sample_pairs"]
@@ -721,11 +899,19 @@ def run_exp5(
         primary_accuracy = primary_target_analyses.get(PRIMARY_TARGET) or next(iter(primary_target_analyses.values()))
 
         source_summary["primary_group_summary"] = primary_accuracy["summary"]
+        source_summary["primary_prediction_factor_horse_race"] = primary_group_analysis.get(
+            "prediction_factor_horse_race",
+            {},
+        )
         source_summary["primary_group_target_summaries"] = {
             target_name: analysis["summary"]
             for target_name, analysis in primary_target_analyses.items()
         }
         source_tests["primary_group_tests"] = primary_accuracy["tests"]
+        source_tests["primary_prediction_factor_horse_race"] = primary_group_analysis.get(
+            "prediction_factor_horse_race",
+            {},
+        )
         source_tests["primary_group_target_tests"] = {
             target_name: analysis["tests"]
             for target_name, analysis in primary_target_analyses.items()
@@ -749,7 +935,15 @@ def run_exp5(
         or next(iter(primary_group_analysis["target_analyses"].values()))
     )
     summary_payload.update(primary_target_analysis["summary"])
+    summary_payload["prediction_factor_horse_race"] = primary_group_analysis.get(
+        "prediction_factor_horse_race",
+        {},
+    )
     tests_payload.update(primary_target_analysis["tests"])
+    tests_payload["prediction_factor_horse_race"] = primary_group_analysis.get(
+        "prediction_factor_horse_race",
+        {},
+    )
     tests_payload["hypothesis_supported"] = any(
         analyses[source_name].get(primary_group, next(iter(analyses[source_name].values())))["target_analyses"]
         .get(

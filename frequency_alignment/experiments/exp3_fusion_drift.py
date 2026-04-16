@@ -38,6 +38,7 @@ from ..analysis.continuous import (
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
+from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.drift import (
     compute_band_drift,
     compute_scalar_drift,
@@ -291,6 +292,7 @@ def _controlled_correlation_payload(
     analysis_group: str,
     *,
     level: Optional[str] = None,
+    level_filter: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     raw_x: List[float] = []
     raw_y: List[float] = []
@@ -301,6 +303,8 @@ def _controlled_correlation_payload(
 
     for obs in observations:
         if level is not None and obs["level"] != level:
+            continue
+        if level_filter is not None and str(obs.get("level")) not in level_filter:
             continue
         overlap = obs["overlap_scores"].get(analysis_group)
         response = obs.get("post_drift_scalar_all")
@@ -331,6 +335,7 @@ def _controlled_correlation_payload(
         "controlled_r": controlled_r,
         "controlled_p_value": controlled_p,
         "controlled_n": len(centered_x),
+        "level_filter": sorted(level_filter) if level_filter is not None else None,
         "num_profile_groups_used": groups_used,
         "target": "controlled_r > 0.6",
         "passed": controlled_r > 0.6,
@@ -845,14 +850,29 @@ def run_exp3(
             "num_groups": len(profile_group_summary),
         },
         "pearson_post_response_vs_overlap_by_group": {},
+        "pearson_post_response_vs_overlap_by_group_views": {},
+        "pearson_post_response_vs_overlap_grouped_primary": {},
+        "pearson_post_response_vs_overlap_grouped_wordy": {},
+        "pearson_post_response_vs_overlap_grouped_pooled": {},
         "pearson_post_response_vs_overlap_by_level": {},
     }
 
     for group_name in FILTER_ANALYSIS_ORDER:
-        tests["pearson_post_response_vs_overlap_by_group"][group_name] = _controlled_correlation_payload(
+        pooled_payload = _controlled_correlation_payload(
             observations,
             group_name,
         )
+        tests["pearson_post_response_vs_overlap_by_group"][group_name] = pooled_payload
+        view_payload: Dict[str, Any] = {}
+        for view_name in LEVEL_VIEW_ORDER:
+            view_result = _controlled_correlation_payload(
+                observations,
+                group_name,
+                level_filter=LEVEL_VIEWS[view_name],
+            )
+            view_payload[view_name] = view_result
+            tests[f"pearson_post_response_vs_overlap_grouped_{view_name}"][group_name] = view_result
+        tests["pearson_post_response_vs_overlap_by_group_views"][group_name] = view_payload
 
     for level_key in present_levels:
         tests["pearson_post_response_vs_overlap_by_level"][level_key] = {}
@@ -869,6 +889,20 @@ def run_exp3(
             "p_value": p,
             "passed": rho > 0.6,
             "values": dict(zip(primary_present_levels, post_values)),
+        }
+
+    wordy_present_levels = [
+        level for level in present_levels if level in (LEVEL_VIEWS["wordy"] or set())
+    ]
+    if len(wordy_present_levels) >= 2:
+        post_values = [agg["per_level"][level_key]["mean_post_drift_all"] for level_key in wordy_present_levels]
+        rho, p = spearman_correlation(range(1, len(post_values) + 1), post_values)
+        tests["spearman_post_drift_all_vs_granularity_wordy"] = {
+            "rho": rho,
+            "p_value": p,
+            "passed": rho > 0.6,
+            "values": dict(zip(wordy_present_levels, post_values)),
+            "target": "secondary wordy-ladder monotonicity only; no pooled monotonicity is run",
         }
 
     for group_name in FILTER_ANALYSIS_ORDER:
@@ -968,6 +1002,49 @@ def run_exp3(
                 demean_by_group=True,
             ),
         }
+        for base_key, value_key in (
+            ("horse_race_mean_post_drift_all", "mean_post_drift_all"),
+            ("horse_race_mean_response_amplification", "mean_response_amplification"),
+        ):
+            view_payload: Dict[str, Any] = {}
+            for view_name in LEVEL_VIEW_ORDER:
+                level_filter = LEVEL_VIEWS[view_name]
+                view_points = (
+                    complexity_points
+                    if level_filter is None
+                    else [point for point in complexity_points if str(point.get("level")) in level_filter]
+                )
+                pooled = summarize_multivariate_regression(
+                    view_points,
+                    y_key=value_key,
+                    x_keys=[
+                        "complexity_score_residual",
+                        "prompt_complexity_score",
+                        "option_hardness_score",
+                    ],
+                    level_filter=level_filter,
+                )
+                within = summarize_multivariate_regression(
+                    view_points,
+                    y_key=value_key,
+                    x_keys=[
+                        "complexity_score_residual",
+                        "prompt_complexity_score",
+                        "option_hardness_score",
+                    ],
+                    group_key="image_id",
+                    demean_by_group=True,
+                    level_filter=level_filter,
+                )
+                tests["continuous_complexity"][f"{base_key}_{view_name}"] = pooled
+                tests["continuous_complexity"][f"{base_key}_within_image_{view_name}"] = within
+                view_payload[view_name] = {
+                    "level_filter": sorted(level_filter) if level_filter is not None else None,
+                    "n_points": len(view_points),
+                    "pooled": pooled,
+                    "within_image": within,
+                }
+            tests["continuous_complexity"][f"{base_key}_views"] = view_payload
 
     logger.info("-" * 40)
     for level_key in present_levels:

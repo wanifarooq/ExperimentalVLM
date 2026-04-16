@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 import numpy as np
 from scipy import stats
@@ -373,10 +373,22 @@ def summarize_multivariate_regression(
     x_keys: Sequence[str],
     group_key: str | None = None,
     demean_by_group: bool = False,
+    level_filter: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """OLS summary for pooled or within-group demeaned regression."""
 
-    rows = _collect_rows(points, x_keys=x_keys, y_key=y_key, group_key=group_key if demean_by_group else None)
+    filtered_points: Sequence[Dict[str, Any]]
+    if level_filter is None:
+        filtered_points = points
+    else:
+        filtered_points = [point for point in points if str(point.get("level")) in level_filter]
+
+    rows = _collect_rows(
+        filtered_points,
+        x_keys=x_keys,
+        y_key=y_key,
+        group_key=group_key if demean_by_group else None,
+    )
     if demean_by_group:
         grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for row in rows:
@@ -402,6 +414,7 @@ def summarize_multivariate_regression(
             "mode": "within_image_fixed_effects" if demean_by_group else "pooled_ols",
             "y_key": y_key,
             "x_keys": list(x_keys),
+            "level_filter": sorted(level_filter) if level_filter is not None else None,
             "n": len(rows),
             "r_squared": 0.0,
             "adjusted_r_squared": 0.0,
@@ -462,6 +475,7 @@ def summarize_multivariate_regression(
         "mode": "within_image_fixed_effects" if demean_by_group else "pooled_ols",
         "y_key": y_key,
         "x_keys": list(x_keys),
+        "level_filter": sorted(level_filter) if level_filter is not None else None,
         "n": int(len(rows)),
         "rank": rank,
         "degrees_of_freedom": int(dof),

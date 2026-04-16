@@ -2,7 +2,7 @@
 
 ## Building on: "Same Answer, Different Representations" (Paper 1)
 
-## Implementation Status (April 13, 2026)
+## Implementation Status (April 15, 2026)
 
 This file mixes long-horizon research goals with the current implementation. The code in `frequency_alignment/` now concretely implements the main pipeline on `GQA` for experiments `1-5` and `PartImageNet` for experiment `6`, with the authoritative operational behavior documented in `frequency_alignment/experiment_run.md`.
 
@@ -18,6 +18,7 @@ Implementation clarifications that supersede older references below:
 - Experiment 1 stores signed and directional correct-answer log-likelihood metrics: `loglik_drift`, `loglik_erosion`, `loglik_recovery`, and `loglik_volatility`.
 - Experiments `1`, `2`, `3`, `4`, and `5` now keep discrete level labels but also attach a continuous semantic complexity score based on a structured semantic program plus a grounding-ambiguity term. Prompt/load complexity and MCQ option hardness are tracked separately as controls.
 - Horse-race regressions use residualized semantic logic (`complexity_score_residual`) as the main logic variable, where semantic complexity is residualized against prompt load.
+- Regression and grouped-correlation reporting now uses three views: Primary (`L1-L4`), Wordy (`L5-L8`), and Pooled (`L1-L8`). Legacy unsuffixed keys remain for compatibility.
 - Accuracy-drop horse races are gated to clean-correct points only. This tests fragility of existing knowledge rather than mixing in already-wrong questions.
 - Experiment 1 now includes clean-image prediction entropy as an additional horse-race control, separating spectral fragility from flat/confused MCQ score distributions.
 - Experiment 1 also runs paired mirror tests comparing each primary level against its wordy counterpart (`L1/L5`, `L2/L6`, `L3/L7`, `L4/L8`) and plots the linguistic stabilization effect as base-minus-wordy drift/drop.
@@ -25,10 +26,11 @@ Implementation clarifications that supersede older references below:
 - Experiment 2 does not rely on a named encoder-decoder cross-attention block. It derives the effective language-to-vision attention map from the self-attention slice, supports optional FFT windowing before the 2D FFT, and computes `W_t` separately for `overall`, `early`, `mid`, and `late` layer groups. The current configs default this windowing to `none`.
 - Experiment 2 also includes prompt-only controls (`empty_language`, `random_language`) so task-conditioned filters can be compared against semantically weak prompts.
 - Experiment 3 now uses a late decoder hidden state as the default post-fusion representation, treats pre-fusion band drift as the controlled perturbation input, and measures the task-conditioned post-fusion response with an all-token scalar drift. It then tests whether that response follows the overlap between `W_t` and the pre-fusion drift profile for `overall`, `early`, `mid`, and `late`, with `late` treated as the main post-fusion comparison.
-- Experiment 5 now runs overlap prediction on both image-space and vision-feature perturbation spectra, keeps both raw and relative normalization branches, and evaluates multiple targets: `accuracy_drop`, `loglik_erosion`, `loglik_volatility`, `net_drop`, and grouped `relative_accuracy_drop`.
+- Experiment 5 now runs overlap prediction on both image-space and vision-feature perturbation spectra, keeps both raw and relative normalization branches, and evaluates multiple targets: `accuracy_drop`, `loglik_erosion`, `loglik_volatility`, `net_drop`, and grouped `relative_accuracy_drop`. The primary paper target is `loglik_volatility`, with accuracy-based targets retained as controls.
 - Experiment 5 also keeps a standardized "comparable bridge" analysis in parallel with the raw overlap results: the prediction is transformed with `log1p` and both prediction and observed target are z-scored so effect sizes can be compared on a common scale. This does not replace the raw overlap metrics; it complements them.
 - Spectral binning is adaptive by default: the runner probes the model patch grid, resolves one linear radial bin count for the run, and freezes it so all spectra remain aligned. DC suppression and log-scale plotting are config/visualization choices, not fixed theory assumptions.
 - Complexity scatter plots use residualized semantic logic on the x-axis when available, so wordy controls do not visually collapse the semantic trend.
+- Monotonicity and Spearman granularity tests stay on the primary ladder, with secondary wordy-ladder checks where available. Pooled monotonicity is intentionally not reported because it would conflate semantic and prompt-load interventions.
 - Perturbation overlays are label-free by default so text, random text, and box overlays are nuisance perturbations shared across levels rather than answer-conditioned interventions.
 - GQA dataset construction now uses early stopping and a local granularity cache so repeated runs do not rebuild the same sample list from scratch.
 - Experiment 6 now evaluates clean and perturbed `mIoU` against GT PartImageNet masks and uses GT boxes for the SAM2 control.
@@ -389,13 +391,16 @@ For segmentation variant:
    - `loglik_volatility`
    - `net_drop = (N_CI - N_IC) / N_total`
    - grouped `relative_accuracy_drop = (Acc_clean - Acc_pert) / max(Acc_clean, ε)`
-6. Compute both grouped correlations over `(level, perturbation)` pairs and raw per-sample correlations.
-7. Generate level-wise and level-by-perturbation predicted-vs-observed plots. These use separate axes for predicted overlap and observed behavior when their scales differ.
-8. Generate wordy-control comparison plots for predicted sensitivity and observed targets.
+6. Treat `loglik_volatility` as the primary target because it captures confidence motion even when the discrete answer does not flip. Accuracy-based targets remain controls.
+7. Compute both grouped correlations over `(level, perturbation)` pairs and raw per-sample correlations.
+8. Run a multivariate prediction-factor horse race for observed `accuracy_drop`: `accuracy_drop ~ zscore(log1p(S_pred)) + prompt_load + option_hardness`.
+9. Generate level-wise and level-by-perturbation predicted-vs-observed plots. These use separate axes for predicted overlap and observed behavior when their scales differ.
+10. Generate wordy-control comparison plots for predicted sensitivity and observed targets.
 
 **Expected Result**:
-- Strong positive grouped correlation between predicted and actual sensitivity, with the cleanest signal typically appearing on the `late` branch
-- `loglik_erosion` should often be at least as informative as binary `accuracy_drop`, because perturbations can weaken the correct answer before they flip the final prediction
+- Strong positive grouped correlation between predicted overlap and correct-answer log-likelihood volatility, with the cleanest signal typically appearing on the `late` branch
+- `loglik_volatility` is the headline target because the theory predicts internal signal motion under perturbation whether that motion is erosion or recovery; `loglik_erosion` and binary `accuracy_drop` remain important controls
+- The prediction-factor horse race should show the standardized spectral-overlap coefficient as the strongest independent predictor of accuracy failure after prompt-load and option-hardness controls
 - Relative-normalization should make cross-image comparisons more stable without eliminating the raw-overlap control view
 - Prediction error and predicted sensitivity should have interpretable continuous relationships with semantic complexity if the spectral-overlap theory captures task-specific vulnerability.
 
@@ -584,8 +589,8 @@ For segmentation variant:
 - Combine `W_t(ω)` from Experiment 2 with image-space and vision-feature perturbation spectra from Experiment 1
 - Run both raw and relative-normalized overlap calculations
 - Compute predicted sensitivity for `overall`, `early`, `mid`, and `late` filter groups
-- Correlate the predictions with `accuracy_drop`, `loglik_erosion`, `loglik_volatility`, `net_drop`, and grouped `relative_accuracy_drop`
-- Treat the `late` branch as the main test and the others as controls
+- Correlate the predictions with `loglik_volatility` as the primary target and with `accuracy_drop`, `loglik_erosion`, `net_drop`, and grouped `relative_accuracy_drop` as controls
+- Treat the `late` branch as the main layer-group test and the others as controls
 - Target: grouped Pearson `r > 0.7` on the primary branch, with consistent positive controls
 
 **Step 3.2: Generalization Check** (Week 10)

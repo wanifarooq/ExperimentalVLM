@@ -2,6 +2,8 @@
 
 End-to-end robustness harness for comparing SAM2 (vision-only, PVS) and SAM3 (vision-language, PCS/PVS) under matched natural and frequency-targeted perturbations. The driver applies identical geometric transforms to images, masks, and visual prompts, then evaluates mask quality, grounding, and video stability metrics.
 
+Current project status: this directory remains the standalone segmentation robustness harness. The active frequency-alignment project integrates segmentation as optional Exp 6 under `frequency_alignment/`, where PartImageNet GT masks are used for clean and perturbed mIoU and SAM2 acts as the vision-only control. See `../frequency_alignment/experiment_run.md` and `../frequency_alignment/TECHNICAL_DOCUMENTATION.txt` for the current Exp 6 integration details.
+
 ## What this runs
 - SAM2 (PVS): visual prompts (boxes/points) -> masks.
 - SAM3 (PCS/PVS): text prompts (and optional exemplars) -> instance masks.
