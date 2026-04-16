@@ -35,6 +35,7 @@ from ..analysis.continuous import (
     attach_complexity_residual,
     summarize_by_score,
     summarize_fixed_effects_trend,
+    summarize_horse_race_view,
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
@@ -965,7 +966,7 @@ def run_exp3(
                 complexity_points,
                 y_key="mean_post_drift_all",
                 x_keys=[
-                    "complexity_score_residual",
+                    "question_complexity_score",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -974,7 +975,7 @@ def run_exp3(
                 complexity_points,
                 y_key="mean_post_drift_all",
                 x_keys=[
-                    "complexity_score_residual",
+                    "question_complexity_score",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -985,7 +986,7 @@ def run_exp3(
                 complexity_points,
                 y_key="mean_response_amplification",
                 x_keys=[
-                    "complexity_score_residual",
+                    "question_complexity_score",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -994,7 +995,7 @@ def run_exp3(
                 complexity_points,
                 y_key="mean_response_amplification",
                 x_keys=[
-                    "complexity_score_residual",
+                    "question_complexity_score",
                     "prompt_complexity_score",
                     "option_hardness_score",
                 ],
@@ -1014,36 +1015,27 @@ def run_exp3(
                     if level_filter is None
                     else [point for point in complexity_points if str(point.get("level")) in level_filter]
                 )
-                pooled = summarize_multivariate_regression(
+                view_entry = summarize_horse_race_view(
                     view_points,
                     y_key=value_key,
                     x_keys=[
-                        "complexity_score_residual",
+                        "question_complexity_score",
                         "prompt_complexity_score",
                         "option_hardness_score",
                     ],
-                    level_filter=level_filter,
+                    view_name=view_name,
+                    level_filter=None,
                 )
-                within = summarize_multivariate_regression(
-                    view_points,
-                    y_key=value_key,
-                    x_keys=[
-                        "complexity_score_residual",
-                        "prompt_complexity_score",
-                        "option_hardness_score",
-                    ],
-                    group_key="image_id",
-                    demean_by_group=True,
-                    level_filter=level_filter,
-                )
-                tests["continuous_complexity"][f"{base_key}_{view_name}"] = pooled
-                tests["continuous_complexity"][f"{base_key}_within_image_{view_name}"] = within
-                view_payload[view_name] = {
+                view_entry.update({
                     "level_filter": sorted(level_filter) if level_filter is not None else None,
                     "n_points": len(view_points),
-                    "pooled": pooled,
-                    "within_image": within,
-                }
+                })
+                view_payload[view_name] = view_entry
+                if view_name == "primary":
+                    tests["continuous_complexity"][f"{base_key}_{view_name}"] = view_entry["marginal"]
+                else:
+                    tests["continuous_complexity"][f"{base_key}_{view_name}"] = view_entry["pooled"]
+                    tests["continuous_complexity"][f"{base_key}_within_image_{view_name}"] = view_entry["within_image"]
             tests["continuous_complexity"][f"{base_key}_views"] = view_payload
 
     logger.info("-" * 40)

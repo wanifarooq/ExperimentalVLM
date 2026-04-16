@@ -65,7 +65,7 @@ from .complexity import (
 
 logger = logging.getLogger(__name__)
 
-_DATASET_CACHE_VERSION = "gqa_multilevel_v5"
+_DATASET_CACHE_VERSION = "gqa_multilevel_v6"
 _DATASET_MEMO: Dict[str, List[GranularitySample]] = {}
 _WORDY_MIN_EXTRA_PROMPT_CONTENT_WORDS = 12
 

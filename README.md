@@ -4,15 +4,16 @@ Harness for testing visual-language model robustness to common image perturbatio
 
 ## Frequency Alignment Project
 
-The active research pipeline lives in `frequency_alignment/`. It tests the hypothesis that language conditioning acts as a task-specific spectral filter `W_t`, and that robustness depends on the overlap between this filter and perturbation energy. The current implementation uses GQA same-image primary levels `L1-L4`, matched wordy mirrors `L5-L8`, residualized semantic-complexity regressions, prediction-entropy and option-hardness controls, paired mirror tests, directional log-likelihood drift metrics, Exp 3 all-token post-fusion drift, and Exp 5 spectral-overlap prediction with correct-answer log-likelihood volatility as the primary target.
+The active research pipeline lives in `frequency_alignment/`. It tests the hypothesis that language conditioning acts as a task-specific spectral filter `W_t`, and that robustness depends on the overlap between this filter and perturbation energy. The current implementation uses GQA same-image primary levels `L1-L4`, matched wordy mirrors `L5-L8`, question-only prompt-load controls, prediction-entropy and option-hardness controls, paired mirror tests, directional log-likelihood drift metrics, Exp 3 all-token post-fusion drift, and Exp 5 spectral-overlap prediction with correct-answer log-likelihood volatility as the primary target.
 
 Current frequency-alignment details:
 - `L5-L8` are longer-than-base wordy mirrors of `L1-L4`; they are not padded to a fixed 60-word target.
-- Horse-race regressions use `complexity_score_residual` as the main semantic-logic variable, with prompt load, option hardness, clean accuracy, and clean prediction entropy used where appropriate as controls.
-- Aggregation now reports three analysis views where relevant: Primary (`L1-L4`), Wordy (`L5-L8`), and Pooled (`L1-L8`). Monotonicity tests are intentionally restricted to Primary and secondary Wordy ladders, not pooled.
+- Primary (`L1-L4`) view reports marginal Pearson/Spearman, Kendall monotonicity, and VIF diagnostics instead of multivariate betas because raw semantic complexity and prompt load are highly collinear on the terse ladder.
+- Wordy (`L5-L8`) and Pooled (`L1-L8`) views keep full multivariate horse-race regressions using raw `question_complexity_score`, `prompt_complexity_score`, and `option_hardness_score`, plus prediction entropy where available.
+- `complexity_score_residual` is still computed for residualized scatter and dual-force diagnostic plots, and matching `_csem` plot copies are emitted against raw semantic complexity.
 - Exp 2 computes `W_t` for `overall`, `early`, `mid`, and `late` layer groups, plus prompt-only controls.
 - Exp 5 treats the `late` layer group and relative-normalized image-space spectra as the main branch, while raw spectra, vision-feature spectra, and other layer groups remain controls.
-- Exp 5 also emits a prediction-factor horse race for observed accuracy drop: `zscore(log1p(S_pred))` vs prompt load vs option hardness.
+- Exp 5 also emits prediction-factor summaries for observed accuracy drop: `zscore(log1p(S_pred))`, raw semantic complexity, prompt load, and option hardness, with the same primary-marginal vs wordy/pooled-regression split.
 
 For the current scientific design and hypotheses, see `frequency_alignment/RESEARCH_PLAN_FREQUENCY_ALIGNMENT.md`.
 

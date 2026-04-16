@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import matplotlib
 
@@ -15,6 +16,7 @@ import numpy as np
 
 from ..analysis.continuous import (
     attach_complexity_residual,
+    summarize_horse_race_view,
     summarize_multivariate_regression,
 )
 from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
@@ -68,6 +70,7 @@ _EXP5_TARGET_LABELS = {
 }
 _COEFFICIENT_LABELS = {
     "predicted_overlap_log1p_z": "Spectral Overlap\nz(log1p S_pred)",
+    "question_complexity_score": "Raw Semantic\nComplexity",
     "complexity_score": "Semantic Complexity",
     "complexity_score_residual": "Residualized\nSemantic Logic",
     "prompt_complexity_score": "Prompt Load",
@@ -77,6 +80,7 @@ _COEFFICIENT_LABELS = {
 }
 _COEFFICIENT_COLORS = {
     "predicted_overlap_log1p_z": "#d62728",
+    "question_complexity_score": "#2ca02c",
     "complexity_score": "#2ca02c",
     "complexity_score_residual": "#2ca02c",
     "prompt_complexity_score": "#7f7f7f",
@@ -87,6 +91,8 @@ _COEFFICIENT_COLORS = {
 _DEFAULT_PLOT_PROFILE = "exhaustive"
 _FULL_PLOT_PROFILES = {"full", "exhaustive", "all"}
 _PLOT_MANIFEST: List[Dict[str, Any]] = []
+_PRIMARY_L1_L4_SUBDIR = "primary_l1_l4"
+_PRIMARY_L1_L4_LEVELS = set(PRIMARY_VQA_LEVEL_NAMES)
 _DEFAULT_SUPPRESS_DC = True
 _LOG_FLOOR = 1e-10
 _DEFAULT_SPECTRAL_LOG_AXES = True
@@ -168,7 +174,7 @@ def _optional_float(value: Any) -> Optional[float]:
 
 def _horse_race_predictor_keys(points: Sequence[Dict[str, Any]]) -> List[str]:
     keys = [
-        "complexity_score_residual",
+        "question_complexity_score",
         "prompt_complexity_score",
         "option_hardness_score",
     ]
@@ -225,6 +231,10 @@ def _complexity_plot_note(x_key: str = "complexity_score_residual") -> str:
             + SEMANTIC_COMPLEXITY_SCORE_FORMULA
         )
     return "Semantic score = " + SEMANTIC_COMPLEXITY_SCORE_FORMULA
+
+
+def _csem_copy_path(out_path: Path) -> Path:
+    return out_path.with_name(f"{out_path.stem}_csem{out_path.suffix}")
 
 
 def _tight_layout(fig: plt.Figure, *, metadata_bottom: float = 0.08, top: float = 0.97) -> None:
@@ -452,6 +462,215 @@ def _write_plot_manifest(plots_dir: Path, profile: str) -> None:
         "plots": _PLOT_MANIFEST,
     }
     (plots_dir / "plot_manifest.json").write_text(json.dumps(manifest, indent=2))
+
+
+def _write_plot_manifest_entries(
+    plots_dir: Path,
+    profile: str,
+    entries: Sequence[Dict[str, Any]],
+) -> None:
+    manifest = {
+        "profile": profile,
+        "level_view": "primary_l1_l4",
+        "num_plots": len(entries),
+        "plots": list(entries),
+    }
+    (plots_dir / "plot_manifest.json").write_text(json.dumps(manifest, indent=2))
+
+
+def _clear_plot_outputs(plots_dir: Path) -> None:
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    for existing in plots_dir.glob("*.png"):
+        existing.unlink(missing_ok=True)
+    (plots_dir / "plot_manifest.json").unlink(missing_ok=True)
+
+
+def _primary_plot_metadata(
+    lines: Optional[Sequence[str]],
+) -> List[str]:
+    metadata = list(lines or [])
+    metadata.append("LevelView=primary_l1_l4")
+    metadata.append("LevelFilter=L1_COARSE,L2_MEDIUM,L3_FINE,L4_VERY_FINE")
+    return metadata
+
+
+def _filter_level_keyed_mapping(
+    mapping: Optional[Dict[str, Any]],
+    *,
+    level_filter: Set[str] = _PRIMARY_L1_L4_LEVELS,
+) -> Dict[str, Any]:
+    if not isinstance(mapping, dict):
+        return {}
+    return {
+        str(level): copy.deepcopy(value)
+        for level, value in mapping.items()
+        if str(level) in level_filter
+    }
+
+
+def _filter_summary_to_levels(
+    summary: Optional[Dict[str, Any]],
+    *,
+    level_filter: Set[str] = _PRIMARY_L1_L4_LEVELS,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(summary, dict):
+        return None
+    filtered = copy.deepcopy(summary)
+    if isinstance(filtered.get("per_level"), dict):
+        filtered["per_level"] = _filter_level_keyed_mapping(
+            filtered.get("per_level"),
+            level_filter=level_filter,
+        )
+    if isinstance(filtered.get("per_model"), dict):
+        for model_payload in filtered["per_model"].values():
+            if isinstance(model_payload, dict):
+                for key in ("per_level", "levels"):
+                    if isinstance(model_payload.get(key), dict):
+                        model_payload[key] = _filter_level_keyed_mapping(
+                            model_payload.get(key),
+                            level_filter=level_filter,
+                        )
+    return filtered
+
+
+def _filter_points_to_levels(
+    points: Optional[Sequence[Dict[str, Any]]],
+    *,
+    level_filter: Set[str] = _PRIMARY_L1_L4_LEVELS,
+) -> List[Dict[str, Any]]:
+    return [
+        copy.deepcopy(point)
+        for point in (points or [])
+        if str(point.get("level")) in level_filter
+    ]
+
+
+def _filter_records_to_levels(
+    records: Optional[Sequence[Dict[str, Any]]],
+    *,
+    level_filter: Set[str] = _PRIMARY_L1_L4_LEVELS,
+) -> List[Dict[str, Any]]:
+    filtered_records: List[Dict[str, Any]] = []
+    for record in records or []:
+        cloned = copy.deepcopy(record)
+        levels = cloned.get("levels")
+        if isinstance(levels, dict):
+            cloned["levels"] = _filter_level_keyed_mapping(levels, level_filter=level_filter)
+        if not isinstance(cloned.get("levels"), dict) or cloned["levels"]:
+            filtered_records.append(cloned)
+    return filtered_records
+
+
+def _filter_exp4_curves_to_levels(
+    curves: Optional[Dict[str, Any]],
+    *,
+    level_filter: Set[str] = _PRIMARY_L1_L4_LEVELS,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(curves, dict):
+        return None
+    filtered = copy.deepcopy(curves)
+    data = filtered.get("data")
+    if isinstance(data, dict):
+        for mode_data in data.values():
+            if isinstance(mode_data, dict):
+                keys_to_drop = [level for level in mode_data if str(level) not in level_filter]
+                for level in keys_to_drop:
+                    mode_data.pop(level, None)
+    return filtered
+
+
+def _filter_exp4_summary_to_levels(
+    summary: Optional[Dict[str, Any]],
+    *,
+    level_filter: Set[str] = _PRIMARY_L1_L4_LEVELS,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(summary, dict):
+        return None
+    filtered = copy.deepcopy(summary)
+    per_mode = filtered.get("per_mode")
+    if isinstance(per_mode, dict):
+        for mode_payload in per_mode.values():
+            if isinstance(mode_payload, dict):
+                keys_to_drop = [level for level in mode_payload if str(level) not in level_filter]
+                for level in keys_to_drop:
+                    mode_payload.pop(level, None)
+    return filtered
+
+
+def _filter_exp4_records_to_levels(
+    records: Optional[Sequence[Dict[str, Any]]],
+    *,
+    level_filter: Set[str] = _PRIMARY_L1_L4_LEVELS,
+) -> List[Dict[str, Any]]:
+    filtered_records: List[Dict[str, Any]] = []
+    for record in records or []:
+        cloned = copy.deepcopy(record)
+        modes = cloned.get("modes")
+        if isinstance(modes, dict):
+            for mode_data in modes.values():
+                levels = mode_data.get("levels") if isinstance(mode_data, dict) else None
+                if isinstance(levels, dict):
+                    mode_data["levels"] = _filter_level_keyed_mapping(
+                        levels,
+                        level_filter=level_filter,
+                    )
+        keep = any(
+            isinstance(mode_data, dict) and mode_data.get("levels")
+            for mode_data in (cloned.get("modes") or {}).values()
+        )
+        if keep:
+            filtered_records.append(cloned)
+    return filtered_records
+
+
+def _pearson_from_scatter_points(
+    points: Sequence[Dict[str, Any]],
+    *,
+    bridge: bool = False,
+) -> float:
+    if not points:
+        return 0.0
+    xs: List[float] = []
+    ys: List[float] = []
+    for point in points:
+        predicted = _optional_float(point.get("predicted"))
+        actual = _optional_float(point.get("actual"))
+        if predicted is None or actual is None:
+            continue
+        xs.append(float(predicted))
+        ys.append(float(actual))
+    if len(xs) < 2:
+        return 0.0
+    x_arr = np.asarray(xs, dtype=np.float64)
+    y_arr = np.asarray(ys, dtype=np.float64)
+    if bridge:
+        x_arr = np.log1p(np.clip(x_arr, 0.0, None))
+    if float(np.std(x_arr)) <= _LOG_FLOOR or float(np.std(y_arr)) <= _LOG_FLOOR:
+        return 0.0
+    return float(np.corrcoef(x_arr, y_arr)[0, 1])
+
+
+def _primary_view_regression(
+    payload: Dict[str, Any],
+    base_key: str,
+    *,
+    regression_mode: str = "pooled",
+) -> Optional[Dict[str, Any]]:
+    views = payload.get(f"{base_key}_views", {}) if isinstance(payload, dict) else {}
+    view_entry = views.get("primary", {}) if isinstance(views, dict) else {}
+    regression = (
+        view_entry.get("marginal")
+        if isinstance(view_entry, dict) and regression_mode == "pooled"
+        else view_entry.get(regression_mode) if isinstance(view_entry, dict) else None
+    )
+    if _predictor_payload(regression):
+        return regression
+
+    suffix = "_within_image_primary" if regression_mode == "within_image" else "_primary"
+    regression = payload.get(f"{base_key}{suffix}") if isinstance(payload, dict) else None
+    if _predictor_payload(regression):
+        return regression
+    return None
 
 
 def _sort_metric_rows(
@@ -1578,6 +1797,7 @@ def _plot_exp2_complexity_groups(
     points: Sequence[Dict[str, Any]],
     out_path: Path,
     profile: str = _DEFAULT_PLOT_PROFILE,
+    x_key: str = "complexity_score_residual",
 ) -> None:
     panels = [
         ("overall", "bandwidth", "Overall"),
@@ -1585,8 +1805,9 @@ def _plot_exp2_complexity_groups(
         ("mid", "bandwidth_mid", "Mid"),
         ("late", "bandwidth_late", "Late"),
     ]
-    x_key = "complexity_score_residual"
     if not any(_complexity_valid_points(points, x_key=x_key, y_key=y_key) for _, y_key, _ in panels):
+        if x_key == "complexity_score":
+            return
         x_key = "complexity_score"
     valid_panels = [
         (group_name, y_key, title)
@@ -1614,14 +1835,15 @@ def _plot_exp2_complexity_groups(
     handles, labels = axes_arr.ravel()[0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8)
-    fig.suptitle("Bandwidth vs Residualized Semantic Logic by Layer Group", fontsize=14, y=0.99)
+    x_label = _complexity_axis_label(x_key)
+    fig.suptitle(f"Bandwidth vs {x_label} by Layer Group", fontsize=14, y=0.99)
     _set_plot_metadata(
         fig,
         _plot_metadata(
             experiment="2",
-            what="Residualized semantic logic vs effective bandwidth",
+            what=f"{x_label} vs effective bandwidth",
             aggregation="per-image per-level points",
-            x=_complexity_axis_label(x_key).lower(),
+            x=x_label.lower(),
             y="effective bandwidth G(t)",
             note=(
                 "Black line is mean by exact score; dashed line is linear fit; "
@@ -1638,9 +1860,9 @@ def _plot_exp4_complexity_modes(
     points: Sequence[Dict[str, Any]],
     out_path: Path,
     profile: str = _DEFAULT_PLOT_PROFILE,
+    x_key: str = "complexity_score_residual",
 ) -> None:
     mode_order = ["lowpass", "highpass"]
-    x_key = "complexity_score_residual"
     if not any(
         _complexity_valid_points(
             [point for point in points if point.get("mode") == mode],
@@ -1649,6 +1871,8 @@ def _plot_exp4_complexity_modes(
         )
         for mode in mode_order
     ):
+        if x_key == "complexity_score":
+            return
         x_key = "complexity_score"
     valid_modes = [
         mode for mode in mode_order
@@ -1677,14 +1901,15 @@ def _plot_exp4_complexity_modes(
     handles, labels = axes_arr[0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=8, title="Series", title_fontsize=8)
-    fig.suptitle("Critical Cutoff vs Residualized Semantic Logic", fontsize=14, y=0.99)
+    x_label = _complexity_axis_label(x_key)
+    fig.suptitle(f"Critical Cutoff vs {x_label}", fontsize=14, y=0.99)
     _set_plot_metadata(
         fig,
         _plot_metadata(
             experiment="4",
-            what="Residualized semantic logic vs critical cutoff",
+            what=f"{x_label} vs critical cutoff",
             aggregation="per-image per-level points",
-            x=_complexity_axis_label(x_key).lower(),
+            x=x_label.lower(),
             y="critical cutoff",
             note=(
                 "Black line is mean by exact score; dashed line is linear fit; "
@@ -1710,6 +1935,46 @@ def _standardized_beta_and_ci(predictor_stats: Dict[str, Any]) -> Tuple[float, f
     return std_beta, std_beta - delta, std_beta + delta
 
 
+def _is_marginal_summary(regression: Optional[Dict[str, Any]]) -> bool:
+    return isinstance(regression, dict) and isinstance(regression.get("marginal_predictors"), dict)
+
+
+def _predictor_payload(regression: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(regression, dict):
+        return {}
+    if _is_marginal_summary(regression):
+        return regression.get("marginal_predictors", {})
+    return regression.get("predictors", {}) if isinstance(regression.get("predictors"), dict) else {}
+
+
+def _effect_and_ci(regression: Dict[str, Any], predictor_stats: Dict[str, Any]) -> Tuple[float, float, float]:
+    if _is_marginal_summary(regression):
+        center = float(predictor_stats.get("pearson_r", 0.0) or 0.0)
+        lower = float(predictor_stats.get("pearson_ci_95_lower", center) or center)
+        upper = float(predictor_stats.get("pearson_ci_95_upper", center) or center)
+        return center, lower, upper
+    return _standardized_beta_and_ci(predictor_stats)
+
+
+def _primary_marginal_footnote(view_payload: Dict[str, Any]) -> Optional[str]:
+    primary_entry = view_payload.get("primary", {}) if isinstance(view_payload, dict) else {}
+    marginal = primary_entry.get("marginal") if isinstance(primary_entry, dict) else None
+    if not isinstance(marginal, dict):
+        return None
+    vif = marginal.get("vif_diagnostic", {}) if isinstance(marginal.get("vif_diagnostic"), dict) else {}
+    collinearity = float(vif.get("collinearity_percent", 0.0) or 0.0)
+    if collinearity <= 0:
+        return (
+            "Primary L1-L4 marginal correlations; multivariate decomposition requires "
+            "the wordy-mirror design available in pooled/wordy views."
+        )
+    return (
+        f"Primary L1-L4 marginal correlations (Csem and Cprompt are {collinearity:.0f}% "
+        "collinear; multivariate decomposition requires the wordy-mirror design available "
+        "in pooled/wordy views)."
+    )
+
+
 def _regression_series(
     primary_label: str,
     primary_regression: Optional[Dict[str, Any]],
@@ -1717,24 +1982,36 @@ def _regression_series(
     comparison_regression: Optional[Dict[str, Any]] = None,
 ) -> List[Tuple[str, Dict[str, Any]]]:
     series: List[Tuple[str, Dict[str, Any]]] = []
-    if isinstance(primary_regression, dict) and primary_regression.get("predictors"):
+    if _predictor_payload(primary_regression):
         series.append((primary_label, primary_regression))
-    if comparison_label and isinstance(comparison_regression, dict) and comparison_regression.get("predictors"):
+    if comparison_label and _predictor_payload(comparison_regression):
         series.append((comparison_label, comparison_regression))
     return series
 
 
 def _collect_regression_series_from_payload_map(
     payload_map: Dict[str, Any],
+    *,
+    view_name: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     series: Dict[str, Dict[str, Any]] = {}
     for perturbation_name, payload in sorted(payload_map.items()):
         if not isinstance(payload, dict):
             continue
-        pooled = payload.get("pooled", {})
-        within = payload.get("within_image", {})
+        if view_name:
+            view_payload = payload.get("views", {}).get(view_name, {})
+            if view_name == "primary":
+                regression = view_payload.get("marginal", {}) if isinstance(view_payload, dict) else {}
+                if _predictor_payload(regression):
+                    series[perturbation_name] = regression
+                continue
+            pooled = view_payload.get("pooled", {}) if isinstance(view_payload, dict) else {}
+            within = view_payload.get("within_image", {}) if isinstance(view_payload, dict) else {}
+        else:
+            pooled = payload.get("pooled", {})
+            within = payload.get("within_image", {})
         regression = pooled if isinstance(pooled, dict) and pooled.get("predictors") else within
-        if regression and regression.get("predictors"):
+        if _predictor_payload(regression):
             series[perturbation_name] = regression
     return series
 
@@ -1762,12 +2039,13 @@ def plot_coefficient_forest(
     predictor_keys = {
         key
         for _, reg in series
-        for key in (reg.get("predictors", {}) if isinstance(reg, dict) else {})
+        for key in _predictor_payload(reg)
     }
     order = [
         key
         for key in (
             "predicted_overlap_log1p_z",
+            "question_complexity_score",
             "complexity_score_residual",
             "complexity_score",
             "prompt_complexity_score",
@@ -1789,14 +2067,15 @@ def plot_coefficient_forest(
     marker_cycle = ["o", "s", "D"]
     offset_values = np.linspace(-0.16, 0.16, num=len(series)) if len(series) > 1 else np.array([0.0])
     legend_handles: List[Any] = []
+    has_marginal = any(_is_marginal_summary(reg) for _, reg in series)
     for series_idx, (series_label, reg) in enumerate(series):
-        predictors = reg.get("predictors", {}) if isinstance(reg, dict) else {}
+        predictors = _predictor_payload(reg)
         marker = marker_cycle[series_idx % len(marker_cycle)]
         for idx, key in enumerate(order):
             predictor_stats = predictors.get(key)
             if predictor_stats is None:
                 continue
-            center, lower, upper = _standardized_beta_and_ci(predictor_stats)
+            center, lower, upper = _effect_and_ci(reg, predictor_stats)
             color = _COEFFICIENT_COLORS.get(key, "#444444")
             ax.errorbar(
                 center,
@@ -1824,7 +2103,12 @@ def plot_coefficient_forest(
 
     ax.set_yticks(y_positions)
     ax.set_yticklabels(labels, fontsize=10)
-    ax.set_xlabel("Standardized Coefficient (95% CI)", fontsize=11)
+    ax.set_xlabel(
+        "Marginal Pearson r / Standardized Coefficient (95% CI)"
+        if has_marginal
+        else "Standardized Coefficient (95% CI)",
+        fontsize=11,
+    )
     ax.set_title(title, fontsize=13)
     if subtitle:
         ax.text(
@@ -1846,9 +2130,9 @@ def plot_coefficient_forest(
         metadata
         or _metadata_lines(
             "View=coefficient plot",
-            "Dots=standardized coefficients",
+            "Dots=marginal Pearson r for marginal summaries; standardized coefficients for regressions",
             "Bars=approximate 95% CI from regression stderr",
-            "Predictors=residualized semantic logic, prompt load, option hardness, prediction entropy when available",
+            "Predictors=raw semantic complexity, prompt load, option hardness, prediction entropy when available",
             "Series=pooled and within-image fixed effects when available",
         ),
     )
@@ -1875,8 +2159,8 @@ def plot_coefficient_forest_views(
     }
     for view_name in LEVEL_VIEW_ORDER:
         view_entry = view_payload.get(view_name, {}) if isinstance(view_payload, dict) else {}
-        regression = view_entry.get(regression_mode)
-        if isinstance(regression, dict) and regression.get("predictors"):
+        regression = view_entry.get("marginal") if view_name == "primary" else view_entry.get(regression_mode)
+        if _predictor_payload(regression):
             series.append((labels.get(view_name, view_name), regression))
     if not series:
         return
@@ -1884,12 +2168,13 @@ def plot_coefficient_forest_views(
     predictor_keys = {
         key
         for _, reg in series
-        for key in (reg.get("predictors", {}) if isinstance(reg, dict) else {})
+        for key in _predictor_payload(reg)
     }
     order = [
         key
         for key in (
             "predicted_overlap_log1p_z",
+            "question_complexity_score",
             "complexity_score_residual",
             "complexity_score",
             "prompt_complexity_score",
@@ -1910,15 +2195,16 @@ def plot_coefficient_forest_views(
     view_colors = ["#1f77b4", "#9467bd", "#333333"]
     offsets = np.linspace(-0.18, 0.18, num=len(series)) if len(series) > 1 else np.array([0.0])
     legend_handles: List[Any] = []
+    has_marginal = any(_is_marginal_summary(reg) for _, reg in series)
     for series_idx, (series_label, reg) in enumerate(series):
         marker = marker_cycle[series_idx % len(marker_cycle)]
         color = view_colors[series_idx % len(view_colors)]
-        predictors = reg.get("predictors", {}) if isinstance(reg, dict) else {}
+        predictors = _predictor_payload(reg)
         for idx, key in enumerate(order):
             predictor_stats = predictors.get(key)
             if predictor_stats is None:
                 continue
-            center, lower, upper = _standardized_beta_and_ci(predictor_stats)
+            center, lower, upper = _effect_and_ci(reg, predictor_stats)
             ax.errorbar(
                 center,
                 y_positions[idx] + float(offsets[series_idx]),
@@ -1945,24 +2231,43 @@ def plot_coefficient_forest_views(
 
     ax.set_yticks(y_positions)
     ax.set_yticklabels([_COEFFICIENT_LABELS.get(key, key) for key in order], fontsize=10)
-    ax.set_xlabel("Standardized Coefficient (95% CI)", fontsize=11)
+    ax.set_xlabel(
+        "Primary marginal Pearson r / Wordy-Pooled standardized beta (95% CI)"
+        if has_marginal
+        else "Standardized Coefficient (95% CI)",
+        fontsize=11,
+    )
     ax.set_title(title, fontsize=13)
     if subtitle:
         ax.text(0.0, 1.02, subtitle, transform=ax.transAxes, ha="left", va="bottom", fontsize=9, color="#555555")
     ax.legend(handles=legend_handles, fontsize=8, loc="lower right", title="Level View", title_fontsize=8)
     ax.grid(axis="x", alpha=0.2, linewidth=0.6)
     _apply_style(ax)
+    footnote = _primary_marginal_footnote(view_payload) if has_marginal else None
+    if footnote:
+        ax.text(
+            0.0,
+            -0.23,
+            footnote,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="#555555",
+            wrap=True,
+        )
     _set_plot_metadata(
         fig,
         metadata
         or _metadata_lines(
             "View=triple-view coefficient plot",
-            "Dots=standardized coefficients",
+            "Dots=primary marginal Pearson r; wordy/pooled standardized coefficients",
             "Panels/groups=primary, wordy, pooled",
             f"Regression mode={regression_mode}",
+            footnote,
         ),
     )
-    _tight_layout(fig)
+    _tight_layout(fig, metadata_bottom=0.15 if footnote else 0.08)
     _save_fig(fig, out_path)
 
 
@@ -1986,9 +2291,9 @@ def _plot_view_forest_from_payload(
         subtitle="Primary, wordy, and pooled level views",
         metadata=_plot_metadata(
             experiment=experiment,
-            what="Triple-view horse race coefficients",
-            aggregation="separate regressions for primary L1-L4, wordy L5-L8, and pooled L1-L8",
-            x="standardized coefficient with 95% CI",
+            what="Triple-view horse race summary",
+            aggregation="primary L1-L4 marginal correlations; wordy L5-L8 and pooled L1-L8 regressions",
+            x="primary marginal Pearson r; wordy/pooled standardized coefficient with 95% CI",
             y="predictor",
             note=note,
             profile=profile,
@@ -2089,7 +2394,7 @@ def plot_coefficient_forest_series(
     title: str,
     metadata: Optional[Sequence[str]] = None,
 ) -> None:
-    items = [(name, reg) for name, reg in regressions.items() if isinstance(reg, dict) and reg.get("predictors")]
+    items = [(name, reg) for name, reg in regressions.items() if _predictor_payload(reg)]
     if not items:
         return
 
@@ -2099,6 +2404,7 @@ def plot_coefficient_forest_series(
         key
         for key in (
             "predicted_overlap_log1p_z",
+            "question_complexity_score",
             "complexity_score_residual",
             "complexity_score",
             "prompt_complexity_score",
@@ -2107,7 +2413,7 @@ def plot_coefficient_forest_series(
         )
     ]
     for axis, (name, reg) in zip(axes.ravel(), items):
-        predictors = reg.get("predictors", {})
+        predictors = _predictor_payload(reg)
         keys = [key for key in order if key in predictors]
         if not keys:
             axis.axis("off")
@@ -2115,7 +2421,7 @@ def plot_coefficient_forest_series(
         y_positions = np.arange(len(keys))[::-1]
         axis.axvline(0.0, color="#555555", linestyle="--", linewidth=1.0, alpha=0.8)
         for idx, key in enumerate(keys):
-            center, lower, upper = _standardized_beta_and_ci(predictors[key])
+            center, lower, upper = _effect_and_ci(reg, predictors[key])
             color = _COEFFICIENT_COLORS.get(key, "#444444")
             axis.errorbar(
                 center,
@@ -2135,7 +2441,13 @@ def plot_coefficient_forest_series(
         axis.grid(axis="x", alpha=0.2, linewidth=0.6)
         _apply_style(axis)
 
-    axes.ravel()[-1].set_xlabel("Standardized Coefficient (95% CI)", fontsize=11)
+    has_marginal = any(_is_marginal_summary(reg) for _, reg in items)
+    axes.ravel()[-1].set_xlabel(
+        "Marginal Pearson r / Standardized Coefficient (95% CI)"
+        if has_marginal
+        else "Standardized Coefficient (95% CI)",
+        fontsize=11,
+    )
     fig.suptitle(title, fontsize=14, y=0.995)
     _set_plot_metadata(
         fig,
@@ -2143,9 +2455,9 @@ def plot_coefficient_forest_series(
         or _metadata_lines(
             "View=coefficient plot series",
             "Panels=one perturbation per subplot",
-            "Dots=standardized coefficients",
+            "Dots=marginal Pearson r for marginal summaries; standardized coefficients for regressions",
             "Bars=approximate 95% CI",
-            "Predictors=residualized semantic logic, prompt load, option hardness, prediction entropy when available",
+            "Predictors=raw semantic complexity, prompt load, option hardness, prediction entropy when available",
         ),
     )
     _tight_layout(fig, metadata_bottom=0.07, top=0.97)
@@ -2212,7 +2524,12 @@ def _exp1_level_perturbation_matrix(detail: Dict[str, Any]) -> Tuple[List[str], 
 
 
 def _exp1_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str], List[str], np.ndarray]:
-    levels = _LEVEL_ORDER
+    present_keys = {
+        level
+        for record in records
+        for level in record.get("levels", {})
+    }
+    levels = _ordered_levels(present_keys)
     sample_ids: List[str] = []
     rows: List[List[float]] = []
     for record in records:
@@ -2393,11 +2710,17 @@ def _exp2_bandwidth_values(records: List[Dict[str, Any]]) -> Dict[str, List[floa
 
 
 def _exp2_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str], List[str], np.ndarray]:
+    present_keys = {
+        level
+        for record in records
+        for level in record.get("levels", {})
+    }
+    levels = _ordered_levels(present_keys)
     sample_ids: List[str] = []
     rows: List[List[float]] = []
     for record in records:
         row = []
-        for level in _LEVEL_ORDER:
+        for level in levels:
             bandwidth = record.get("levels", {}).get(level, {}).get("bandwidth")
             row.append(float(bandwidth) if bandwidth is not None else np.nan)
         if not np.all(np.isnan(row)):
@@ -2405,7 +2728,7 @@ def _exp2_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str],
             rows.append(row)
     if not rows:
         return [], [], np.empty((0, 0))
-    return sample_ids, _LEVEL_ORDER, np.asarray(rows, dtype=float)
+    return sample_ids, levels, np.asarray(rows, dtype=float)
 
 
 def _select_exp2_samples(records: List[Dict[str, Any]], max_samples: int = 3) -> List[Dict[str, Any]]:
@@ -2450,7 +2773,12 @@ def _exp2_sample_wt_series(record: Optional[Dict[str, Any]]) -> Dict[str, Dict[s
 
 
 def _exp3_level_perturbation_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str], List[str], np.ndarray]:
-    levels = _LEVEL_ORDER
+    present_keys = {
+        level
+        for record in records
+        for level in record.get("levels", {})
+    }
+    levels = _ordered_levels(present_keys)
     perturbations = sorted(
         {
             str(item.get("perturbation"))
@@ -2477,11 +2805,17 @@ def _exp3_level_perturbation_matrix(records: List[Dict[str, Any]]) -> Tuple[List
 
 
 def _exp3_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str], List[str], np.ndarray]:
+    present_keys = {
+        level
+        for record in records
+        for level in record.get("levels", {})
+    }
+    levels = _ordered_levels(present_keys)
     sample_ids: List[str] = []
     rows: List[List[float]] = []
     for record in records:
         row = []
-        for level in _LEVEL_ORDER:
+        for level in levels:
             values = [
                 float(item.get("post_drift_scalar_all"))
                 for item in record.get("levels", {}).get(level, {}).get("perturbations", [])
@@ -2493,7 +2827,7 @@ def _exp3_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str],
             rows.append(row)
     if not rows:
         return [], [], np.empty((0, 0))
-    return sample_ids, _LEVEL_ORDER, np.asarray(rows, dtype=float)
+    return sample_ids, levels, np.asarray(rows, dtype=float)
 
 
 def _select_exp3_samples(records: List[Dict[str, Any]], max_samples: int = 2) -> List[Dict[str, Any]]:
@@ -2537,6 +2871,12 @@ def _exp4_sample_cutoffs(
 ) -> Dict[str, Tuple[List[str], List[str], np.ndarray]]:
     results: Dict[str, Tuple[List[str], List[str], np.ndarray]] = {}
     for mode in ("lowpass", "highpass"):
+        present_keys = {
+            level
+            for record in records
+            for level in record.get("modes", {}).get(mode, {}).get("levels", {})
+        }
+        levels = _ordered_levels(present_keys)
         sample_ids: List[str] = []
         rows: List[List[float]] = []
         for record in records:
@@ -2545,7 +2885,7 @@ def _exp4_sample_cutoffs(
                 continue
             cutoffs = mode_data.get("cutoffs", [])
             row = []
-            for level in _LEVEL_ORDER:
+            for level in levels:
                 correct = mode_data.get("levels", {}).get(level, {}).get("correct_at_cutoff", [])
                 if cutoffs and correct:
                     accuracy = [1.0 if value else 0.0 for value in correct]
@@ -2556,7 +2896,7 @@ def _exp4_sample_cutoffs(
                 sample_ids.append(str(record.get("image_id")))
                 rows.append(row)
         if rows:
-            results[mode] = (sample_ids, _LEVEL_ORDER, np.asarray(rows, dtype=float))
+            results[mode] = (sample_ids, levels, np.asarray(rows, dtype=float))
     return results
 
 
@@ -3694,13 +4034,1131 @@ def _plot_exp5_per_level_corr_by_source(summary: Dict[str, Any], source_name: st
     )
 
 
+def _generate_primary_l1_l4_plots(
+    results_dir: Path,
+    config: Optional[Dict[str, Any]],
+    *,
+    profile: str,
+    exhaustive: bool,
+    profile_sample_limit: int,
+    sample_scatter_limit: int,
+    suppress_dc: bool,
+) -> List[Dict[str, Any]]:
+    """Generate a parallel plot suite restricted to the primary L1-L4 ladder."""
+
+    primary_dir = results_dir / "plots" / _PRIMARY_L1_L4_SUBDIR
+    _clear_plot_outputs(primary_dir)
+    manifest_start = len(_PLOT_MANIFEST)
+
+    exp1_summary = _filter_summary_to_levels(_load_json(results_dir / "exp1" / "summary.json"))
+    exp1_detail = _filter_level_keyed_mapping(_load_json(results_dir / "exp1" / "degradation_by_level.json"))
+    exp1_samples = _filter_records_to_levels(_load_jsonl(results_dir / "exp1" / "per_sample.jsonl"))
+    exp1_complexity = _filter_points_to_levels(_load_json(results_dir / "exp1" / "complexity_points.json"))
+    exp1_tests = _load_json(results_dir / "exp1" / "hypothesis_tests.json")
+
+    exp2_summary = _filter_summary_to_levels(_load_json(results_dir / "exp2" / "summary.json"))
+    exp2_samples = _filter_records_to_levels(_load_json(results_dir / "exp2" / "power_spectra.json"))
+    exp2_complexity = _filter_points_to_levels(_load_json(results_dir / "exp2" / "complexity_points.json"))
+    exp2_tests = _load_json(results_dir / "exp2" / "hypothesis_tests.json")
+    exp2_by_id = {
+        str(record.get("image_id")): record
+        for record in (exp2_samples or [])
+        if record.get("image_id") is not None
+    }
+
+    selected_exp1_records = (
+        _select_exp1_samples(exp1_samples, max_samples=profile_sample_limit)
+        if exp1_samples
+        else []
+    )
+    preferred_sample_ids = [
+        image_id
+        for image_id in (_record_image_id(record) for record in selected_exp1_records)
+        if image_id is not None
+    ]
+
+    if exp1_complexity:
+        for y_key, y_label, file_name in (
+            ("mean_accuracy_drop", "Mean Accuracy Drop", "exp1_complexity_accuracy_drop.png"),
+            ("mean_loglik_drift", "Mean Log-Likelihood Drift", "exp1_complexity_loglik_drift.png"),
+            ("mean_loglik_erosion", "Mean Log-Likelihood Erosion", "exp1_complexity_loglik_erosion.png"),
+            ("mean_loglik_recovery", "Mean Log-Likelihood Recovery", "exp1_complexity_loglik_recovery.png"),
+            ("mean_loglik_volatility", "Mean Log-Likelihood Volatility", "exp1_complexity_loglik_volatility.png"),
+        ):
+            out_path = primary_dir / file_name
+            plot_complexity_scatter(
+                exp1_complexity,
+                y_key=y_key,
+                y_label=y_label,
+                out_path=out_path,
+                title=f"Primary L1-L4: {y_label} vs Residualized Semantic Logic",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="1",
+                        what="Primary-ladder continuous complexity scatter",
+                        aggregation="per-image per-level average over perturbations",
+                        x="residualized semantic logic",
+                        y=y_label,
+                        profile=profile,
+                    )
+                ),
+            )
+            plot_complexity_scatter(
+                exp1_complexity,
+                y_key=y_key,
+                y_label=y_label,
+                out_path=_csem_copy_path(out_path),
+                title=f"Primary L1-L4: {y_label} vs Raw Semantic Complexity",
+                x_key="complexity_score",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="1",
+                        what="Primary-ladder raw semantic complexity scatter",
+                        aggregation="per-image per-level average over perturbations",
+                        x="raw semantic complexity",
+                        y=y_label,
+                        note=_complexity_plot_note("complexity_score"),
+                        profile=profile,
+                    )
+                ),
+            )
+
+    if exp1_tests:
+        cc = exp1_tests.get("continuous_complexity", {})
+        for base_key, file_name, title in (
+            ("horse_race_mean_accuracy_drop", "exp1_coefficient_plot_accuracy_drop.png", "Accuracy Drop"),
+            ("horse_race_mean_loglik_drift", "exp1_coefficient_plot_loglik_drift.png", "Log-Likelihood Drift"),
+            ("horse_race_mean_loglik_erosion", "exp1_coefficient_plot_loglik_erosion.png", "Log-Likelihood Erosion"),
+            ("horse_race_mean_loglik_recovery", "exp1_coefficient_plot_loglik_recovery.png", "Log-Likelihood Recovery"),
+            ("horse_race_mean_loglik_volatility", "exp1_coefficient_plot_loglik_volatility.png", "Log-Likelihood Volatility"),
+        ):
+            pooled = _primary_view_regression(cc, base_key, regression_mode="pooled")
+            within = _primary_view_regression(cc, base_key, regression_mode="within_image")
+            regression = pooled or within
+            if not regression:
+                continue
+            marginal = _is_marginal_summary(regression)
+            plot_coefficient_forest(
+                regression,
+                primary_dir / file_name,
+                title=f"Primary L1-L4 {'Marginal Correlations' if marginal else 'Coefficients'}: {title}",
+                subtitle="Primary ladder only",
+                primary_label="Primary Marginal r" if marginal else ("Primary Pooled OLS" if pooled else "Primary Within-Image FE"),
+                comparison_label=None if marginal else ("Primary Within-Image FE" if pooled and within else None),
+                comparison_regression=within if pooled else None,
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="1",
+                        what="Primary-ladder marginal summary" if marginal else "Primary-ladder multivariate horse race",
+                        aggregation="L1-L4 per-image per-level summaries",
+                        x="marginal Pearson r with 95% CI" if marginal else "standardized coefficient with 95% CI",
+                        y="predictor",
+                        profile=profile,
+                    )
+                ),
+            )
+
+        for (
+            _outcome_key,
+            test_key,
+            main_filename,
+            main_title,
+            outcome_label,
+            note,
+        ) in _EXP1_PERTURBATION_OUTCOME_SPECS:
+            series = _collect_regression_series_from_payload_map(
+                cc.get(test_key, {}),
+                view_name="primary",
+            )
+            if not series:
+                continue
+            plot_coefficient_forest_series(
+                series,
+                primary_dir / main_filename,
+                title=f"Primary L1-L4: {main_title}",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="1",
+                        what=f"Primary-ladder perturbation-specific horse race for {outcome_label}",
+                        aggregation="one subplot per perturbation type",
+                        x="standardized coefficient with 95% CI",
+                        y="predictor",
+                        note=note,
+                        profile=profile,
+                    )
+                ),
+            )
+
+    if exp1_detail:
+        levels, perturbations, matrix = _exp1_level_perturbation_matrix(exp1_detail)
+        _plot_heatmap(
+            matrix,
+            [_level_label(level) for level in levels],
+            perturbations,
+            primary_dir / "exp1_level_perturbation_drop.png",
+            "Primary L1-L4: Accuracy Drop by Level and Perturbation",
+            "Mean Accuracy Drop",
+            cmap="YlOrRd",
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="1",
+                    what="Primary-ladder mean gated accuracy drop across perturbations",
+                    aggregation="level x perturbation average over samples",
+                    x="perturbation type",
+                    y="task level",
+                    profile=profile,
+                )
+            ),
+        )
+
+    if exp1_samples:
+        sample_ids, levels, matrix = _exp1_sample_level_matrix(exp1_samples)
+        sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
+        _plot_heatmap(
+            matrix,
+            [_short_sample_id(sample_id) for sample_id in sample_ids],
+            [_level_label(level) for level in levels],
+            primary_dir / "exp1_sample_level_drop.png",
+            "Primary L1-L4: Per-Sample Mean Drop by Level",
+            "Mean Accuracy Drop",
+            cmap="YlGnBu",
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="1",
+                    what="Primary-ladder per-image mean gated accuracy drop",
+                    aggregation="sample-wise average over perturbations",
+                    x="task level",
+                    y="selected images",
+                    profile=profile,
+                )
+            ),
+        )
+        for record in selected_exp1_records:
+            sample_id = str(record.get("image_id"))
+            matched_exp2 = exp2_by_id.get(sample_id)
+            for key, file_prefix, title, ylabel in (
+                ("delta_f", "exp1_sample_delta_f", "Primary L1-L4: Image-Space delta_f by Perturbation", "delta_f(omega)"),
+                ("delta_f_vision", "exp1_sample_delta_f_vision", "Primary L1-L4: Vision-Feature delta_f by Perturbation", "delta_f_vision(omega)"),
+            ):
+                spectra = _exp1_sample_spectra(record, key)
+                if spectra:
+                    _plot_sample_profile_grid(
+                        sample_id,
+                        spectra,
+                        primary_dir / f"{file_prefix}_{_safe_name(sample_id)}.png",
+                        title,
+                        ylabel,
+                        suppress_dc=suppress_dc,
+                        metadata=_primary_plot_metadata(
+                            _plot_metadata(
+                                experiment="1",
+                                what=f"Primary-ladder {ylabel} profiles for one image",
+                                aggregation="per-level frequency profiles by perturbation",
+                                x="frequency band (low→high)",
+                                y=ylabel,
+                                profile=profile,
+                            )
+                        ),
+                    )
+            for key, file_prefix, title, label, cmap in (
+                ("accuracy_drop", "exp1_sample_drop_by_perturbation", "Primary L1-L4: Per-Perturbation Accuracy Drop", "Accuracy Drop", "YlOrRd"),
+                ("loglik_drift", "exp1_sample_loglik_drift", "Primary L1-L4: Per-Perturbation Log-Likelihood Drift", "Log-Likelihood Drift", "coolwarm"),
+            ):
+                levels, perturbations, matrix = _exp1_sample_metric_matrix(record, key)
+                if matrix.size and perturbations:
+                    _plot_heatmap(
+                        matrix,
+                        [_level_label(level) for level in levels],
+                        perturbations,
+                        primary_dir / f"{file_prefix}_{_safe_name(sample_id)}.png",
+                        f"{title}: {_short_sample_id(sample_id, 28)}",
+                        label,
+                        cmap=cmap,
+                        metadata=_primary_plot_metadata(
+                            _plot_metadata(
+                                experiment="1",
+                                what=f"Primary-ladder perturbation-wise {label.lower()} for one selected image",
+                                aggregation="rows are L1-L4; columns are perturbation types",
+                                x="perturbation type",
+                                y="task level",
+                                profile=profile,
+                            )
+                        ),
+                    )
+            matched_wt_series = _exp2_sample_wt_series(matched_exp2)
+            if matched_wt_series:
+                _plot_sample_profile_grid(
+                    sample_id,
+                    matched_wt_series,
+                    primary_dir / f"exp2_matched_sample_wt_{_safe_name(sample_id)}.png",
+                    "Primary L1-L4: Task Filters W_t for Matched Selected Sample",
+                    "W_t(omega)",
+                    suppress_dc=suppress_dc,
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="2",
+                            what="Primary-ladder sample-specific task filters for the same image selected in Exp 1",
+                            aggregation="per-level W_t profiles",
+                            x="frequency band (low→high)",
+                            y="W_t(omega)",
+                            profile=profile,
+                        )
+                    ),
+                )
+                _plot_exp2_matched_sample_group_comparison(
+                    matched_exp2,
+                    primary_dir / f"exp2_matched_sample_wt_groups_{_safe_name(sample_id)}.png",
+                    profile=profile,
+                    suppress_dc=suppress_dc,
+                )
+
+    _generate_primary_l1_l4_plots_exp2_to_exp5(
+        results_dir,
+        primary_dir,
+        profile=profile,
+        exhaustive=exhaustive,
+        profile_sample_limit=profile_sample_limit,
+        sample_scatter_limit=sample_scatter_limit,
+        suppress_dc=suppress_dc,
+        preferred_sample_ids=preferred_sample_ids,
+        exp2_summary=exp2_summary,
+        exp2_samples=exp2_samples,
+        exp2_complexity=exp2_complexity,
+        exp2_tests=exp2_tests,
+    )
+
+    entries = [copy.deepcopy(entry) for entry in _PLOT_MANIFEST[manifest_start:]]
+    _write_plot_manifest_entries(primary_dir, profile, entries)
+    return entries
+
+
+def _generate_primary_l1_l4_plots_exp2_to_exp5(
+    results_dir: Path,
+    primary_dir: Path,
+    *,
+    profile: str,
+    exhaustive: bool,
+    profile_sample_limit: int,
+    sample_scatter_limit: int,
+    suppress_dc: bool,
+    preferred_sample_ids: Sequence[str],
+    exp2_summary: Optional[Dict[str, Any]],
+    exp2_samples: Sequence[Dict[str, Any]],
+    exp2_complexity: Sequence[Dict[str, Any]],
+    exp2_tests: Optional[Dict[str, Any]],
+) -> None:
+    if exp2_summary:
+        plot_attention_power_spectrum(
+            exp2_summary,
+            primary_dir / "exp2_power_spectrum.png",
+            title="Primary L1-L4: Attention Power Spectrum",
+            suppress_dc=suppress_dc,
+        )
+        plot_effective_bandwidth(
+            exp2_summary,
+            primary_dir / "exp2_bandwidth.png",
+            title="Primary L1-L4: Effective Bandwidth by Task Granularity",
+        )
+        _plot_exp2_group_spectra(exp2_summary, primary_dir / "exp2_group_spectra.png", suppress_dc=suppress_dc)
+        _plot_exp2_group_bandwidth(exp2_summary, primary_dir / "exp2_group_bandwidth.png")
+        _plot_exp2_control_bandwidth(exp2_summary, primary_dir / "exp2_control_bandwidth.png")
+        _plot_exp2_control_divergence(exp2_summary, primary_dir / "exp2_control_divergence.png")
+        _plot_exp2_control_spectra(exp2_summary, primary_dir, suppress_dc=suppress_dc)
+        if exp2_complexity:
+            out_path = primary_dir / "exp2_complexity_bandwidth.png"
+            _plot_exp2_complexity_groups(
+                exp2_complexity,
+                out_path,
+                profile=profile,
+            )
+            _plot_exp2_complexity_groups(
+                exp2_complexity,
+                _csem_copy_path(out_path),
+                profile=profile,
+                x_key="complexity_score",
+            )
+        if exp2_tests:
+            cc = exp2_tests.get("continuous_complexity", {})
+            pooled = _primary_view_regression(cc, "horse_race_bandwidth", regression_mode="pooled")
+            within = _primary_view_regression(cc, "horse_race_bandwidth", regression_mode="within_image")
+            regression = pooled or within
+            if regression:
+                marginal = _is_marginal_summary(regression)
+                plot_coefficient_forest(
+                    regression,
+                    primary_dir / "exp2_coefficient_plot_bandwidth.png",
+                    title=f"Primary L1-L4 {'Marginal Correlations' if marginal else 'Coefficients'}: Bandwidth",
+                    subtitle="Primary ladder only",
+                    primary_label="Primary Marginal r" if marginal else ("Primary Pooled OLS" if pooled else "Primary Within-Image FE"),
+                    comparison_label=None if marginal else ("Primary Within-Image FE" if pooled and within else None),
+                    comparison_regression=within if pooled else None,
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="2",
+                            what="Primary-ladder bandwidth marginal summary" if marginal else "Primary-ladder bandwidth horse race",
+                            aggregation="L1-L4 per-image per-level bandwidth",
+                            x="marginal Pearson r with 95% CI" if marginal else "standardized coefficient with 95% CI",
+                            y="predictor",
+                            profile=profile,
+                        )
+                    ),
+                )
+        if exhaustive:
+            _plot_exp2_level_band_heatmap(
+                exp2_summary,
+                primary_dir / "exp2_band_heatmap.png",
+                suppress_dc=suppress_dc,
+            )
+            for group_name in exp2_summary.get("layer_groups", {}).get("order", ["early", "mid", "late"]):
+                levels = [
+                    level
+                    for level in _ordered_levels(exp2_summary.get("per_level", {}).keys())
+                    if exp2_summary.get("per_level", {}).get(level, {}).get("layer_groups", {}).get(group_name, {}).get("W_t_average")
+                ]
+                if not levels:
+                    continue
+                group_matrix = np.asarray(
+                    [
+                        exp2_summary.get("per_level", {}).get(level, {}).get("layer_groups", {}).get(group_name, {}).get("W_t_average", [])
+                        for level in levels
+                    ],
+                    dtype=float,
+                )
+                if group_matrix.size:
+                    _plot_heatmap(
+                        group_matrix,
+                        [_level_label(level) for level in levels],
+                        _band_labels(group_matrix.shape[1], suppress_dc=suppress_dc),
+                        primary_dir / f"exp2_band_heatmap_{group_name}.png",
+                        f"Primary L1-L4: W_t by Level and Band ({group_name})",
+                        "W_t(omega)",
+                        cmap="magma",
+                        metadata=_primary_plot_metadata(
+                            _plot_metadata(
+                                experiment="2",
+                                what=f"Primary-ladder layer-group task filter W_t ({group_name})",
+                                aggregation="level-wise sample average",
+                                x="frequency band (low→high)",
+                                y="task level",
+                                profile=profile,
+                            )
+                        ),
+                    )
+
+    if exp2_samples:
+        _plot_distribution_with_points(
+            _exp2_bandwidth_values(list(exp2_samples)),
+            primary_dir / "exp2_bandwidth_distribution.png",
+            "Primary L1-L4: Bandwidth Distribution Across Samples",
+            "Bandwidth",
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="2",
+                    what="Primary-ladder within-run sample spread of effective bandwidth",
+                    aggregation="per-sample values grouped by level",
+                    x="task level",
+                    y="effective bandwidth G(t)",
+                    profile=profile,
+                )
+            ),
+        )
+        _plot_exp2_selected_samples(
+            list(exp2_samples),
+            primary_dir,
+            max_samples=profile_sample_limit,
+            preferred_sample_ids=preferred_sample_ids,
+            profile=profile,
+            suppress_dc=suppress_dc,
+        )
+        if exhaustive:
+            sample_ids, levels, matrix = _exp2_sample_level_matrix(list(exp2_samples))
+            sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
+            _plot_heatmap(
+                matrix,
+                [_short_sample_id(sample_id) for sample_id in sample_ids],
+                [_level_label(level) for level in levels],
+                primary_dir / "exp2_sample_bandwidth.png",
+                "Primary L1-L4: Per-Sample Bandwidth by Level",
+                "Bandwidth",
+                cmap="plasma",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="2",
+                        what="Primary-ladder per-image effective bandwidth",
+                        aggregation="one value per image and level",
+                        x="task level",
+                        y="selected images",
+                        profile=profile,
+                    )
+                ),
+            )
+
+    exp3_summary = _filter_summary_to_levels(_load_json(results_dir / "exp3" / "summary.json"))
+    exp3_samples = _filter_records_to_levels(_load_json(results_dir / "exp3" / "amplification.json"))
+    exp3_tests = _load_json(results_dir / "exp3" / "hypothesis_tests.json")
+    exp3_complexity = _filter_points_to_levels(_load_json(results_dir / "exp3" / "complexity_points.json"))
+    if exp3_summary:
+        _plot_exp3_response_amplification(exp3_summary, primary_dir / "exp3_amplification.png")
+        plot_amplification_heatmap(exp3_summary, primary_dir / "exp3_pre_drift_spectrum.png", suppress_dc=suppress_dc)
+        _plot_exp3_pre_post(exp3_summary, primary_dir / "exp3_pre_post_drift.png")
+        _plot_exp3_group_weighted_amplification(exp3_summary, primary_dir / "exp3_group_weighted_amplification.png")
+        _plot_exp3_profile_groups(exp3_summary, primary_dir / "exp3_profile_group_response.png")
+    if exp3_complexity:
+        for y_key, y_label, file_name in (
+            ("mean_post_drift_all", "Mean Post-Fusion Drift ΔZ_all", "exp3_complexity_post_drift_all.png"),
+            ("mean_response_amplification", "Mean Response Amplification", "exp3_complexity_response_amplification.png"),
+        ):
+            out_path = primary_dir / file_name
+            plot_complexity_scatter(
+                exp3_complexity,
+                y_key=y_key,
+                y_label=y_label,
+                out_path=out_path,
+                title=f"Primary L1-L4: {y_label} vs Residualized Semantic Logic",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="3",
+                        what="Primary-ladder residualized semantic logic vs internal response",
+                        aggregation="per-image per-level average over perturbations",
+                        x="residualized semantic logic",
+                        y=y_label,
+                        profile=profile,
+                    )
+                ),
+            )
+            plot_complexity_scatter(
+                exp3_complexity,
+                y_key=y_key,
+                y_label=y_label,
+                out_path=_csem_copy_path(out_path),
+                title=f"Primary L1-L4: {y_label} vs Raw Semantic Complexity",
+                x_key="complexity_score",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="3",
+                        what="Primary-ladder raw semantic complexity vs internal response",
+                        aggregation="per-image per-level average over perturbations",
+                        x="raw semantic complexity",
+                        y=y_label,
+                        note=_complexity_plot_note("complexity_score"),
+                        profile=profile,
+                    )
+                ),
+            )
+    if exp3_tests:
+        cc = exp3_tests.get("continuous_complexity", {})
+        for base_key, file_name, title in (
+            ("horse_race_mean_post_drift_all", "exp3_coefficient_plot_post_drift_all.png", "Post-Fusion Drift"),
+            ("horse_race_mean_response_amplification", "exp3_coefficient_plot_response_amplification.png", "Response Amplification"),
+        ):
+            pooled = _primary_view_regression(cc, base_key, regression_mode="pooled")
+            within = _primary_view_regression(cc, base_key, regression_mode="within_image")
+            regression = pooled or within
+            if not regression:
+                continue
+            marginal = _is_marginal_summary(regression)
+            plot_coefficient_forest(
+                regression,
+                primary_dir / file_name,
+                title=f"Primary L1-L4 {'Marginal Correlations' if marginal else 'Coefficients'}: {title}",
+                subtitle="Primary ladder only",
+                primary_label="Primary Marginal r" if marginal else ("Primary Pooled OLS" if pooled else "Primary Within-Image FE"),
+                comparison_label=None if marginal else ("Primary Within-Image FE" if pooled and within else None),
+                comparison_regression=within if pooled else None,
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="3",
+                        what="Primary-ladder internal response marginal summary" if marginal else "Primary-ladder internal response horse race",
+                        aggregation="L1-L4 per-image per-level summaries",
+                        x="marginal Pearson r with 95% CI" if marginal else "standardized coefficient with 95% CI",
+                        y="predictor",
+                        profile=profile,
+                    )
+                ),
+            )
+            if base_key == "horse_race_mean_post_drift_all":
+                plot_dual_force_bars(
+                    within or pooled,
+                    primary_dir / "exp3_tug_of_war_internal_drift.png",
+                    title="Primary L1-L4: Two-Factor Tug-of-War",
+                    subtitle="Within-image fixed effects" if within else "Pooled OLS",
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="3",
+                            what="Primary-ladder semantic-logic vs prompt-load effects on post-fusion internal drift",
+                            aggregation="multivariate regression over L1-L4 per-image per-level drift",
+                            x="semantic logic and prompt load",
+                            y="standardized coefficient with 95% CI",
+                            profile=profile,
+                        )
+                    ),
+                )
+    if exp3_samples:
+        if exhaustive:
+            levels, perturbations, matrix = _exp3_level_perturbation_matrix(exp3_samples)
+            _plot_heatmap(
+                matrix,
+                [_level_label(level) for level in levels],
+                perturbations,
+                primary_dir / "exp3_level_perturbation_amplification.png",
+                "Primary L1-L4: Post-Fusion Response by Level and Perturbation",
+                "Mean Post-Fusion Drift (all tokens)",
+                cmap="magma",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="3",
+                        what="Primary-ladder mean all-token post-fusion response",
+                        aggregation="level x perturbation average over samples",
+                        x="perturbation type",
+                        y="task level",
+                        profile=profile,
+                    )
+                ),
+            )
+            sample_ids, levels, matrix = _exp3_sample_level_matrix(exp3_samples)
+            sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
+            _plot_heatmap(
+                matrix,
+                [_short_sample_id(sample_id) for sample_id in sample_ids],
+                [_level_label(level) for level in levels],
+                primary_dir / "exp3_sample_amplification.png",
+                "Primary L1-L4: Per-Sample Post-Fusion Response by Level",
+                "Mean Post-Fusion Drift (all tokens)",
+                cmap="PuRd",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="3",
+                        what="Primary-ladder per-image mean post-fusion response",
+                        aggregation="sample-wise average over perturbations",
+                        x="task level",
+                        y="selected images",
+                        profile=profile,
+                    )
+                ),
+            )
+        for record in _select_records_by_preferred_ids(
+            exp3_samples,
+            preferred_sample_ids,
+            max_samples=profile_sample_limit,
+            fallback_selector=_select_exp3_samples,
+        ):
+            sample_id = str(record.get("image_id"))
+            profiles, overlays = _exp3_sample_profiles(record)
+            if profiles:
+                _plot_sample_profile_grid(
+                    sample_id,
+                    profiles,
+                    primary_dir / f"exp3_sample_profiles_{_safe_name(sample_id)}.png",
+                    "Primary L1-L4: Pre-Fusion Drift by Perturbation",
+                    "Pre-Fusion Drift",
+                    overlay_by_level=overlays,
+                    suppress_dc=suppress_dc,
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="3",
+                            what="Primary-ladder pre-fusion drift profiles with late W_t overlay",
+                            aggregation="per-level frequency profiles by perturbation",
+                            x="frequency band (low→high)",
+                            y="pre-fusion drift magnitude",
+                            profile=profile,
+                        )
+                    ),
+                )
+
+    _generate_primary_l1_l4_plots_exp4_exp5(
+        results_dir,
+        primary_dir,
+        profile=profile,
+        exhaustive=exhaustive,
+        profile_sample_limit=profile_sample_limit,
+        sample_scatter_limit=sample_scatter_limit,
+        preferred_sample_ids=preferred_sample_ids,
+    )
+
+
+def _generate_primary_l1_l4_plots_exp4_exp5(
+    results_dir: Path,
+    primary_dir: Path,
+    *,
+    profile: str,
+    exhaustive: bool,
+    profile_sample_limit: int,
+    sample_scatter_limit: int,
+    preferred_sample_ids: Sequence[str],
+) -> None:
+    exp4_summary = _filter_exp4_summary_to_levels(_load_json(results_dir / "exp4" / "summary.json"))
+    exp4_curves = _filter_exp4_curves_to_levels(_load_json(results_dir / "exp4" / "accuracy_curves.json"))
+    exp4_samples = _filter_exp4_records_to_levels(_load_json(results_dir / "exp4" / "per_sample.json"))
+    exp4_complexity = _filter_points_to_levels(_load_json(results_dir / "exp4" / "complexity_points.json"))
+    exp4_tests = _load_json(results_dir / "exp4" / "hypothesis_tests.json")
+    if exp4_curves:
+        for mode in ("lowpass", "highpass"):
+            plot_frequency_threshold_curves(
+                exp4_curves,
+                primary_dir / f"exp4_threshold_{mode}.png",
+                mode=mode,
+                title="Primary L1-L4: Accuracy vs Frequency Cutoff",
+            )
+            _plot_exp4_mode_heatmap(
+                exp4_curves,
+                primary_dir / f"exp4_level_cutoff_{mode}.png",
+                mode=mode,
+                title=f"Primary L1-L4: Accuracy by Level and Cutoff ({mode})",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="4",
+                        what=f"Primary-ladder accuracy across frequency cutoffs for {mode}",
+                        aggregation="level x cutoff average over samples",
+                        x=f"{mode} cutoff",
+                        y="task level",
+                        profile=profile,
+                    )
+                ),
+            )
+    if exp4_summary:
+        _plot_exp4_critical_cutoffs(exp4_summary, primary_dir / "exp4_critical_cutoffs.png")
+    if exp4_complexity:
+        out_path = primary_dir / "exp4_complexity_cutoff.png"
+        _plot_exp4_complexity_modes(exp4_complexity, out_path, profile=profile)
+        _plot_exp4_complexity_modes(
+            exp4_complexity,
+            _csem_copy_path(out_path),
+            profile=profile,
+            x_key="complexity_score",
+        )
+    if exp4_tests:
+        cc = exp4_tests.get("continuous_complexity", {})
+        for mode in ("lowpass", "highpass"):
+            mode_reg = cc.get(mode, {})
+            pooled = _primary_view_regression(mode_reg, "horse_race_critical_cutoff", regression_mode="pooled")
+            within = _primary_view_regression(mode_reg, "horse_race_critical_cutoff", regression_mode="within_image")
+            regression = pooled or within
+            if not regression:
+                continue
+            marginal = _is_marginal_summary(regression)
+            plot_coefficient_forest(
+                regression,
+                primary_dir / f"exp4_coefficient_plot_{mode}.png",
+                title=f"Primary L1-L4 {'Marginal Correlations' if marginal else 'Coefficients'}: Critical Cutoff ({mode})",
+                subtitle="Primary ladder only",
+                primary_label="Primary Marginal r" if marginal else ("Primary Pooled OLS" if pooled else "Primary Within-Image FE"),
+                comparison_label=None if marginal else ("Primary Within-Image FE" if pooled and within else None),
+                comparison_regression=within if pooled else None,
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="4",
+                        what=(
+                            f"Primary-ladder critical-cutoff marginal summary under {mode}"
+                            if marginal
+                            else f"Primary-ladder critical-cutoff horse race under {mode}"
+                        ),
+                        aggregation="L1-L4 per-image per-level critical cutoff",
+                        x="marginal Pearson r with 95% CI" if marginal else "standardized coefficient with 95% CI",
+                        y="predictor",
+                        profile=profile,
+                    )
+                ),
+            )
+    if exp4_samples:
+        _plot_exp4_sample_curves(
+            exp4_samples,
+            primary_dir,
+            max_samples=profile_sample_limit,
+            preferred_sample_ids=preferred_sample_ids,
+            profile=profile,
+        )
+        if exhaustive:
+            for mode, (sample_ids, levels, matrix) in _exp4_sample_cutoffs(exp4_samples).items():
+                sample_ids, matrix = _sort_metric_rows(sample_ids, matrix, max_rows=10)
+                _plot_heatmap(
+                    matrix,
+                    [_short_sample_id(sample_id) for sample_id in sample_ids],
+                    [_level_label(level) for level in levels],
+                    primary_dir / f"exp4_sample_cutoffs_{mode}.png",
+                    f"Primary L1-L4: Per-Sample Critical Cutoff ({mode})",
+                    "Critical Cutoff",
+                    cmap="cividis",
+                    vmin=0.0,
+                    vmax=0.5,
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="4",
+                            what=f"Primary-ladder per-image critical cutoff ({mode})",
+                            aggregation="one value per image and level",
+                            x="task level",
+                            y="selected images",
+                            profile=profile,
+                        )
+                    ),
+                )
+
+    exp5_summary = _load_json(results_dir / "exp5" / "summary.json")
+    exp5_grouped = _filter_points_to_levels(_load_json(results_dir / "exp5" / "scatter_data.json"))
+    exp5_samples = _filter_points_to_levels(_load_json(results_dir / "exp5" / "sample_scatter_data.json"))
+    exp5_vision_grouped = _filter_points_to_levels(_load_json(results_dir / "exp5" / "vision_scatter_data.json"))
+    exp5_vision_samples = _filter_points_to_levels(_load_json(results_dir / "exp5" / "vision_sample_scatter_data.json"))
+    exp5_grouped_by_group = _load_json(results_dir / "exp5" / "scatter_data_by_group.json")
+    exp5_sample_by_group = _load_json(results_dir / "exp5" / "sample_scatter_data_by_group.json")
+    exp5_grouped_by_group_and_target = _load_json(results_dir / "exp5" / "scatter_data_by_group_and_target.json")
+    exp5_sample_by_group_and_target = _load_json(results_dir / "exp5" / "sample_scatter_data_by_group_and_target.json")
+    exp5_primary_target = str((exp5_summary or {}).get("primary_target") or "accuracy_drop")
+    exp5_primary_target_label = _exp5_target_label(exp5_primary_target)
+
+    def _plot_primary_exp5_branch(
+        points: List[Dict[str, Any]],
+        source_name: str,
+        file_suffix: str,
+    ) -> None:
+        if not points:
+            return
+        source_label = _exp5_source_label(source_name)
+        plot_overlap_scatter(
+            points,
+            _pearson_from_scatter_points(points),
+            primary_dir / f"exp5_overlap_scatter{file_suffix}.png",
+            title=f"Primary L1-L4: Overlap vs {exp5_primary_target_label} ({source_label})",
+            y_label=exp5_primary_target_label,
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="5",
+                    what=f"Primary-ladder predicted overlap vs {exp5_primary_target_label}",
+                    aggregation="grouped by level and perturbation",
+                    x="predicted spectral overlap S_pred",
+                    y=exp5_primary_target_label,
+                    note=f"Source={source_label}",
+                    profile=profile,
+                )
+            ),
+        )
+        plot_overlap_scatter(
+            points,
+            _pearson_from_scatter_points(points, bridge=True),
+            primary_dir / f"exp5_bridge_scatter{file_suffix}.png",
+            title=f"Primary L1-L4: Comparable Bridge ({source_label})",
+            y_label=exp5_primary_target_label,
+            scale_mode="bridge",
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="5",
+                    what=f"Primary-ladder comparable bridge for predicted overlap vs {exp5_primary_target_label}",
+                    aggregation="grouped by level and perturbation",
+                    x="zscore(log1p(predicted spectral overlap))",
+                    y=f"zscore({exp5_primary_target_label.lower()})",
+                    profile=profile,
+                )
+            ),
+        )
+        plot_overlap_scatter_grid_by_level(
+            points,
+            primary_dir / f"exp5_overlap_scatter_by_level{file_suffix}.png",
+            title=f"Primary L1-L4: Overlap vs {exp5_primary_target_label} by Level ({source_label})",
+            y_label=exp5_primary_target_label,
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="5",
+                    what=f"Primary-ladder predicted overlap vs {exp5_primary_target_label} split by level",
+                    aggregation="grouped by perturbation within each level",
+                    x="predicted spectral overlap S_pred",
+                    y=exp5_primary_target_label,
+                    profile=profile,
+                )
+            ),
+        )
+        _plot_exp5_level_perturbation_comparison(
+            points,
+            primary_dir / f"exp5_level_perturbation_predicted_vs_observed{file_suffix}.png",
+            f"Primary L1-L4: Predicted vs Observed by Level and Perturbation ({source_label})",
+            actual_label=exp5_primary_target_label,
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="5",
+                    what=f"Primary-ladder predicted overlap and observed {exp5_primary_target_label} by level and perturbation",
+                    aggregation="grouped by level and perturbation",
+                    x="perturbation type",
+                    y=exp5_primary_target_label,
+                    profile=profile,
+                )
+            ),
+        )
+        _plot_exp5_heatmaps(
+            points,
+            primary_dir / f"exp5_grouped_heatmap{file_suffix}.png",
+            f"Primary L1-L4: Grouped Overlap vs {exp5_primary_target_label} ({source_label})",
+            actual_label=exp5_primary_target_label,
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="5",
+                    what=f"Primary-ladder grouped predicted overlap, observed {exp5_primary_target_label}, and residual",
+                    aggregation="level x perturbation average over samples",
+                    x="perturbation type",
+                    y="task level",
+                    profile=profile,
+                )
+            ),
+        )
+
+    if exp5_summary:
+        _plot_primary_exp5_branch(exp5_grouped, "image_space", "")
+        _plot_primary_exp5_branch(exp5_vision_grouped, "vision_feature_space", "_vision")
+
+        factor_source_pairs = exp5_grouped
+        if isinstance(exp5_grouped_by_group_and_target, dict):
+            primary_group = exp5_summary.get("primary_group", "late")
+            factor_source_pairs = _filter_points_to_levels(
+                exp5_grouped_by_group_and_target
+                .get("image_space", {})
+                .get(primary_group, {})
+                .get("accuracy_drop", exp5_grouped)
+            )
+        factor_rows = copy.deepcopy(factor_source_pairs)
+        predicted_values = [
+            _optional_float(point.get("predicted"))
+            for point in factor_rows
+        ]
+        finite_predicted = np.asarray(
+            [value for value in predicted_values if value is not None],
+            dtype=np.float64,
+        )
+        if finite_predicted.size:
+            pred_mean = float(np.mean(np.log1p(np.clip(finite_predicted, 0.0, None))))
+            pred_std = float(np.std(np.log1p(np.clip(finite_predicted, 0.0, None))))
+        else:
+            pred_mean = 0.0
+            pred_std = 0.0
+        for row in factor_rows:
+            predicted = _optional_float(row.get("predicted"))
+            if predicted is not None:
+                logged = float(np.log1p(max(0.0, predicted)))
+                row["predicted_overlap_log1p_z"] = (
+                    0.0 if pred_std <= _LOG_FLOOR else (logged - pred_mean) / pred_std
+                )
+            row["question_complexity_score"] = row.get(
+                "question_complexity_score",
+                row.get("complexity_score"),
+            )
+            row["accuracy_drop"] = row.get("actual")
+        factor_regression = summarize_horse_race_view(
+            factor_rows,
+            y_key="accuracy_drop",
+            x_keys=[
+                "predicted_overlap_log1p_z",
+                "question_complexity_score",
+                "prompt_complexity_score",
+                "option_hardness_score",
+            ],
+            view_name="primary",
+            level_filter=None,
+        ).get("marginal", {})
+        if _predictor_payload(factor_regression):
+            plot_coefficient_forest(
+                factor_regression,
+                primary_dir / "exp5_coefficient_plot_prediction_factors.png",
+                title="Primary L1-L4: Prediction-Factor Marginal Correlations",
+                subtitle="Recomputed on primary L1-L4 grouped cells",
+                primary_label="Primary Marginal r",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="5",
+                        what="Primary-ladder prediction-factor marginal summary for observed accuracy drop",
+                        aggregation="grouped by L1-L4 level and perturbation",
+                        x="marginal Pearson r with 95% CI",
+                        y="predictor",
+                        note="Predictors are zscore(log1p(S_pred)), raw semantic complexity, prompt load, and option hardness",
+                        profile=profile,
+                    )
+                ),
+            )
+
+    if exhaustive and exp5_samples:
+        plot_overlap_scatter(
+            exp5_samples,
+            _pearson_from_scatter_points(exp5_samples),
+            primary_dir / "exp5_overlap_scatter_sample.png",
+            title=f"Primary L1-L4: Overlap vs {exp5_primary_target_label} (per sample, image-space)",
+            point_size=20,
+            alpha=0.45,
+            max_points=sample_scatter_limit,
+            y_label=exp5_primary_target_label,
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="5",
+                    what=f"Primary-ladder per-sample predicted overlap vs {exp5_primary_target_label}",
+                    aggregation="per sample",
+                    x="predicted spectral overlap S_pred",
+                    y=exp5_primary_target_label,
+                    profile=profile,
+                )
+            ),
+        )
+    if exhaustive and exp5_vision_samples:
+        plot_overlap_scatter(
+            exp5_vision_samples,
+            _pearson_from_scatter_points(exp5_vision_samples),
+            primary_dir / "exp5_overlap_scatter_vision_sample.png",
+            title=f"Primary L1-L4: Overlap vs {exp5_primary_target_label} (per sample, vision-feature)",
+            point_size=20,
+            alpha=0.45,
+            max_points=sample_scatter_limit,
+            y_label=exp5_primary_target_label,
+            metadata=_primary_plot_metadata(
+                _plot_metadata(
+                    experiment="5",
+                    what=f"Primary-ladder per-sample predicted overlap vs {exp5_primary_target_label}",
+                    aggregation="per sample",
+                    x="predicted spectral overlap S_pred",
+                    y=exp5_primary_target_label,
+                    profile=profile,
+                )
+            ),
+        )
+
+    if exhaustive and isinstance(exp5_grouped_by_group, dict) and exp5_summary:
+        primary_group = exp5_summary.get("primary_group", "late")
+        for source_name, source_groups in exp5_grouped_by_group.items():
+            if source_name.endswith("_raw") or not isinstance(source_groups, dict):
+                continue
+            for group_name, grouped_pairs in source_groups.items():
+                if source_name in {"image_space", "vision_feature_space"} and group_name == primary_group:
+                    continue
+                primary_pairs = _filter_points_to_levels(grouped_pairs)
+                if primary_pairs:
+                    _plot_primary_exp5_branch(primary_pairs, source_name, f"_{source_name}_{group_name}")
+
+    if exhaustive and isinstance(exp5_sample_by_group, dict) and exp5_summary:
+        analysis_groups = exp5_summary.get("analysis_groups", _FILTER_ANALYSIS_ORDER)
+        primary_group = exp5_summary.get("primary_group", "late")
+        for source_name, source_groups in exp5_sample_by_group.items():
+            if source_name.endswith("_raw") or not isinstance(source_groups, dict):
+                continue
+            for group_name in analysis_groups:
+                if source_name in {"image_space", "vision_feature_space"} and group_name == primary_group:
+                    continue
+                sample_pairs = _filter_points_to_levels(source_groups.get(group_name, []))
+                if not sample_pairs:
+                    continue
+                plot_overlap_scatter(
+                    sample_pairs,
+                    _pearson_from_scatter_points(sample_pairs),
+                    primary_dir / f"exp5_overlap_scatter_{source_name}_{group_name}_sample.png",
+                    title=f"Primary L1-L4: Overlap vs {exp5_primary_target_label} ({_exp5_source_label(source_name)}, {group_name}, per sample)",
+                    point_size=20,
+                    alpha=0.45,
+                    max_points=sample_scatter_limit,
+                    y_label=exp5_primary_target_label,
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="5",
+                            what=f"Primary-ladder predicted overlap vs {exp5_primary_target_label}",
+                            aggregation="per sample",
+                            x="predicted spectral overlap S_pred",
+                            y=exp5_primary_target_label,
+                            profile=profile,
+                        )
+                    ),
+                )
+
+    if exhaustive and isinstance(exp5_grouped_by_group_and_target, dict) and exp5_summary:
+        primary_group = exp5_summary.get("primary_group", "late")
+        for source_name, source_groups in exp5_grouped_by_group_and_target.items():
+            if source_name.endswith("_raw") or not isinstance(source_groups, dict):
+                continue
+            primary_group_targets = source_groups.get(primary_group, {})
+            for target_name in exp5_summary.get("targets", []):
+                grouped_pairs = _filter_points_to_levels(primary_group_targets.get(target_name, []))
+                if not grouped_pairs:
+                    continue
+                target_label = _exp5_target_label(target_name)
+                suffix = f"_{source_name}_{primary_group}_{target_name}"
+                plot_overlap_scatter(
+                    grouped_pairs,
+                    _pearson_from_scatter_points(grouped_pairs),
+                    primary_dir / f"exp5_overlap_scatter{suffix}.png",
+                    title=f"Primary L1-L4: Overlap vs {target_label} ({_exp5_source_label(source_name)}, {primary_group})",
+                    y_label=target_label,
+                    scale_mode=_exp5_target_scale_mode(target_name),
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="5",
+                            what=f"Primary-ladder predicted overlap vs {target_label}",
+                            aggregation="grouped by level and perturbation",
+                            x="predicted spectral overlap S_pred",
+                            y=target_label,
+                            profile=profile,
+                        )
+                    ),
+                )
+                plot_overlap_scatter_grid_by_level(
+                    grouped_pairs,
+                    primary_dir / f"exp5_overlap_scatter_by_level{suffix}.png",
+                    title=f"Primary L1-L4: Overlap vs {target_label} by Level ({_exp5_source_label(source_name)}, {primary_group})",
+                    y_label=target_label,
+                    scale_mode=_exp5_target_scale_mode(target_name),
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="5",
+                            what=f"Primary-ladder predicted overlap vs {target_label} split by level",
+                            aggregation="grouped by perturbation within each level",
+                            x="predicted spectral overlap S_pred",
+                            y=target_label,
+                            profile=profile,
+                        )
+                    ),
+                )
+                _plot_exp5_level_perturbation_comparison(
+                    grouped_pairs,
+                    primary_dir / f"exp5_level_perturbation_predicted_vs_observed{suffix}.png",
+                    f"Primary L1-L4: Predicted vs Observed by Level and Perturbation ({_exp5_source_label(source_name)}, {primary_group}, {target_label})",
+                    actual_label=target_label,
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="5",
+                            what=f"Primary-ladder predicted overlap and observed {target_label} by level and perturbation",
+                            aggregation="grouped by level and perturbation",
+                            x="perturbation type",
+                            y=target_label,
+                            profile=profile,
+                        )
+                    ),
+                )
+
+    if exhaustive and isinstance(exp5_sample_by_group_and_target, dict) and exp5_summary:
+        primary_group = exp5_summary.get("primary_group", "late")
+        for source_name, source_groups in exp5_sample_by_group_and_target.items():
+            if source_name.endswith("_raw") or not isinstance(source_groups, dict):
+                continue
+            primary_group_targets = source_groups.get(primary_group, {})
+            for target_name in exp5_summary.get("targets", []):
+                sample_pairs = _filter_points_to_levels(primary_group_targets.get(target_name, []))
+                if not sample_pairs:
+                    continue
+                target_label = _exp5_target_label(target_name)
+                plot_overlap_scatter(
+                    sample_pairs,
+                    _pearson_from_scatter_points(sample_pairs),
+                    primary_dir / f"exp5_overlap_scatter_{source_name}_{primary_group}_{target_name}_sample.png",
+                    title=f"Primary L1-L4: Overlap vs {target_label} ({_exp5_source_label(source_name)}, {primary_group}, per sample)",
+                    point_size=20,
+                    alpha=0.45,
+                    max_points=sample_scatter_limit,
+                    y_label=target_label,
+                    scale_mode=_exp5_target_scale_mode(target_name),
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="5",
+                            what=f"Primary-ladder predicted overlap vs {target_label}",
+                            aggregation="per sample",
+                            x="predicted spectral overlap S_pred",
+                            y=target_label,
+                            profile=profile,
+                        )
+                    ),
+                )
+
+
 def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = None) -> None:
     plots_dir = results_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
     _PLOT_MANIFEST.clear()
-    for existing in plots_dir.glob("*.png"):
-        existing.unlink(missing_ok=True)
-    (plots_dir / "plot_manifest.json").unlink(missing_ok=True)
+    _clear_plot_outputs(plots_dir)
 
     profile = _plot_profile(config)
     exhaustive = _is_exhaustive_profile(profile)
@@ -3866,6 +5324,30 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
+        for y_key, y_label, file_name, y_metadata in (
+            ("mean_accuracy_drop", "Mean Accuracy Drop", "exp1_complexity_accuracy_drop.png", "mean gated accuracy drop"),
+            ("mean_loglik_drift", "Mean Log-Likelihood Drift", "exp1_complexity_loglik_drift.png", "mean correct-answer log-likelihood drift"),
+            ("mean_loglik_erosion", "Mean Log-Likelihood Erosion", "exp1_complexity_loglik_erosion.png", "mean positive correct-answer log-likelihood drift"),
+            ("mean_loglik_recovery", "Mean Log-Likelihood Recovery", "exp1_complexity_loglik_recovery.png", "mean negative correct-answer log-likelihood drift"),
+            ("mean_loglik_volatility", "Mean Log-Likelihood Volatility", "exp1_complexity_loglik_volatility.png", "mean absolute correct-answer log-likelihood drift"),
+        ):
+            plot_complexity_scatter(
+                exp1_complexity,
+                y_key=y_key,
+                y_label=y_label,
+                out_path=_csem_copy_path(plots_dir / file_name),
+                title=f"{y_label} vs Raw Semantic Complexity",
+                x_key="complexity_score",
+                metadata=_plot_metadata(
+                    experiment="1",
+                    what="Raw semantic complexity vs robustness/confidence outcome",
+                    aggregation="per-image per-level average over perturbations",
+                    x="raw semantic complexity",
+                    y=y_metadata,
+                    note=_complexity_plot_note("complexity_score"),
+                    profile=profile,
+                ),
+            )
     if exp1_tests:
         cc = exp1_tests.get("continuous_complexity", {})
         mirror_tests = cc.get("wordy_mirror_paired_tests")
@@ -3914,7 +5396,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 comparison_regression=accuracy_reg_within if accuracy_reg_pooled else None,
                 metadata=_plot_metadata(
                     experiment="1",
-                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness vs prediction entropy on gated fragility",
+                    what="Relative impact of raw semantic complexity vs prompt load vs option hardness vs prediction entropy on gated fragility",
                     aggregation="multivariate regression over per-image per-level averages",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
@@ -3945,7 +5427,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 comparison_regression=loglik_reg_within if loglik_reg_pooled else None,
                 metadata=_plot_metadata(
                     experiment="1",
-                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness vs prediction entropy",
+                    what="Relative impact of raw semantic complexity vs prompt load vs option hardness vs prediction entropy",
                     aggregation="multivariate regression over per-image per-level averages",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
@@ -4323,10 +5805,17 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         _plot_exp2_control_divergence(exp2_summary, plots_dir / "exp2_control_divergence.png")
         _plot_exp2_control_spectra(exp2_summary, plots_dir, suppress_dc=suppress_dc)
         if exp2_complexity:
+            out_path = plots_dir / "exp2_complexity_bandwidth.png"
             _plot_exp2_complexity_groups(
                 exp2_complexity,
-                plots_dir / "exp2_complexity_bandwidth.png",
+                out_path,
                 profile=profile,
+            )
+            _plot_exp2_complexity_groups(
+                exp2_complexity,
+                _csem_copy_path(out_path),
+                profile=profile,
+                x_key="complexity_score",
             )
         if exp2_tests:
             cc = exp2_tests.get("continuous_complexity", {})
@@ -4344,7 +5833,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     comparison_regression=bandwidth_reg_within if bandwidth_reg_pooled else None,
                     metadata=_plot_metadata(
                         experiment="2",
-                        what="Relative impact of residualized semantic logic vs prompt load vs option hardness",
+                        what="Relative impact of raw semantic complexity vs prompt load vs option hardness",
                         aggregation="multivariate regression over per-image per-level bandwidth",
                         x="standardized coefficient with 95% CI",
                         y="predictor",
@@ -4537,6 +6026,27 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
+        for y_key, y_label, file_name, y_metadata in (
+            ("mean_post_drift_all", "Mean Post-Fusion Drift ΔZ_all", "exp3_complexity_post_drift_all.png", "mean post-fusion drift ΔZ_all"),
+            ("mean_response_amplification", "Mean Response Amplification", "exp3_complexity_response_amplification.png", "mean response amplification"),
+        ):
+            plot_complexity_scatter(
+                exp3_complexity,
+                y_key=y_key,
+                y_label=y_label,
+                out_path=_csem_copy_path(plots_dir / file_name),
+                title=f"{y_label} vs Raw Semantic Complexity",
+                x_key="complexity_score",
+                metadata=_plot_metadata(
+                    experiment="3",
+                    what="Raw semantic complexity vs internal response",
+                    aggregation="per-image per-level average over perturbations",
+                    x="raw semantic complexity",
+                    y=y_metadata,
+                    note=_complexity_plot_note("complexity_score"),
+                    profile=profile,
+                ),
+            )
     if exp3_tests:
         cc = exp3_tests.get("continuous_complexity", {})
         post_reg_pooled = cc.get("horse_race_mean_post_drift_all")
@@ -4553,7 +6063,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 comparison_regression=post_reg_within if post_reg_pooled else None,
                 metadata=_plot_metadata(
                     experiment="3",
-                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness",
+                    what="Relative impact of raw semantic complexity vs prompt load vs option hardness",
                     aggregation="multivariate regression over per-image per-level mean post-fusion drift",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
@@ -4602,7 +6112,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 comparison_regression=amp_reg_within if amp_reg_pooled else None,
                 metadata=_plot_metadata(
                     experiment="3",
-                    what="Relative impact of residualized semantic logic vs prompt load vs option hardness",
+                    what="Relative impact of raw semantic complexity vs prompt load vs option hardness",
                     aggregation="multivariate regression over per-image per-level mean response amplification",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
@@ -4738,10 +6248,17 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 level_pairs=valid_wordy_pairs,
             )
     if exp4_complexity:
+        out_path = plots_dir / "exp4_complexity_cutoff.png"
         _plot_exp4_complexity_modes(
             exp4_complexity,
-            plots_dir / "exp4_complexity_cutoff.png",
+            out_path,
             profile=profile,
+        )
+        _plot_exp4_complexity_modes(
+            exp4_complexity,
+            _csem_copy_path(out_path),
+            profile=profile,
+            x_key="complexity_score",
         )
     if exp4_tests:
         cc = exp4_tests.get("continuous_complexity", {})
@@ -4761,7 +6278,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     comparison_regression=regression_within if regression_pooled else None,
                     metadata=_plot_metadata(
                         experiment="4",
-                        what="Relative impact of residualized semantic logic vs prompt load vs option hardness",
+                        what="Relative impact of raw semantic complexity vs prompt load vs option hardness",
                         aggregation=f"multivariate regression over per-image per-level critical cutoff ({mode})",
                         x="standardized coefficient with 95% CI",
                         y="predictor",
@@ -5063,7 +6580,28 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     aggregation="grouped by level and perturbation on the primary Exp 5 branch",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
-                    note="Predictors are zscore(log1p(S_pred)), prompt load, and option hardness",
+                    note="Predictors are zscore(log1p(S_pred)), raw semantic complexity, prompt load, and option hardness",
+                    profile=profile,
+                ),
+            )
+        factor_views = (
+            factor_payload.get("grouped", {}).get("views", {})
+            if isinstance(factor_payload, dict)
+            else {}
+        )
+        if isinstance(factor_views, dict) and factor_views:
+            plot_coefficient_forest_views(
+                factor_views,
+                plots_dir / "exp5_coefficient_plot_prediction_factors_views.png",
+                title="Triple-View Prediction Factors for Accuracy Drop",
+                subtitle="Primary marginal r; wordy/pooled multivariate coefficients",
+                metadata=_plot_metadata(
+                    experiment="5",
+                    what="Triple-view prediction-factor summary for observed accuracy drop",
+                    aggregation="grouped by level and perturbation on the primary Exp 5 branch",
+                    x="primary marginal Pearson r; wordy/pooled standardized coefficient with 95% CI",
+                    y="predictor",
+                    note="Predictors are zscore(log1p(S_pred)), raw semantic complexity, prompt load, and option hardness",
                     profile=profile,
                 ),
             )
@@ -5091,34 +6629,70 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     .get(primary_target, [])
                 )
                 if sample_points:
+                    out_path = plots_dir / f"exp5_complexity_predicted_{source_name}_{primary_group}_{primary_target}.png"
                     plot_complexity_scatter(
                         sample_points,
                         y_key="predicted",
                         y_label="Predicted Sensitivity S_pred",
-                        out_path=plots_dir / f"exp5_complexity_predicted_{source_name}_{primary_group}_{primary_target}.png",
-                        title=f"S_pred vs Semantic Complexity ({_exp5_source_label(source_name)}, {primary_group})",
+                        out_path=out_path,
+                        title=f"S_pred vs Residualized Semantic Logic ({_exp5_source_label(source_name)}, {primary_group})",
                         metadata=_plot_metadata(
                             experiment="5",
-                            what="Continuous semantic complexity vs predicted spectral sensitivity",
+                            what="Residualized semantic logic vs predicted spectral sensitivity",
                             aggregation="per-sample overlap pairs",
-                            x="semantic complexity score",
+                            x="residualized semantic logic",
+                            y="predicted sensitivity S_pred",
+                            note=f"Source={_exp5_source_label(source_name)}; group={primary_group}; target={_exp5_target_label(primary_target)}",
+                            profile=profile,
+                        ),
+                    )
+                    plot_complexity_scatter(
+                        sample_points,
+                        y_key="predicted",
+                        y_label="Predicted Sensitivity S_pred",
+                        out_path=_csem_copy_path(out_path),
+                        title=f"S_pred vs Raw Semantic Complexity ({_exp5_source_label(source_name)}, {primary_group})",
+                        x_key="complexity_score",
+                        metadata=_plot_metadata(
+                            experiment="5",
+                            what="Raw semantic complexity vs predicted spectral sensitivity",
+                            aggregation="per-sample overlap pairs",
+                            x="raw semantic complexity",
                             y="predicted sensitivity S_pred",
                             note=f"Source={_exp5_source_label(source_name)}; group={primary_group}; target={_exp5_target_label(primary_target)}",
                             profile=profile,
                         ),
                     )
                     if any(point.get("absolute_prediction_error") is not None for point in sample_points):
+                        error_path = plots_dir / f"exp5_complexity_prediction_error_{source_name}_{primary_group}_{primary_target}.png"
                         plot_complexity_scatter(
                             sample_points,
                             y_key="absolute_prediction_error",
                             y_label="Absolute Prediction Error",
-                            out_path=plots_dir / f"exp5_complexity_prediction_error_{source_name}_{primary_group}_{primary_target}.png",
-                            title=f"Prediction Error vs Semantic Complexity ({_exp5_source_label(source_name)}, {primary_group})",
+                            out_path=error_path,
+                            title=f"Prediction Error vs Residualized Semantic Logic ({_exp5_source_label(source_name)}, {primary_group})",
                             metadata=_plot_metadata(
                                 experiment="5",
-                                what="Continuous semantic complexity vs calibrated absolute prediction error",
+                                what="Residualized semantic logic vs calibrated absolute prediction error",
                                 aggregation="per-sample overlap pairs",
-                                x="semantic complexity score",
+                                x="residualized semantic logic",
+                                y="absolute prediction error",
+                                note=f"Source={_exp5_source_label(source_name)}; group={primary_group}; target={_exp5_target_label(primary_target)}",
+                                profile=profile,
+                            ),
+                        )
+                        plot_complexity_scatter(
+                            sample_points,
+                            y_key="absolute_prediction_error",
+                            y_label="Absolute Prediction Error",
+                            out_path=_csem_copy_path(error_path),
+                            title=f"Prediction Error vs Raw Semantic Complexity ({_exp5_source_label(source_name)}, {primary_group})",
+                            x_key="complexity_score",
+                            metadata=_plot_metadata(
+                                experiment="5",
+                                what="Raw semantic complexity vs calibrated absolute prediction error",
+                                aggregation="per-sample overlap pairs",
+                                x="raw semantic complexity",
                                 y="absolute prediction error",
                                 note=f"Source={_exp5_source_label(source_name)}; group={primary_group}; target={_exp5_target_label(primary_target)}",
                                 profile=profile,
@@ -5533,5 +7107,29 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         ),
                     )
 
+    main_manifest_entries = [copy.deepcopy(entry) for entry in _PLOT_MANIFEST]
+    primary_plot_count = 0
+    try:
+        primary_entries = _generate_primary_l1_l4_plots(
+            results_dir,
+            config,
+            profile=profile,
+            exhaustive=exhaustive,
+            profile_sample_limit=profile_sample_limit,
+            sample_scatter_limit=sample_scatter_limit,
+            suppress_dc=suppress_dc,
+        )
+        primary_plot_count = len(primary_entries)
+    except Exception:
+        logger.exception("Primary L1-L4 plot generation failed (non-fatal)")
+    finally:
+        _PLOT_MANIFEST[:] = main_manifest_entries
+
     _write_plot_manifest(plots_dir, profile)
-    logger.info("All plots generated in %s (profile=%s, plots=%d)", plots_dir, profile, len(_PLOT_MANIFEST))
+    logger.info(
+        "All plots generated in %s (profile=%s, plots=%d, primary_l1_l4_plots=%d)",
+        plots_dir,
+        profile,
+        len(_PLOT_MANIFEST),
+        primary_plot_count,
+    )

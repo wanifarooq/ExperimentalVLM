@@ -2,7 +2,7 @@
 
 ## Building on: "Same Answer, Different Representations" (Paper 1)
 
-## Implementation Status (April 15, 2026)
+## Implementation Status (April 16, 2026)
 
 This file mixes long-horizon research goals with the current implementation. The code in `frequency_alignment/` now concretely implements the main pipeline on `GQA` for experiments `1-5` and `PartImageNet` for experiment `6`, with the authoritative operational behavior documented in `frequency_alignment/experiment_run.md`.
 
@@ -17,8 +17,9 @@ Implementation clarifications that supersede older references below:
 - Experiment 1 now stores both raw and relative perturbation spectra in image space (`delta_f`, `delta_f_relative`) and, when enabled, the matching raw and relative vision-feature spectra (`delta_f_vision`, `delta_f_vision_relative`).
 - Experiment 1 stores signed and directional correct-answer log-likelihood metrics: `loglik_drift`, `loglik_erosion`, `loglik_recovery`, and `loglik_volatility`.
 - Experiments `1`, `2`, `3`, `4`, and `5` now keep discrete level labels but also attach a continuous semantic complexity score based on a structured semantic program plus a grounding-ambiguity term. Prompt/load complexity and MCQ option hardness are tracked separately as controls.
-- Horse-race regressions use residualized semantic logic (`complexity_score_residual`) as the main logic variable, where semantic complexity is residualized against prompt load.
-- Regression and grouped-correlation reporting now uses three views: Primary (`L1-L4`), Wordy (`L5-L8`), and Pooled (`L1-L8`). Legacy unsuffixed keys remain for compatibility.
+- Prompt load (`prompt_complexity_score`) is question-only. MCQ option text is excluded so prompt load is not confounded with answer type; option-set difficulty is carried separately by `option_hardness_score`.
+- Primary-view (`L1-L4`) horse-race payloads are now marginal summaries only: Pearson/Spearman correlations for each predictor, Kendall monotonicity across the L1-to-L4 ladder, and a VIF diagnostic for raw semantic complexity vs prompt load. Primary multivariate beta decomposition is intentionally not emitted because the terse ladder is strongly collinear.
+- Wordy (`L5-L8`) and Pooled (`L1-L8`) views keep full multivariate horse-race regressions using raw `question_complexity_score`, `prompt_complexity_score`, and `option_hardness_score`, plus clean prediction entropy where available. Legacy unsuffixed keys remain for compatibility.
 - Accuracy-drop horse races are gated to clean-correct points only. This tests fragility of existing knowledge rather than mixing in already-wrong questions.
 - Experiment 1 now includes clean-image prediction entropy as an additional horse-race control, separating spectral fragility from flat/confused MCQ score distributions.
 - Experiment 1 also runs paired mirror tests comparing each primary level against its wordy counterpart (`L1/L5`, `L2/L6`, `L3/L7`, `L4/L8`) and plots the linguistic stabilization effect as base-minus-wordy drift/drop.
@@ -27,9 +28,9 @@ Implementation clarifications that supersede older references below:
 - Experiment 2 also includes prompt-only controls (`empty_language`, `random_language`) so task-conditioned filters can be compared against semantically weak prompts.
 - Experiment 3 now uses a late decoder hidden state as the default post-fusion representation, treats pre-fusion band drift as the controlled perturbation input, and measures the task-conditioned post-fusion response with an all-token scalar drift. It then tests whether that response follows the overlap between `W_t` and the pre-fusion drift profile for `overall`, `early`, `mid`, and `late`, with `late` treated as the main post-fusion comparison.
 - Experiment 5 now runs overlap prediction on both image-space and vision-feature perturbation spectra, keeps both raw and relative normalization branches, and evaluates multiple targets: `accuracy_drop`, `loglik_erosion`, `loglik_volatility`, `net_drop`, and grouped `relative_accuracy_drop`. The primary paper target is `loglik_volatility`, with accuracy-based targets retained as controls.
-- Experiment 5 also keeps a standardized "comparable bridge" analysis in parallel with the raw overlap results: the prediction is transformed with `log1p` and both prediction and observed target are z-scored so effect sizes can be compared on a common scale. This does not replace the raw overlap metrics; it complements them.
+- Experiment 5 also keeps a standardized "comparable bridge" analysis in parallel with the raw overlap results: the prediction is transformed with `log1p` and both prediction and observed target are z-scored so effect sizes can be compared on a common scale. This does not replace the raw overlap metrics; it complements them. Its prediction-factor summary now includes `zscore(log1p(S_pred))`, raw semantic complexity, prompt load, and option hardness, with primary marginal diagnostics and wordy/pooled multivariate regressions.
 - Spectral binning is adaptive by default: the runner probes the model patch grid, resolves one linear radial bin count for the run, and freezes it so all spectra remain aligned. DC suppression and log-scale plotting are config/visualization choices, not fixed theory assumptions.
-- Complexity scatter plots use residualized semantic logic on the x-axis when available, so wordy controls do not visually collapse the semantic trend.
+- Complexity scatter plots use residualized semantic logic on the x-axis when available, so wordy controls do not visually collapse the semantic trend. Matching `_csem` plot copies are also generated against raw semantic complexity for comparison.
 - Monotonicity and Spearman granularity tests stay on the primary ladder, with secondary wordy-ladder checks where available. Pooled monotonicity is intentionally not reported because it would conflate semantic and prompt-load interventions.
 - Perturbation overlays are label-free by default so text, random text, and box overlays are nuisance perturbations shared across levels rather than answer-conditioned interventions.
 - GQA dataset construction now uses early stopping and a local granularity cache so repeated runs do not rebuild the same sample list from scratch.
@@ -53,7 +54,7 @@ Implementation clarifications that supersede older references below:
 
 **H1d (Perturbation-Filter Overlap):** The magnitude of performance degradation for a given (task, perturbation) pair is predicted by the spectral overlap between the perturbation's energy injection pattern and the task's frequency filter W_t. High overlap → high degradation, low overlap → robustness.
 
-**H1e (Two-Factor Language Control):** Semantic program complexity and prompt load exert separable forces. Residualized semantic logic increases spectral grounding demand and perturbation-induced drift, while prompt load can act as linguistic anchoring that damps drift. The `L5-L8` wordy controls test this directly by increasing prompt load while holding the underlying semantic program fixed.
+**H1e (Two-Factor Language Control):** Semantic program complexity and prompt load exert separable forces. Raw semantic complexity is the main causal variable in wordy/pooled horse races, while residualized semantic logic is retained for visual diagnostics that subtract prompt-load effects. Prompt load can act as linguistic anchoring that damps drift. The `L5-L8` wordy controls test this directly by increasing prompt load while holding the underlying semantic program fixed.
 
 ### Connection to Paper 1
 Paper 1 established:
@@ -81,7 +82,7 @@ In practice, this means the project no longer treats prompt length as a proxy fo
 - `prompt load` is an explicit control
 - `option hardness` is an explicit MCQ-discrimination control
 
-The fixed-effects and multivariate regressions are designed to identify the semantic-complexity effect after controlling for both of these confounders. The intended scientific claim is therefore:
+Primary-ladder statistics report marginal semantic-complexity relationships plus collinearity diagnostics. Wordy and pooled multivariate regressions are designed to identify the semantic-complexity effect after controlling for prompt load and option hardness. The intended scientific claim is therefore:
 
 > semantic complexity is the true driver of frequency-based fragility, while prompt length is controlled rather than conflated with semantic demand.
 
@@ -239,7 +240,7 @@ The current GQA implementation also creates matched wordy controls:
 | L7 | Wordy-fine | Same as L3 | More prompt load than L3 at relationship-verify semantics |
 | L8 | Wordy-very-fine | Same as L4 | More prompt load than L4 at compositional MCQ semantics |
 
-The primary granularity hypothesis is still evaluated on `L1-L4`. The `L5-L8` controls are used to test whether long prompts alone explain the effect; their semantic programs are copied from matched base levels, while residualized logic is fit on `L1-L4` and then applied to the wordy mirrors.
+The primary granularity hypothesis is still evaluated on `L1-L4`. The `L5-L8` controls are used to test whether long prompts alone explain the effect; their semantic programs are copied from matched base levels, while residualized logic is fit on `L1-L4` and retained for Cres-vs-outcome diagnostic plots.
 
 For segmentation variant:
 | Level | Task Type | Example Prompt | Granularity |
@@ -275,8 +276,8 @@ For segmentation variant:
 - Keep prompt/load complexity separate as a control rather than folding option wording into the main semantic score.
 - Add an explicit option-hardness control `H_opt` so semantic complexity can be separated from MCQ discrimination difficulty.
 - Add prediction entropy as a model-confusion control, computed over the clean-image MCQ option distribution.
-- In the current code, the continuous analysis is tested both as pooled slopes and as within-image fixed-effects regressions, plus multivariate horse-race regressions over semantic complexity, prompt load, option hardness, and clean prediction entropy where available.
-- Horse-race regressions use residualized semantic logic as the main semantic variable: `complexity_score_residual = residual(complexity_score ~ prompt_complexity_score)`.
+- In the current code, the continuous analysis is tested as primary-ladder marginal trends, wordy/pooled multivariate horse races, and within-image fixed-effects regressions where the view supports decomposition.
+- `complexity_score_residual = residual(complexity_score ~ prompt_complexity_score)` is retained for Cres scatter plots and dual-force diagnostics; wordy/pooled horse-race regressions use raw `question_complexity_score`.
 - Accuracy-drop regressions are filtered to clean-correct points only, so they measure fragility of already-known answers.
 - Paired mirror tests compare terse levels against matched wordy controls on the same image, directly estimating linguistic stabilization as `base - wordy`.
 - Perturbation-specific horse races are produced for accuracy drop and all directional log-likelihood outcomes.
@@ -306,9 +307,9 @@ For segmentation variant:
 - Plot mean power spectrum `|Â_j|²` for all available levels, including `L5-L8` wordy controls in descriptive plots
 - Plot `overall`, `early`, `mid`, and `late` `W_t(ω)` filters and their bandwidths
 - Plot matched wordy-control bandwidth comparisons: `L1` vs `L5`, `L2` vs `L6`, `L3` vs `L7`, `L4` vs `L8`
-- Plot effective bandwidth against continuous semantic complexity to test whether each additional prompt atom broadens the task filter
-- Run within-image fixed-effects regressions so the semantic-complexity slope is estimated on the same image rather than across pooled image content.
-- Run multivariate horse-race regressions `bandwidth ~ semantic + prompt_load + option_hardness`.
+- Plot effective bandwidth against both residualized semantic logic (`Cres`) and raw semantic complexity (`Csem`) to test whether each additional semantic unit broadens the task filter.
+- For the primary `L1-L4` view, report marginal predictor correlations, Kendall monotonicity, and VIF diagnostics rather than unstable multivariate betas.
+- For wordy and pooled views, run multivariate horse-race regressions `bandwidth ~ Csem + prompt_load + option_hardness`.
 - Compare task prompts to prompt-only controls using `L2`, cosine similarity, and Jensen-Shannon divergence between `W_t` distributions
 - Correlate `G(t)` with sensitivity from Experiment 1
 
@@ -341,7 +342,7 @@ For segmentation variant:
 - The same pre-fusion perturbation profile should induce different post-fusion responses for different tasks.
 - Tasks whose `W_t` overlaps more strongly with the pre-fusion drift profile should show larger `ΔZ_all`.
 - The clearest controlled effect should appear on the `late` filter group.
-- Continuous complexity regressions should show that residualized semantic logic predicts `ΔZ_all` and response amplification after prompt-load and option-hardness controls.
+- Continuous complexity plots should show the relationship of `ΔZ_all` and response amplification to both residualized semantic logic and raw semantic complexity; wordy/pooled horse races control prompt load and option hardness.
 - Wordy-control plots should show whether increased prompt load alone changes post-fusion drift relative to the matched base level.
 
 **Models**: Qwen3-VL checkpoints are the primary implemented path because hidden states, vision-token spans, and attention slices are accessible through the adapter.
@@ -368,7 +369,7 @@ For segmentation variant:
 - The critical cutoff ω_c* where accuracy drops below 50% shifts to higher frequencies as granularity increases
 - This directly measures the "bandwidth" of the effective filter W_t
 - The same cutoff should also increase smoothly with the continuous semantic complexity score
-- The same relationship should survive within-image fixed-effects and multivariate horse-race controls.
+- The same relationship should appear in primary marginal diagnostics and survive wordy/pooled horse-race controls.
 - Wordy-control cutoff plots test whether prompt load changes cutoff thresholds independently of semantic program complexity.
 
 **Dataset**: GQA multilevel samples in the current implemented path.
@@ -393,14 +394,14 @@ For segmentation variant:
    - grouped `relative_accuracy_drop = (Acc_clean - Acc_pert) / max(Acc_clean, ε)`
 6. Treat `loglik_volatility` as the primary target because it captures confidence motion even when the discrete answer does not flip. Accuracy-based targets remain controls.
 7. Compute both grouped correlations over `(level, perturbation)` pairs and raw per-sample correlations.
-8. Run a multivariate prediction-factor horse race for observed `accuracy_drop`: `accuracy_drop ~ zscore(log1p(S_pred)) + prompt_load + option_hardness`.
+8. Run prediction-factor summaries for observed `accuracy_drop`: primary view reports marginal correlations and VIF diagnostics; wordy/pooled views run `accuracy_drop ~ zscore(log1p(S_pred)) + Csem + prompt_load + option_hardness`.
 9. Generate level-wise and level-by-perturbation predicted-vs-observed plots. These use separate axes for predicted overlap and observed behavior when their scales differ.
 10. Generate wordy-control comparison plots for predicted sensitivity and observed targets.
 
 **Expected Result**:
 - Strong positive grouped correlation between predicted overlap and correct-answer log-likelihood volatility, with the cleanest signal typically appearing on the `late` branch
 - `loglik_volatility` is the headline target because the theory predicts internal signal motion under perturbation whether that motion is erosion or recovery; `loglik_erosion` and binary `accuracy_drop` remain important controls
-- The prediction-factor horse race should show the standardized spectral-overlap coefficient as the strongest independent predictor of accuracy failure after prompt-load and option-hardness controls
+- The prediction-factor summaries should show spectral overlap as a strong independent predictor in wordy/pooled regressions and as a strong marginal predictor in the primary view.
 - Relative-normalization should make cross-image comparisons more stable without eliminating the raw-overlap control view
 - Prediction error and predicted sensitivity should have interpretable continuous relationships with semantic complexity if the spectral-overlap theory captures task-specific vulnerability.
 
@@ -531,8 +532,8 @@ For segmentation variant:
   - SAM3 with PartImageNet (L1-L3)
 - Record: accuracy/mIoU, correct-answer log-likelihood drift, directional drift, optional cosine drift, optional Dirichlet energy
 - Compute: degradation curves (metric vs severity) for each granularity level
-- Statistical test: primary `L1-L4` monotonicity plus continuous fixed-effects and horse-race regressions
-- Target output: primary degradation curves plus wordy-control comparisons and perturbation-specific coefficient plots
+- Statistical test: primary `L1-L4` monotonicity plus primary marginal summaries and wordy/pooled horse-race regressions
+- Target output: primary degradation curves plus wordy-control comparisons and perturbation-specific marginal/coefficient plots
 
 **Step 2.2: Experiment 2 -- Cross-Attention Frequency Analysis** (Week 5-6)
 - For configured samples × available prompts, extract effective language-to-vision attention maps from Qwen3-VL
@@ -552,7 +553,7 @@ For segmentation variant:
 - Also compute `overall`, `early`, `mid`, and `late` group filters plus prompt-only controls
 - Plot: average power spectrum for all available levels, matched wordy-control bandwidth comparisons, and prompt-control divergences
 - Compute: G(t) for each granularity level and layer group
-- Statistical test: primary `L1-L4` bandwidth trend plus continuous fixed-effects and horse-race regressions, with `L5-L8` as prompt-load controls
+- Statistical test: primary `L1-L4` bandwidth trend plus primary marginal summaries and wordy/pooled horse-race regressions, with `L5-L8` as prompt-load controls
 
 **Step 2.3: Experiment 3 -- Pre/Post Fusion Drift** (Week 6-7)
 - For configured samples × available prompts × configured perturbations:
@@ -563,7 +564,7 @@ For segmentation variant:
   - Group perturbations by similar normalized `ΔV(ω)` profiles
   - Correlate `ΔZ_all` with `∫ W_t(ω) · ΔV(ω) dω` for `overall`, `early`, `mid`, and `late`
 - Plot: controlled overlap-vs-response correlations, profile-group response heatmaps, sample-level `ΔV(ω)` profiles, complexity regressions, and wordy-control internal-drift comparisons
-- Statistical test: Pearson correlation between controlled post-fusion response and spectral overlap for each group, with `late` as the primary post-fusion test, plus continuous response regressions
+- Statistical test: Pearson correlation between controlled post-fusion response and spectral overlap for each group, with `late` as the primary post-fusion test, plus continuous response summaries
 
 **Step 2.4: Experiment 4 -- Synthetic Frequency Ablation** (Week 7-8)
 - For 500 images, create frequency-swept versions:
@@ -656,8 +657,8 @@ Structure:
 | **Effective bandwidth** | Granularity level | G(t) | Bar chart, split by overall/early/mid/late | Monotonically increasing |
 | **Coefficient / forest plots** | Standardized beta | Predictor | Pooled and within-image dots with CIs | Residualized semantics dominates prompt/load controls |
 | **Linguistic stabilization** | Matched mirror pair | Base-minus-wordy drop/drift | One bar per pair | Positive values show wordy prompts damp fragility |
-| **Perturbation-specific horse races** | Standardized beta | Predictor | One subplot per perturbation type | Shows which perturbations follow the theory most closely |
-| **Directional confidence plots** | Semantic complexity | Drift / erosion / recovery / volatility | Scatter by level | Semantics increases volatility; prompt load can damp movement |
+| **Perturbation-specific summaries** | Marginal r or standardized beta | Predictor | One subplot per perturbation type | Shows which perturbations follow the theory most closely |
+| **Directional confidence plots** | Cres and Csem | Drift / erosion / recovery / volatility | Scatter by level | Semantics increases volatility; prompt load can damp movement |
 | **Controlled post-fusion response** | Filter group / profile group | Correlation or mean ΔZ_all | Coarse vs Fine prompt | Higher overlap predicts larger task-conditioned post-fusion response |
 | **Frequency threshold** | Cutoff frequency ω_c | Accuracy | One curve per granularity | Critical ω_c shifts right with granularity |
 | **Overlap prediction** | Predicted sensitivity | Actual sensitivity | Scatter plot by overall/early/mid/late and raw/relative branches | Strongest linear correlation on the primary late branch |
@@ -669,8 +670,8 @@ Structure:
 | Metric | What it proves | Target value |
 |--------|---------------|-------------|
 | Spearman ρ(granularity, sensitivity) | H1c: monotonic scaling | ρ > 0.8, p < 0.001 |
-| Fixed-effects slope of bandwidth or drift on residualized semantic complexity | H1a/H1e: frequency-selective attention after image and prompt-load controls | Positive slope, CI excluding 0 |
-| Horse-race beta for residualized semantics vs prompt load, option hardness, and prediction entropy | H1e: semantic logic dominates prompt length, MCQ difficulty, and clean uncertainty | Semantic beta largest and stable across perturbations |
+| Primary marginal correlation of Csem with bandwidth or drift plus VIF(Csem, Cprompt) | H1a/H1e: frequency-selective attention on the terse ladder with collinearity documented | Positive/expected-sign marginal r with reported VIF |
+| Wordy/pooled horse-race beta for Csem vs prompt load, option hardness, and prediction entropy | H1e: semantic logic dominates prompt length, MCQ difficulty, and clean uncertainty where the design supports decomposition | Semantic beta stable across perturbations |
 | Correlation(ΔZ_all, ∫W_t·ΔV) per prompt and layer group | H1b: task-conditioned internal response follows the filter | r > 0.6 |
 | Pearson r(predicted, actual sensitivity) on primary late branch | H1d: spectral overlap prediction | r > 0.7 |
 | ω_c*(L4) / ω_c*(L1) ratio | Bandwidth scales with granularity | Ratio > 2.0 |

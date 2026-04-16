@@ -12,6 +12,7 @@ import numpy as np
 
 from ..analysis.continuous import (
     summarize_fixed_effects_trend,
+    summarize_horse_race_view,
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
@@ -125,6 +126,7 @@ def _build_overlap_pairs(
         lambda: {
             "predicted": [],
             "complexity_score": [],
+            "question_complexity_score": [],
             "prompt_complexity_score": [],
             "option_hardness_score": [],
             "accuracy_drop": [],
@@ -147,6 +149,9 @@ def _build_overlap_pairs(
             if W_t is None:
                 continue
             complexity_score = float(level_data.get("complexity_score", 0.0) or 0.0)
+            question_complexity_score = float(
+                level_data.get("question_complexity_score", complexity_score) or 0.0
+            )
             prompt_complexity_score = float(level_data.get("prompt_complexity_score", 0.0) or 0.0)
             option_hardness_score = float(level_data.get("option_hardness_score", 0.0) or 0.0)
 
@@ -184,6 +189,7 @@ def _build_overlap_pairs(
                     "ci": ci,
                     "ic": ic,
                     "complexity_score": complexity_score,
+                    "question_complexity_score": question_complexity_score,
                     "prompt_complexity_score": prompt_complexity_score,
                     "option_hardness_score": option_hardness_score,
                 }
@@ -192,6 +198,7 @@ def _build_overlap_pairs(
                 key = (level_key, pair["perturbation"])
                 grouped[key]["predicted"].append(predicted)
                 grouped[key]["complexity_score"].append(complexity_score)
+                grouped[key]["question_complexity_score"].append(question_complexity_score)
                 grouped[key]["prompt_complexity_score"].append(prompt_complexity_score)
                 grouped[key]["option_hardness_score"].append(option_hardness_score)
                 grouped[key]["accuracy_drop"].append(accuracy_drop)
@@ -221,6 +228,7 @@ def _build_overlap_pairs(
                 "perturbation": perturbation,
                 "predicted": float(np.mean(values["predicted"])),
                 "complexity_score": float(np.mean(values["complexity_score"])),
+                "question_complexity_score": float(np.mean(values["question_complexity_score"])),
                 "prompt_complexity_score": float(np.mean(values["prompt_complexity_score"])),
                 "option_hardness_score": float(np.mean(values["option_hardness_score"])),
                 "actual": float(np.mean(values["accuracy_drop"])),
@@ -421,24 +429,37 @@ def _summarize_prediction_factor_horse_race(
     for pair in pairs:
         y_val = pair.get(y_key)
         predicted = pair.get("predicted")
+        question_complexity = pair.get("question_complexity_score", pair.get("complexity_score"))
         prompt = pair.get("prompt_complexity_score")
         hardness = pair.get("option_hardness_score")
-        if y_val is None or predicted is None or prompt is None or hardness is None:
+        if (
+            y_val is None
+            or predicted is None
+            or question_complexity is None
+            or prompt is None
+            or hardness is None
+        ):
             continue
         try:
             y_float = float(y_val)
             pred_float = float(predicted)
+            question_complexity_float = float(question_complexity)
             prompt_float = float(prompt)
             hardness_float = float(hardness)
         except (TypeError, ValueError):
             continue
-        if not all(np.isfinite(v) for v in (y_float, pred_float, prompt_float, hardness_float)):
+        if not all(
+            np.isfinite(v)
+            for v in (y_float, pred_float, question_complexity_float, prompt_float, hardness_float)
+        ):
             continue
         candidates.append(
             {
+                "image_id": pair.get("image_id"),
                 "level": pair.get("level"),
                 y_key: y_float,
                 "predicted_overlap_log1p_z": pred_float,
+                "question_complexity_score": question_complexity_float,
                 "prompt_complexity_score": prompt_float,
                 "option_hardness_score": hardness_float,
             }
@@ -459,23 +480,37 @@ def _summarize_prediction_factor_horse_race(
         y_key=y_key,
         x_keys=[
             "predicted_overlap_log1p_z",
+            "question_complexity_score",
             "prompt_complexity_score",
             "option_hardness_score",
         ],
     )
+    view_payload: Dict[str, Any] = {}
+    predictors = [
+        "predicted_overlap_log1p_z",
+        "question_complexity_score",
+        "prompt_complexity_score",
+        "option_hardness_score",
+    ]
+    for view_name in LEVEL_VIEW_ORDER:
+        level_filter = LEVEL_VIEWS[view_name]
+        view_payload[view_name] = summarize_horse_race_view(
+            rows,
+            y_key=y_key,
+            x_keys=predictors,
+            view_name=view_name,
+            level_filter=level_filter,
+        )
     return {
-        "description": "Multivariate horse race for observed accuracy drop: spectral overlap vs prompt load and option hardness.",
+        "description": "Multivariate horse race for observed target: spectral overlap vs raw semantic complexity, prompt load, and option hardness.",
         "outcome": y_key,
-        "predictors": [
-            "predicted_overlap_log1p_z",
-            "prompt_complexity_score",
-            "option_hardness_score",
-        ],
+        "predictors": predictors,
         "prediction_transform": "zscore(log1p(predicted_overlap))",
         "n_candidate_rows": len(rows),
         "predicted_log1p_mean": float(pred_mean),
         "predicted_log1p_std": float(pred_std),
         "regression": regression,
+        "views": view_payload,
     }
 
 

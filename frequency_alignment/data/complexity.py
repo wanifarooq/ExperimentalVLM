@@ -25,7 +25,7 @@ SEMANTIC_COMPLEXITY_SCORE_FORMULA = (
 PROMPT_COMPLEXITY_SCORE_NAME = "prompt_complexity_score"
 PROMPT_COMPLEXITY_SCORE_LABEL = "Prompt Load Control"
 PROMPT_COMPLEXITY_SCORE_DEFINITION = (
-    "prompt load proxy from question and option content tokens"
+    "prompt load proxy from question content tokens only; answer-option richness is controlled separately"
 )
 OPTION_HARDNESS_SCORE_NAME = "option_hardness_score"
 OPTION_HARDNESS_SCORE_LABEL = "Option Hardness Control"
@@ -125,9 +125,13 @@ def prompt_content_word_count(
     question_text: str,
     options: Optional[Mapping[str, str]] = None,
 ) -> int:
-    """Content-word count for the full MCQ prompt proxy."""
+    """Question-only content-word count for the prompt-load control.
 
-    return len(question_content_words(question_text)) + len(option_content_words(options))
+    ``options`` is accepted for API compatibility; option richness is measured
+    separately via ``option_hardness_score`` and must not enter Cprompt.
+    """
+
+    return len(question_content_words(question_text))
 
 
 def build_semantic_complexity(
@@ -175,8 +179,8 @@ def build_semantic_complexity(
 
     question_load_atoms = _question_load_atoms(question_text)
     option_atoms = _option_atoms(options)
-    prompt_atoms = question_load_atoms + list(option_atoms)
-    prompt_score = float(len(prompt_atoms)) if prompt_atoms else float(len(question_load_atoms))
+    prompt_atoms = list(question_load_atoms)
+    prompt_score = float(len(question_load_atoms))
 
     return {
         "semantic_atoms": question_atoms,
@@ -189,8 +193,9 @@ def build_semantic_complexity(
             "program_depth": int(program_depth),
             "grounding_candidate_count": grounding_candidate_count,
             "grounding_ambiguity": grounding_ambiguity,
+            "semantic_program_atoms_total": len(question_atoms),
             "option_atoms": len(option_atoms),
-            "question_atoms_total": len(question_atoms),
+            "question_atoms_total": len(question_load_atoms),
             "prompt_atoms_total": len(prompt_atoms),
         },
         "question_complexity_score": semantic_score,
@@ -210,15 +215,16 @@ def refresh_prompt_load(
     payload = dict(existing_complexity)
     question_load_atoms = _question_load_atoms(question_text)
     option_atoms = _option_atoms(options)
-    prompt_atoms = question_load_atoms + list(option_atoms)
+    prompt_atoms = list(question_load_atoms)
     counts = dict(payload.get("semantic_atom_counts", {}) or {})
+    if "semantic_program_atoms_total" not in counts:
+        counts["semantic_program_atoms_total"] = len(payload.get("semantic_atoms", []) or [])
     counts["option_atoms"] = len(option_atoms)
+    counts["question_atoms_total"] = len(question_load_atoms)
     counts["prompt_atoms_total"] = len(prompt_atoms)
     payload["prompt_semantic_atoms"] = prompt_atoms
     payload["semantic_atom_counts"] = counts
-    payload["prompt_complexity_score"] = (
-        float(len(prompt_atoms)) if prompt_atoms else float(len(question_load_atoms))
-    )
+    payload["prompt_complexity_score"] = float(len(question_load_atoms))
     return payload
 
 
@@ -230,9 +236,9 @@ def fallback_text_complexity(
 
     question_atoms = [token for token in _tokens(question) if token not in _TEXT_STOPWORDS]
     option_atoms = _option_atoms(options)
-    prompt_atoms = list(question_atoms) + list(option_atoms)
+    prompt_atoms = list(question_atoms)
     question_score = float(len(question_atoms))
-    prompt_score = float(len(prompt_atoms)) if prompt_atoms else question_score
+    prompt_score = question_score
     return {
         "semantic_atoms": question_atoms,
         "prompt_semantic_atoms": prompt_atoms,
@@ -244,6 +250,7 @@ def fallback_text_complexity(
             "program_depth": 0,
             "grounding_candidate_count": 0.0,
             "grounding_ambiguity": 0.0,
+            "semantic_program_atoms_total": len(question_atoms),
             "option_atoms": len(option_atoms),
             "question_atoms_total": len(question_atoms),
             "prompt_atoms_total": len(prompt_atoms),

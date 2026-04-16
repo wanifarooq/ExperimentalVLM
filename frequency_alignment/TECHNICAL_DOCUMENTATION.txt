@@ -2,7 +2,7 @@
 FREQUENCY ALIGNMENT FRAMEWORK -- CURRENT TECHNICAL DOCUMENTATION
 ================================================================================
 
-Last updated: April 15, 2026
+Last updated: April 16, 2026
 Project: Follow-up to "Same Answer, Different Representations" (VLM Robustness)
 
 This file describes the current implementation in `frequency_alignment/`.
@@ -22,7 +22,8 @@ frequency filter W_t. Robustness is predicted by overlap between:
 
 The current code adds a two-factor language model around that core claim:
 
-    - residualized semantic logic increases spectral grounding demand
+    - raw semantic complexity increases spectral grounding demand
+    - residualized semantic logic is retained for Cres-vs-outcome diagnostics
     - prompt load can act as linguistic anchoring
     - option hardness controls MCQ discrimination difficulty
     - prediction entropy controls clean-answer uncertainty
@@ -59,7 +60,7 @@ Important current behavior:
     - L5-L8 are not padded to exactly 60 content words.
     - The only requirement is that the wordy prompt is longer than the matched
       base prompt by at least `_WORDY_MIN_EXTRA_PROMPT_CONTENT_WORDS`.
-    - Cache version is `gqa_multilevel_v5`.
+    - Cache version is `gqa_multilevel_v6`.
     - Verification tasks are balanced toward 50% yes and 50% no when possible.
     - Dataset construction stops early once the requested balanced target is met.
 
@@ -68,9 +69,9 @@ are controls for prompt load and linguistic anchoring.
 
 Aggregation views:
 
-    primary: L1-L4 only
-    wordy:   L5-L8 only
-    pooled:  L1-L8
+    primary: L1-L4 only; marginal correlations, Kendall monotonicity, and VIF
+    wordy:   L5-L8 only; multivariate horse-race regressions
+    pooled:  L1-L8; multivariate horse-race regressions
 
 These views are defined once in `analysis/level_views.py`. Regressions and
 grouped overlap correlations emit view-specific payloads where applicable.
@@ -87,13 +88,19 @@ Every VQA level stores both discrete labels and continuous controls:
     complexity_score
         Structured semantic program score.
 
+    question_complexity_score
+        Raw semantic complexity alias used by horse-race regressions and
+        marginal summaries.
+
     prompt_complexity_score
-        Prompt-load proxy based on content words / prompt atoms.
+        Question-only prompt-load proxy based on content words / prompt atoms.
+        MCQ option strings are excluded because option difficulty is controlled
+        separately by option_hardness_score.
 
     complexity_score_residual
-        Main semantic variable for horse-race plots and regressions. It is the
-        residualized logic score after accounting for prompt load. The fit is
-        learned on primary levels and applied to wordy mirrors.
+        Residualized logic score after accounting for prompt load. It is used
+        for Cres scatter plots and dual-force diagnostics, not as the primary
+        multivariate horse-race predictor.
 
     option_hardness_score
         MCQ-distractor difficulty control.
@@ -245,12 +252,14 @@ What it does:
 Important statistical behavior:
 
     - continuous complexity points are stored in `complexity_points.json`
-    - horse races use `complexity_score_residual` as the semantic variable
-    - horse races are emitted for primary, wordy, and pooled views
+    - primary summaries report marginal Pearson/Spearman, Kendall monotonicity,
+      and VIF diagnostics without standardized beta coefficients
+    - wordy/pooled horse races use raw `question_complexity_score`, prompt
+      load, option hardness, and prediction entropy where available
     - prompt load, option hardness, clean accuracy, and prediction entropy are
       controls where appropriate
     - accuracy-drop horse races are filtered to clean-correct points
-    - perturbation-specific horse races are emitted for accuracy and
+    - perturbation-specific summaries are emitted for accuracy and
       log-likelihood outcomes
     - paired mirror tests compare L1/L5, L2/L6, L3/L7, and L4/L8
 
@@ -289,7 +298,8 @@ What it does:
 
 Outputs include average filters and per-sample filters used by Exp 3 and Exp 5.
 The plots show level-wise W_t, layer-group W_t, wordy mirror comparisons, prompt
-controls, and bandwidth-vs-residualized-logic trends.
+controls, bandwidth-vs-residualized-logic trends, and `_csem` raw semantic
+complexity plot copies.
 
 The summary also stores `primary_mean_Gt_curve` and `wordy_mean_Gt_curve`, which
 average effective bandwidth over the primary and wordy ladders for overall,
@@ -315,8 +325,9 @@ Current design:
     5. The test is run for overall, early, mid, and late W_t groups.
 
 The `late` group is the main post-fusion branch. The other groups are controls.
-The experiment also runs continuous regressions from residualized semantic logic
-to DeltaZ_all and response amplification.
+The experiment also runs continuous analyses from raw/residualized semantic
+complexity to DeltaZ_all and response amplification. Primary view is
+marginal-only; wordy and pooled views keep multivariate controls.
 
 Grouped overlap-response correlations are split into primary, wordy, and pooled
 views in addition to the legacy unsuffixed correlation payloads.
@@ -391,16 +402,17 @@ Comparable bridge:
 
 Prediction-factor horse race:
 
-    Exp 5 also regresses observed accuracy drop on:
+    Exp 5 also summarizes observed accuracy drop against:
 
         zscore(log1p(S_pred))
+        question_complexity_score
         prompt_complexity_score
         option_hardness_score
 
-    The grouped primary branch is plotted as
-    `exp5_coefficient_plot_prediction_factors.png`. This tests whether the
-    physical spectral-overlap prediction remains the strongest independent
-    predictor after linguistic and MCQ controls.
+    The primary view reports marginal correlations and VIF. Wordy and pooled
+    views keep multivariate coefficient estimates. The grouped primary branch
+    is plotted as `exp5_coefficient_plot_prediction_factors.png`; the
+    triple-view version is `exp5_coefficient_plot_prediction_factors_views.png`.
 
 Grouped correlations are reported as primary, wordy, and pooled views. The
 legacy `pearson_r_grouped` key remains available and corresponds to the pooled
@@ -440,11 +452,12 @@ Main file: `plotting/plots.py`
 Current plotting choices:
 
     - complexity scatter plots use `complexity_score_residual` on the x-axis
-      when available
-    - coefficient/forest plots include pooled and within-image estimates
+      when available and emit `_csem` copies against raw `complexity_score`
+    - coefficient/forest plots show primary marginal r where applicable and
+      wordy/pooled standardized beta estimates
     - coefficient/forest plots include triple-view variants when view payloads
       exist
-    - perturbation-specific horse-race coefficient plots are generated
+    - perturbation-specific marginal/coefficient summary plots are generated
     - paired wordy mirror plots show linguistic stabilization effects
     - Exp 5 plots follow the `primary_target` in summary.json, currently
       log-likelihood volatility
@@ -564,12 +577,17 @@ Typical output directory:
     exp6/per_sample.jsonl
     plots/*.png
     plots/plot_manifest.json
+    plots/primary_l1_l4/*.png
+    plots/primary_l1_l4/plot_manifest.json
 
 Important checks after a dry run:
 
     - exp1/hypothesis_tests.json contains `wordy_mirror_paired_tests`
     - exp1/complexity_points.json contains `complexity_score_residual`
       for L5-L8 points
+    - primary view payloads contain `marginal_predictors`, not beta
+      `predictors`
+    - plots include `_csem` copies for the Cres complexity scatter families
     - exp5/summary.json has `"primary_target": "loglik_volatility"`
     - exp5 target summaries contain a `loglik_volatility` block
     - plots/plot_manifest.json labels Exp 5 primary plots as log-likelihood

@@ -27,6 +27,7 @@ from ..analysis.continuous import (
     attach_complexity_residual,
     summarize_by_score,
     summarize_fixed_effects_trend,
+    summarize_horse_race_view,
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
@@ -120,7 +121,7 @@ def _horse_race_predictors(points: List[Dict[str, Any]]) -> List[str]:
     """Use entropy control when available, while preserving old-result compatibility."""
 
     predictors = [
-        "complexity_score_residual",
+        "question_complexity_score",
         "prompt_complexity_score",
         "option_hardness_score",
     ]
@@ -296,30 +297,25 @@ def _summarize_perturbation_specific_horse_races(
                 else [point for point in used_points if str(point.get("level")) in level_filter]
             )
             view_predictors = _horse_race_predictors(view_points)
-            view_payload[view_name] = {
-                "filter": {
-                    **filter_payload,
-                    "level_view": view_name,
-                    "level_filter": sorted(level_filter) if level_filter is not None else None,
-                    "n_points_used": len(view_points),
-                },
-                "pooled": summarize_multivariate_regression(
-                    view_points,
-                    y_key=y_key,
-                    x_keys=view_predictors,
-                    level_filter=level_filter,
-                ),
-                "within_image": summarize_multivariate_regression(
-                    view_points,
-                    y_key=y_key,
-                    x_keys=view_predictors,
-                    group_key="image_id",
-                    demean_by_group=True,
-                    level_filter=level_filter,
-                ),
+            view_entry = summarize_horse_race_view(
+                view_points,
+                y_key=y_key,
+                x_keys=view_predictors,
+                view_name=view_name,
+                level_filter=None,
+            )
+            view_entry["filter"] = {
+                **filter_payload,
+                "level_view": view_name,
+                "level_filter": sorted(level_filter) if level_filter is not None else None,
+                "n_points_used": len(view_points),
             }
-            by_perturbation[perturbation_name][f"pooled_{view_name}"] = view_payload[view_name]["pooled"]
-            by_perturbation[perturbation_name][f"within_image_{view_name}"] = view_payload[view_name]["within_image"]
+            view_payload[view_name] = view_entry
+            if view_name == "primary":
+                by_perturbation[perturbation_name][f"marginal_{view_name}"] = view_entry["marginal"]
+            else:
+                by_perturbation[perturbation_name][f"pooled_{view_name}"] = view_entry["pooled"]
+                by_perturbation[perturbation_name][f"within_image_{view_name}"] = view_entry["within_image"]
         by_perturbation[perturbation_name]["views"] = view_payload
     return by_perturbation
 
@@ -342,28 +338,23 @@ def _add_horse_race_views(
             else [point for point in points if str(point.get("level")) in level_filter]
         )
         predictors = _horse_race_predictors(view_points)
-        pooled = summarize_multivariate_regression(
+        view_entry = summarize_horse_race_view(
             view_points,
             y_key=y_key,
             x_keys=predictors,
-            level_filter=level_filter,
+            view_name=view_name,
+            level_filter=None,
         )
-        within = summarize_multivariate_regression(
-            view_points,
-            y_key=y_key,
-            x_keys=predictors,
-            group_key="image_id",
-            demean_by_group=True,
-            level_filter=level_filter,
-        )
-        view_payload[view_name] = {
+        view_entry.update({
             "level_filter": sorted(level_filter) if level_filter is not None else None,
             "n_points": len(view_points),
-            "pooled": pooled,
-            "within_image": within,
-        }
-        payload[f"{base_key}_{view_name}"] = pooled
-        payload[f"{base_key}_within_image_{view_name}"] = within
+        })
+        view_payload[view_name] = view_entry
+        if view_name == "primary":
+            payload[f"{base_key}_{view_name}"] = view_entry["marginal"]
+        else:
+            payload[f"{base_key}_{view_name}"] = view_entry["pooled"]
+            payload[f"{base_key}_within_image_{view_name}"] = view_entry["within_image"]
 
     payload[f"{base_key}_views"] = view_payload
 

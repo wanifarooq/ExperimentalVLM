@@ -1,12 +1,12 @@
 # Frequency Alignment Run Guide
 
-Last updated: April 15, 2026.
+Last updated: April 16, 2026.
 
 ## Current Scientific Status
 
 The original hypothesis still stands: language conditioning acts like a task-specific frequency filter `W_t`, and robustness depends on the overlap between `W_t` and perturbation energy. The current code adds a stronger two-factor test around that core idea:
 
-- primary semantic force: residualized semantic program complexity, tested within image
+- primary semantic force: raw semantic program complexity (`Csem`), with primary `L1-L4` reported as marginal correlations because `Csem` and prompt load are collinear on the terse ladder
 - control force: prompt load / linguistic anchoring
 - MCQ control: option hardness
 - prompt-load experimental controls: `L5-L8` wordy levels matched to `L1-L4`
@@ -99,7 +99,8 @@ python3 -m frequency_alignment.run_experiment \
 - The GQA loader makes each wordy-control prompt longer than its matched base prompt with neutral filler text, without imposing a fixed word or token cap.
 - Primary monotonic granularity tests remain on `L1-L4`; descriptive and control plots can include `L5-L8`.
 - Stores a continuous semantic complexity score per task based on a structured semantic program with a grounding-ambiguity term.
-- Stores `complexity_score_residual`, the residualized semantic-logic variable used in horse-race regressions after regressing semantic complexity on prompt load.
+- Stores `prompt_complexity_score` as question-only content-word load. MCQ option strings are excluded from prompt load because option richness is controlled separately by `option_hardness_score`.
+- Stores `complexity_score_residual`, the residualized semantic-logic variable used for Cres scatter plots and dual-force diagnostics after regressing semantic complexity on prompt load.
 - Also stores an explicit `option_hardness_score` control for MCQ discrimination difficulty.
 - Stores clean-image `prediction_entropy`, computed as `H = -sum_i p_i log(p_i)` over softmaxed MCQ option scores, as a control for model-side answer uncertainty.
 - Scores MCQ options with the parent repository’s assistant-continuation log-likelihood routine.
@@ -112,7 +113,7 @@ python3 -m frequency_alignment.run_experiment \
 - Optional cosine drift and Dirichlet deltas are only computed when `exp1.extract_vision_tokens: true`.
 - Saves `complexity_points.json` so degradation can be analyzed as a continuous function of semantic complexity, while `prompt_complexity_score` and `option_hardness_score` remain available as controls.
 - Accuracy-drop horse races are filtered to clean-correct points only, so they measure fragility of existing knowledge.
-- `hypothesis_tests.json` includes within-image fixed-effects regressions, multivariate horse-race regressions, perturbation-specific horse races for accuracy drop and log-likelihood outcomes, and paired mirror tests comparing `L1-L4` against their `L5-L8` wordy controls.
+- `hypothesis_tests.json` includes primary marginal summaries, wordy/pooled multivariate horse-race regressions, perturbation-specific summaries for accuracy drop and log-likelihood outcomes, and paired mirror tests comparing `L1-L4` against their `L5-L8` wordy controls.
 
 ### Experiment 2
 
@@ -124,7 +125,7 @@ python3 -m frequency_alignment.run_experiment \
 - Runs prompt-only controls (`empty_language`, `random_language`) on the same images and stores divergence-to-task statistics.
 - Saves both per-sample and average filters for downstream experiments.
 - Saves `complexity_points.json` so effective bandwidth can be plotted against continuous semantic complexity.
-- `hypothesis_tests.json` now includes both pooled and within-image horse-race regressions (`semantic`, `prompt load`, `option hardness`) in addition to the univariate trends.
+- `hypothesis_tests.json` now includes primary marginal summaries and wordy/pooled horse-race regressions (`Csem`, `prompt load`, `option hardness`) in addition to the univariate trends.
 - Bandwidth plots include the wordy controls when those levels are present; primary monotonic granularity tests remain `L1-L4`.
 
 ### Experiment 3
@@ -134,7 +135,7 @@ python3 -m frequency_alignment.run_experiment \
 - Computes the task-conditioned post-fusion response as scalar drift over all aligned tokens from a late decoder hidden state.
 - Groups perturbations by similar pre-fusion drift profiles so the controlled input is approximately held fixed.
 - Reports controlled overlap-vs-response correlations for `overall`, `early`, `mid`, and `late`, with `late` as the main post-fusion test.
-- Also runs continuous regressions from semantic complexity to internal response metrics (`ΔZ_all` and response amplification), including within-image fixed effects and horse-race controls over semantic complexity, prompt load, and option hardness.
+- Also runs continuous analyses from semantic complexity to internal response metrics (`ΔZ_all` and response amplification), including primary marginal summaries and wordy/pooled horse-race controls over semantic complexity, prompt load, and option hardness.
 - The plotting layer now includes pooled-vs-within-image coefficient plots and a dedicated two-factor "tug-of-war" bar chart for internal drift.
 - Wordy-control plots compare base levels against `L5-L8` for post-fusion drift and response amplification.
 
@@ -143,7 +144,7 @@ python3 -m frequency_alignment.run_experiment \
 - Runs the low-pass / high-pass sweep on the same multilevel GQA samples.
 - Reports the critical cutoff where accuracy crosses the configured threshold.
 - Saves `complexity_points.json` so critical cutoffs can be analyzed against continuous semantic complexity, with prompt load and option hardness retained as control variables.
-- `hypothesis_tests.json` now includes within-image fixed-effects and multivariate horse-race regressions for the continuous analysis.
+- `hypothesis_tests.json` now includes primary marginal summaries and wordy/pooled horse-race regressions for the continuous analysis.
 - Level-wise cutoff plots and wordy-control comparisons include `L5-L8` when those levels are present.
 
 ### Experiment 5
@@ -163,7 +164,7 @@ python3 -m frequency_alignment.run_experiment \
   - prediction uses `zscore(log1p(S_pred))`
   - observed targets use `zscore(actual)`
   - this is for effect-size comparability and visualization only; the raw overlap metrics remain intact
-- Adds a prediction-factor horse race for observed `accuracy_drop`, using `zscore(log1p(S_pred))`, `prompt_complexity_score`, and `option_hardness_score` as predictors. This is saved under `prediction_factor_horse_race` and plotted as `exp5_coefficient_plot_prediction_factors.png`.
+- Adds prediction-factor summaries for observed `accuracy_drop`, using `zscore(log1p(S_pred))`, raw `question_complexity_score`, `prompt_complexity_score`, and `option_hardness_score` as predictors. Primary view is marginal-only; wordy/pooled views keep multivariate regressions. This is saved under `prediction_factor_horse_race` and plotted as `exp5_coefficient_plot_prediction_factors*.png`.
 - Also tracks whether predicted overlap and calibrated prediction error vary continuously with semantic complexity.
 - Produces level-wise scatter grids and level-by-perturbation predicted-vs-observed plots. These use separate visual scales when prediction and observation magnitudes differ.
 - Produces wordy-control comparison plots for predicted sensitivity and observed behavior.
@@ -173,16 +174,17 @@ python3 -m frequency_alignment.run_experiment \
 
 Across the continuous analyses, the intended interpretation is:
 
-- `complexity_score_residual` measures **residualized compositional precision**
+- `question_complexity_score` / `complexity_score` measures raw **semantic complexity (Csem)**
+- `complexity_score_residual` measures **residualized compositional precision (Cres)** for scatter/diagnostic plots
 - `prompt load` measures potential **linguistic anchoring**
 - `option hardness` controls for MCQ discrimination difficulty
 - `prediction entropy` controls for clean-answer uncertainty in Exp 1
 
-The fixed-effects and horse-race regressions are therefore the main evidence for whether semantic complexity is the real driver of frequency-based fragility after controlling for prompt length, answer-set difficulty, and clean-model uncertainty where available. The `L5-L8` wordy controls test the same idea experimentally by increasing prompt load while holding the semantic program fixed.
+Primary marginal summaries, wordy/pooled horse-race regressions, and fixed-effects diagnostics are therefore the main evidence for whether semantic complexity is the real driver of frequency-based fragility after controlling for prompt length, answer-set difficulty, and clean-model uncertainty where available. The `L5-L8` wordy controls test the same idea experimentally by increasing prompt load while holding the semantic program fixed.
 
 Most regression and grouped-correlation payloads now include three views:
 
-- `primary`: only the semantic ladder `L1-L4`
+- `primary`: only the semantic ladder `L1-L4`; emits marginal Pearson/Spearman, Kendall monotonicity, and VIF diagnostics instead of multivariate betas
 - `wordy`: only the matched wordy mirrors `L5-L8`
 - `pooled`: all levels `L1-L8`
 
@@ -250,7 +252,7 @@ nohup python3 -m frequency_alignment.run_experiment \
 - `gqa`
   - Main dataset for experiments `1-5`.
   - The code generates same-image `L1-L4` primary tasks plus `L5-L8` wordy controls from scene graphs.
-  - Wordy controls are regenerated with cache version `gqa_multilevel_v5` and use neutral filler text that increases prompt load without changing the structured semantic program.
+  - Wordy controls are regenerated with cache version `gqa_multilevel_v6` and use neutral filler text that increases prompt load without changing the structured semantic program.
   - Wordy controls are only required to be longer than the matched base prompt by at least the configured filler margin; they are not forced to a fixed 60-word length.
   - Verification levels are balanced to 50% yes and 50% no when possible.
   - The loader uses an in-memory and on-disk granularity cache under `.hf_cache/gqa/granularity_cache/`, with early stopping once enough balanced valid samples are found.
@@ -298,13 +300,17 @@ frequency_alignment_outputs/
   exp6/perturbation_examples/<image_id>/*.png
   plots/*.png
   plots/plot_manifest.json
+  plots/primary_l1_l4/*.png
+  plots/primary_l1_l4/plot_manifest.json
 ```
 
 Representative plot families include:
 
-- `exp1_coefficient_plot_*`: overall horse-race coefficient plots.
-- `exp1_coefficient_plot_*_by_perturbation.png`: perturbation-specific horse races.
+- `exp1_coefficient_plot_*`: overall coefficient/marginal-summary plots.
+- `exp1_coefficient_plot_*_by_perturbation.png`: perturbation-specific coefficient/marginal-summary plots.
 - `exp1_linguistic_stabilization_effect.png`: paired mirror plot showing `base - wordy` drift/drop deltas for `L1/L5`, `L2/L6`, `L3/L7`, and `L4/L8`.
+- `*_csem.png`: raw semantic-complexity copies of the corresponding Cres complexity scatter plots.
+- `plots/primary_l1_l4/`: duplicate plot suite restricted to the primary `L1-L4` ladder.
 - `exp*_wordy_control_*.png`: matched `L1/L5`, `L2/L6`, `L3/L7`, `L4/L8` comparisons.
 - `exp5_level_perturbation_predicted_vs_observed*.png`: Exp 5 predicted-vs-observed bars by level and perturbation.
 - `exp5_bridge_scatter*.png`: comparable bridge plots using `zscore(log1p(S_pred))` and z-scored observed targets.
@@ -315,7 +321,7 @@ Representative plot families include:
 - `analysis.suppress_dc` controls whether the DC band is included in the actual math. It is currently `false` in both provided configs.
 - `analysis.attention_fft_window` / `experiments.exp2.fft_window` controls optional attention-map windowing before FFT. Current configs set this to `none`.
 - `experiments.exp5.primary_layer_group` defaults to `late`; the code-level Exp 5 primary target is `loglik_volatility`.
-- Complexity scatter plots use `complexity_score_residual` on the x-axis when available, falling back to raw `complexity_score` only for older result folders.
+- Complexity scatter plots use `complexity_score_residual` on the x-axis when available and also emit `_csem` copies against raw `complexity_score`.
 - Coefficient plots now include triple-view variants when the result JSON contains the `_views` regression payloads.
 - Exp 5 predicted-vs-observed scatter plots include triple-view panels for Primary, Wordy, and Pooled.
 - Spectral plots can use log scaling for visualization only; this does not change stored spectra or hypothesis tests.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from scipy import stats
@@ -491,3 +491,262 @@ def summarize_multivariate_regression(
             "p_value": float(p_values[0]),
         }
     return result
+
+
+def _pearson_ci_95(r_value: float, n: int) -> Tuple[float, float]:
+    """Approximate 95% CI for Pearson r using Fisher z transform."""
+
+    if n <= 3:
+        return float(r_value), float(r_value)
+    clipped = float(np.clip(r_value, -0.999999, 0.999999))
+    z_value = float(np.arctanh(clipped))
+    se = 1.0 / np.sqrt(n - 3)
+    lo = float(np.tanh(z_value - 1.96 * se))
+    hi = float(np.tanh(z_value + 1.96 * se))
+    return lo, hi
+
+
+def _predictor_target_rows(
+    points: Sequence[Dict[str, Any]],
+    *,
+    x_key: str,
+    y_key: str,
+) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, Any]]]:
+    xs: List[float] = []
+    ys: List[float] = []
+    rows: List[Dict[str, Any]] = []
+    for point in points:
+        x_val = point.get(x_key)
+        y_val = point.get(y_key)
+        if x_val is None or y_val is None:
+            continue
+        try:
+            x_float = float(x_val)
+            y_float = float(y_val)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(x_float) or not np.isfinite(y_float):
+            continue
+        xs.append(x_float)
+        ys.append(y_float)
+        rows.append(point)
+    return np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64), rows
+
+
+def _level_mean_pairs(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    x_key: str,
+    y_key: str,
+    level_order: Sequence[str],
+) -> Dict[str, Any]:
+    per_level: Dict[str, Dict[str, List[float]]] = {
+        level: {"x": [], "y": []}
+        for level in level_order
+    }
+    for row in rows:
+        level = str(row.get("level"))
+        if level not in per_level:
+            continue
+        per_level[level]["x"].append(float(row[x_key]))
+        per_level[level]["y"].append(float(row[y_key]))
+
+    level_means: Dict[str, Dict[str, float]] = {}
+    x_means: List[float] = []
+    y_means: List[float] = []
+    ranks: List[int] = []
+    for idx, level in enumerate(level_order):
+        xs = per_level[level]["x"]
+        ys = per_level[level]["y"]
+        if not xs or not ys:
+            continue
+        x_mean = float(np.mean(xs))
+        y_mean = float(np.mean(ys))
+        level_means[level] = {
+            "x_mean": x_mean,
+            "y_mean": y_mean,
+            "n": int(min(len(xs), len(ys))),
+        }
+        x_means.append(x_mean)
+        y_means.append(y_mean)
+        ranks.append(idx + 1)
+
+    if len(ranks) >= 3:
+        tau_level_target, p_level_target = stats.kendalltau(ranks, y_means)
+        tau_level_predictor, p_level_predictor = stats.kendalltau(ranks, x_means)
+        tau_predictor_target, p_predictor_target = stats.kendalltau(x_means, y_means)
+    else:
+        tau_level_target = tau_level_predictor = tau_predictor_target = 0.0
+        p_level_target = p_level_predictor = p_predictor_target = 1.0
+
+    return {
+        "level_order": list(level_order),
+        "level_means": level_means,
+        "kendall_tau_level_target": float(np.nan_to_num(tau_level_target, nan=0.0)),
+        "kendall_tau_level_target_p_value": float(np.nan_to_num(p_level_target, nan=1.0)),
+        "kendall_tau_level_predictor": float(np.nan_to_num(tau_level_predictor, nan=0.0)),
+        "kendall_tau_level_predictor_p_value": float(np.nan_to_num(p_level_predictor, nan=1.0)),
+        "kendall_tau_predictor_target_by_level": float(np.nan_to_num(tau_predictor_target, nan=0.0)),
+        "kendall_tau_predictor_target_by_level_p_value": float(np.nan_to_num(p_predictor_target, nan=1.0)),
+    }
+
+
+def summarize_vif_diagnostic(
+    points: Sequence[Dict[str, Any]],
+    *,
+    x_keys: Sequence[str] = ("question_complexity_score", "prompt_complexity_score"),
+) -> Dict[str, Any]:
+    """VIF diagnostic for predictor collinearity."""
+
+    if not x_keys:
+        return {
+            "x_keys": [],
+            "n": 0,
+            "pairwise_pearson_r": 0.0,
+            "collinearity_percent": 0.0,
+            "vif": {},
+        }
+
+    rows = _collect_rows(points, x_keys=x_keys, y_key=x_keys[0])
+    if len(x_keys) < 2 or len(rows) < 3:
+        return {
+            "x_keys": list(x_keys),
+            "n": len(rows),
+            "pairwise_pearson_r": 0.0,
+            "collinearity_percent": 0.0,
+            "vif": {key: 1.0 for key in x_keys},
+        }
+
+    matrix = np.asarray([[row[key] for key in x_keys] for row in rows], dtype=np.float64)
+    vif: Dict[str, float] = {}
+    for idx, key in enumerate(x_keys):
+        target = matrix[:, idx]
+        others = np.delete(matrix, idx, axis=1)
+        design = np.column_stack([np.ones(others.shape[0], dtype=np.float64), others])
+        beta, _, _, _ = np.linalg.lstsq(design, target, rcond=None)
+        fitted = design @ beta
+        residuals = target - fitted
+        tss = float(np.sum((target - np.mean(target)) ** 2))
+        rss = float(np.sum(residuals ** 2))
+        r_squared = 1.0 - rss / tss if tss > 0 else 0.0
+        denom = max(1e-12, 1.0 - r_squared)
+        vif[key] = float(1.0 / denom)
+
+    first = matrix[:, 0]
+    second = matrix[:, 1]
+    if np.std(first) > 0 and np.std(second) > 0:
+        pair_r, pair_p = pearson_correlation(first, second)
+    else:
+        pair_r, pair_p = 0.0, 1.0
+    return {
+        "x_keys": list(x_keys),
+        "n": int(matrix.shape[0]),
+        "pairwise_pearson_r": float(pair_r),
+        "pairwise_pearson_p_value": float(pair_p),
+        "collinearity_percent": float(abs(pair_r) * 100.0),
+        "vif": vif,
+    }
+
+
+def summarize_marginal_relationships(
+    points: Sequence[Dict[str, Any]],
+    *,
+    y_key: str,
+    x_keys: Sequence[str],
+    level_filter: Optional[Set[str]] = None,
+    level_order: Sequence[str] = ("L1_COARSE", "L2_MEDIUM", "L3_FINE", "L4_VERY_FINE"),
+) -> Dict[str, Any]:
+    """Primary-ladder marginal correlations without multivariate betas."""
+
+    filtered_points: Sequence[Dict[str, Any]]
+    if level_filter is None:
+        filtered_points = points
+    else:
+        filtered_points = [point for point in points if str(point.get("level")) in level_filter]
+
+    marginal_predictors: Dict[str, Any] = {}
+    for x_key in x_keys:
+        xs, ys, rows = _predictor_target_rows(filtered_points, x_key=x_key, y_key=y_key)
+        if xs.size >= 3 and np.unique(xs).size >= 2 and np.unique(ys).size >= 2:
+            pearson_r, pearson_p = pearson_correlation(xs, ys)
+            spearman_rho, spearman_p = spearman_correlation(xs, ys)
+            ci_lower, ci_upper = _pearson_ci_95(float(pearson_r), int(xs.size))
+        else:
+            pearson_r = spearman_rho = 0.0
+            pearson_p = spearman_p = 1.0
+            ci_lower = ci_upper = 0.0
+        level_payload = _level_mean_pairs(rows, x_key=x_key, y_key=y_key, level_order=level_order)
+        marginal_predictors[x_key] = {
+            "n": int(xs.size),
+            "pearson_r": float(pearson_r),
+            "pearson_p_value": float(pearson_p),
+            "pearson_ci_95_lower": float(ci_lower),
+            "pearson_ci_95_upper": float(ci_upper),
+            "spearman_rho": float(spearman_rho),
+            "spearman_p_value": float(spearman_p),
+            **level_payload,
+        }
+
+    vif = summarize_vif_diagnostic(
+        filtered_points,
+        x_keys=[key for key in ("question_complexity_score", "prompt_complexity_score") if key in x_keys],
+    )
+    return {
+        "mode": "primary_marginal_summary",
+        "y_key": y_key,
+        "x_keys": list(x_keys),
+        "level_filter": sorted(level_filter) if level_filter is not None else None,
+        "n": int(max((stats.get("n", 0) for stats in marginal_predictors.values()), default=0)),
+        "marginal_predictors": marginal_predictors,
+        "vif_diagnostic": vif,
+        "caption": (
+            "Primary L1-L4 marginal correlations; multivariate decomposition "
+            "requires the wordy-mirror design available in pooled/wordy views."
+        ),
+    }
+
+
+def summarize_horse_race_view(
+    points: Sequence[Dict[str, Any]],
+    *,
+    y_key: str,
+    x_keys: Sequence[str],
+    view_name: str,
+    level_filter: Optional[Set[str]] = None,
+    group_key: str = "image_id",
+) -> Dict[str, Any]:
+    """Return primary marginal summary or full wordy/pooled horse race."""
+
+    view_points = (
+        list(points)
+        if level_filter is None
+        else [point for point in points if str(point.get("level")) in level_filter]
+    )
+    base_payload: Dict[str, Any] = {
+        "level_filter": sorted(level_filter) if level_filter is not None else None,
+        "n_points": len(view_points),
+    }
+    if view_name == "primary":
+        base_payload["marginal"] = summarize_marginal_relationships(
+            view_points,
+            y_key=y_key,
+            x_keys=x_keys,
+            level_filter=None,
+        )
+        return base_payload
+
+    base_payload["pooled"] = summarize_multivariate_regression(
+        view_points,
+        y_key=y_key,
+        x_keys=x_keys,
+        level_filter=None,
+    )
+    base_payload["within_image"] = summarize_multivariate_regression(
+        view_points,
+        y_key=y_key,
+        x_keys=x_keys,
+        group_key=group_key,
+        demean_by_group=True,
+        level_filter=None,
+    )
+    return base_payload
