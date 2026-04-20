@@ -2364,7 +2364,7 @@ def score_option_loglik(
         outputs = model(**inputs_full)
     except RuntimeError as exc:
         if "out of memory" in str(exc).lower():
-            return _sequential_fallback(exc) # type: ignore
+            torch.cuda.empty_cache()
         raise
     logits = outputs.logits  # [1, L, vocab]
 

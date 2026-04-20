@@ -5,7 +5,7 @@ cache_dir: .hf_cache
 out_dir: frequency_alignment_outputs_llava_test
 
 model:
-  primary: llava-hf/llava-v1.6-mistral-7b-hf
+  primary: llava-hf/llava-onevision-qwen2-0.5b-ov-hf
   alternatives: []
   quantization: null
   device_map: auto
