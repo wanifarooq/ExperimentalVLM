@@ -39,6 +39,7 @@ from ..analysis.continuous import (
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
+from ..analysis.gate_thresholds import GATES
 from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.drift import (
     compute_band_drift,
@@ -338,8 +339,8 @@ def _controlled_correlation_payload(
         "controlled_n": len(centered_x),
         "level_filter": sorted(level_filter) if level_filter is not None else None,
         "num_profile_groups_used": groups_used,
-        "target": "controlled_r > 0.6",
-        "passed": controlled_r > 0.6,
+        "target": f"controlled_r > {GATES['controlled_r_min']}",
+        "passed": controlled_r > GATES["controlled_r_min"],
     }
 
 
@@ -888,7 +889,8 @@ def run_exp3(
         tests["spearman_post_drift_all_vs_granularity"] = {
             "rho": rho,
             "p_value": p,
-            "passed": rho > 0.6,
+            "target": f"rho > {GATES['secondary_spearman_rho_min']}",
+            "passed": rho > GATES["secondary_spearman_rho_min"],
             "values": dict(zip(primary_present_levels, post_values)),
         }
 
@@ -901,9 +903,9 @@ def run_exp3(
         tests["spearman_post_drift_all_vs_granularity_wordy"] = {
             "rho": rho,
             "p_value": p,
-            "passed": rho > 0.6,
+            "passed": rho > GATES["secondary_spearman_rho_min"],
             "values": dict(zip(wordy_present_levels, post_values)),
-            "target": "secondary wordy-ladder monotonicity only; no pooled monotonicity is run",
+            "target": f"rho > {GATES['secondary_spearman_rho_min']} (secondary wordy-ladder monotonicity only; no pooled monotonicity is run)",
         }
 
     for group_name in FILTER_ANALYSIS_ORDER:
@@ -920,7 +922,8 @@ def run_exp3(
             tests[f"spearman_overlap_vs_granularity_{group_name}"] = {
                 "rho": rho,
                 "p_value": p,
-                "passed": rho > 0.6,
+                "target": f"rho > {GATES['secondary_spearman_rho_min']}",
+                "passed": rho > GATES["secondary_spearman_rho_min"],
                 "values": dict(zip(group_levels, group_values)),
             }
 

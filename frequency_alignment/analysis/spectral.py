@@ -375,6 +375,34 @@ def compute_attention_power_spectrum_multi(
     return stacked.mean(axis=0), all_radials
 
 
+def compute_attention_power_spectrum_by_layer(
+    attention_maps: List[np.ndarray],
+    patch_grid: Tuple[int, int],
+    layer_indices: List[int],
+    num_bands: int = 10,
+    window: Optional[str] = "hann",
+    suppress_dc: bool = True,
+) -> List[Dict[str, Any]]:
+    """Compute mean radial spectra and bandwidth for each extracted layer."""
+    per_layer: List[Dict[str, Any]] = []
+    for layer_index, attn in zip(layer_indices, attention_maps):
+        mean_radial, _ = compute_attention_power_spectrum_multi(
+            [attn],
+            patch_grid,
+            num_bands=num_bands,
+            window=window,
+            suppress_dc=suppress_dc,
+        )
+        per_layer.append(
+            {
+                "layer_index": int(layer_index),
+                "radial_power": mean_radial,
+                "bandwidth": compute_effective_bandwidth(mean_radial),
+            }
+        )
+    return per_layer
+
+
 def compute_feature_spectral_signature_stats(
     clean_features: np.ndarray,
     perturbed_features: np.ndarray,
@@ -510,6 +538,7 @@ def compute_effective_bandwidth(power_spectrum: np.ndarray) -> float:
 
 def compute_filter_W_t(
     radial_power: np.ndarray,
+    norm: str = "l1",
 ) -> np.ndarray:
     """Normalize radial power spectrum to get the task-specific filter W_t(omega).
 
@@ -519,6 +548,7 @@ def compute_filter_W_t(
 
     Args:
         radial_power: Raw radial power spectrum, shape ``(num_bands,)``.
+        norm: Normalization mode, ``"l1"`` or ``"l2"``.
 
     Returns:
         Normalized filter W_t(omega), shape ``(num_bands,)``, sums to 1.
@@ -526,8 +556,15 @@ def compute_filter_W_t(
     rp = np.asarray(radial_power, dtype=np.float64)
     if rp.size == 0:
         return np.zeros(0, dtype=np.float64)
-    total = rp.sum()
+    if norm == "l1":
+        total = rp.sum()
+    elif norm == "l2":
+        total = float(np.sqrt(np.sum(rp ** 2)))
+    else:
+        raise ValueError(f"Unknown norm {norm!r}")
     if total == 0:
+        if norm == "l2":
+            return np.ones_like(rp) / np.sqrt(len(rp))
         return np.ones_like(rp) / len(rp)
     return rp / total
 
@@ -536,15 +573,15 @@ def compute_spectral_overlap(
     W_t: np.ndarray,
     delta_f: np.ndarray,
 ) -> float:
-    """Compute predicted sensitivity as spectral overlap integral.
+    """Compute predicted sensitivity as matched-filter energy overlap.
 
     .. math::
 
         S_{\\text{pred}} = \\sum_\\omega |W_t(\\omega)|^2 \\cdot |\\Delta F(\\omega)|^2
 
-    This is the core quantity from Theorem 1: perturbation sensitivity is
-    determined by how much the perturbation's spectral signature overlaps
-    with the task's attended frequency bands.
+    This is the default quadratic matched-filter energy overlap.  A linear
+    probability-weighted variant is available as
+    :func:`compute_spectral_overlap_linear`.
 
     Args:
         W_t: Task-specific frequency filter, shape ``(num_bands,)``.
@@ -558,3 +595,14 @@ def compute_spectral_overlap(
     # Ensure same length
     min_len = min(len(w), len(d))
     return float(np.sum(w[:min_len] ** 2 * d[:min_len] ** 2))
+
+
+def compute_spectral_overlap_linear(
+    W_t: np.ndarray,
+    delta_f: np.ndarray,
+) -> float:
+    """Linear overlap: S_pred_lin = Σ W_t(ω) · |ΔF(ω)|²."""
+    w = np.asarray(W_t, dtype=np.float64)
+    d = np.asarray(delta_f, dtype=np.float64)
+    min_len = min(len(w), len(d))
+    return float(np.sum(w[:min_len] * d[:min_len] ** 2))

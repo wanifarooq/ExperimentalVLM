@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
+from ..analysis.gate_thresholds import GATES
 from ..analysis.statistics import monotonicity_test, spearman_correlation
 from ..data.base import ExperimentResult, GranularityLevel, LevelData
 from ..data.loaders import load_segmentation_dataset
@@ -291,13 +292,31 @@ def run_exp6(
             "is_monotonic": is_mono,
             "kendall_tau": tau,
             "values": dict(zip(present_levels, mean_drops)),
-            "passed": tau > 0.6 if model_name == "sam3" else abs(tau) < 0.5,
+            "target": (
+                f"kendall_tau > {GATES['monotonicity_kendall_tau_min']}"
+                if model_name == "sam3"
+                else f"abs(kendall_tau) < {GATES['segmentation_baseline_abs_max']}"
+            ),
+            "passed": (
+                tau > GATES["monotonicity_kendall_tau_min"]
+                if model_name == "sam3"
+                else abs(tau) < GATES["segmentation_baseline_abs_max"]
+            ),
         }
         tests[f"spearman_{model_name}"] = {
             "rho": rho,
             "p_value": p,
             "values": dict(zip(present_levels, mean_drops)),
-            "passed": rho > 0.8 if model_name == "sam3" else abs(rho) < 0.5,
+            "target": (
+                f"rho > {GATES['strong_spearman_rho_min']}"
+                if model_name == "sam3"
+                else f"abs(rho) < {GATES['segmentation_baseline_abs_max']}"
+            ),
+            "passed": (
+                rho > GATES["strong_spearman_rho_min"]
+                if model_name == "sam3"
+                else abs(rho) < GATES["segmentation_baseline_abs_max"]
+            ),
         }
 
     tests["hypothesis_supported"] = (

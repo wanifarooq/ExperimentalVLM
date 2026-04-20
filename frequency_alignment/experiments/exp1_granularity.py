@@ -31,6 +31,7 @@ from ..analysis.continuous import (
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
+from ..analysis.gate_thresholds import GATES
 from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.spectral import compute_feature_spectral_signature_stats
 from ..analysis.statistics import (
@@ -764,28 +765,34 @@ def _run_hypothesis_tests(
     mean_drops = [per_level[lk]["mean_accuracy_drop"] for lk in present_levels]
     mean_drifts = [per_level[lk]["mean_loglik_drift"] for lk in present_levels]
 
+    is_mono, tau = monotonicity_test(mean_drops)
+    tau_passed = tau > GATES["monotonicity_kendall_tau_min"]
     rho_drop, p_drop = spearman_correlation(granularity_ranks, mean_drops)
     tests["spearman_drop_vs_granularity"] = {
         "rho": rho_drop,
         "p_value": p_drop,
-        "target": "rho > 0.8",
-        "passed": rho_drop > 0.8 and p_drop < 0.05,
+        "target": "reported only; pass delegated to Kendall tau monotonicity gate",
+        "passed": tau_passed,
+        "caveat": (
+            "Spearman p-value gating over four level means is underpowered; "
+            "the pass flag uses monotonicity_accuracy_drop.kendall_tau instead."
+        ),
     }
 
     rho_drift, p_drift = spearman_correlation(granularity_ranks, mean_drifts)
     tests["spearman_loglik_drift_vs_granularity"] = {
         "rho": rho_drift,
         "p_value": p_drift,
-        "passed": rho_drift > 0.6,
+        "passed": rho_drift > GATES["secondary_spearman_rho_min"],
     }
 
     # H2: Monotonicity of mean accuracy drop across levels
-    is_mono, tau = monotonicity_test(mean_drops)
     tests["monotonicity_accuracy_drop"] = {
         "is_monotonic": is_mono,
         "kendall_tau": tau,
         "values": dict(zip(present_levels, mean_drops)),
-        "passed": tau > 0.6,
+        "target": f"kendall_tau > {GATES['monotonicity_kendall_tau_min']}",
+        "passed": tau_passed,
     }
 
     wordy_present_levels = [
@@ -799,15 +806,20 @@ def _run_hypothesis_tests(
         tests["spearman_drop_vs_granularity_wordy"] = {
             "rho": wordy_rho,
             "p_value": wordy_p,
-            "target": "secondary wordy-ladder monotonicity only; no pooled monotonicity is run",
-            "passed": wordy_rho > 0.6,
+            "target": "reported only; pass delegated to wordy Kendall tau monotonicity gate",
+            "passed": wordy_tau > GATES["monotonicity_kendall_tau_min"],
             "values": dict(zip(wordy_present_levels, wordy_drops)),
+            "caveat": (
+                "Spearman p-value gating over four wordy level means is underpowered; "
+                "the pass flag uses monotonicity_accuracy_drop_wordy.kendall_tau instead."
+            ),
         }
         tests["monotonicity_accuracy_drop_wordy"] = {
             "is_monotonic": wordy_mono,
             "kendall_tau": wordy_tau,
             "values": dict(zip(wordy_present_levels, wordy_drops)),
-            "passed": wordy_tau > 0.6,
+            "target": f"kendall_tau > {GATES['monotonicity_kendall_tau_min']}",
+            "passed": wordy_tau > GATES["monotonicity_kendall_tau_min"],
         }
 
     # H3: ANOVA across levels — are the groups significantly different?

@@ -209,12 +209,7 @@ def main() -> None:
             )
         except Exception:
             logger.exception("Experiment %d failed", exp_id)
-            results[exp_id] = ExperimentResult(
-                experiment_id=exp_id,
-                experiment_name=f"exp{exp_id}",
-                config=cfg.get("experiments", {}).get(f"exp{exp_id}", {}),
-                metrics={"error": True},
-            )
+            raise
 
     # Save combined results
     combined = {

@@ -34,9 +34,11 @@ from ..analysis.continuous import (
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
+from ..analysis.gate_thresholds import GATES
 from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.spectral import (
     compare_spectral_filters,
+    compute_attention_power_spectrum_by_layer,
     compute_attention_power_spectrum_multi,
     compute_effective_bandwidth,
     compute_filter_W_t,
@@ -236,10 +238,14 @@ def _extract_attention_for_prompt(
         )
         bandwidth = compute_effective_bandwidth(mean_radial)
         W_t = compute_filter_W_t(mean_radial)
+        W_t_l2 = compute_filter_W_t(mean_radial, norm="l2")
+        bandwidth_l2 = compute_effective_bandwidth(W_t_l2)
         return {
             "radial_power": mean_radial,
             "bandwidth": bandwidth,
+            "bandwidth_l2": bandwidth_l2,
             "W_t": W_t,
+            "W_t_l2": W_t_l2,
             "layer_indices": layer_indices,
             "num_layers_extracted": len(group_attn),
             "num_heads_total": sum(
@@ -250,6 +256,14 @@ def _extract_attention_for_prompt(
     layer_indices = list(internals.cross_attention_layer_indices or range(len(attn_list)))
     total_layers = max(1, adapter.num_layers)
     overall = _summarize_group(attn_list, layer_indices)
+    per_layer = compute_attention_power_spectrum_by_layer(
+        attn_list,
+        internals.patch_grid,
+        layer_indices,
+        num_bands=num_bands,
+        window=fft_window,
+        suppress_dc=suppress_dc,
+    )
     grouped_attn = split_by_layer_group(attn_list, layer_indices, total_layers)
     group_stats: Dict[str, Any] = {}
     for group_name in LAYER_GROUP_ORDER:
@@ -262,6 +276,7 @@ def _extract_attention_for_prompt(
     return {
         **overall,
         "layer_groups": group_stats,
+        "per_layer": per_layer,
         "layer_group_ranges": layer_group_ranges(total_layers),
         "total_model_layers": total_layers,
         "patch_grid": internals.patch_grid,
@@ -345,13 +360,20 @@ def run_exp2(
     per_sample: List[Dict[str, Any]] = []
     # Collect bandwidths grouped by level
     level_bandwidths: Dict[str, List[float]] = defaultdict(list)
+    level_bandwidths_l2: Dict[str, List[float]] = defaultdict(list)
     level_radials: Dict[str, List[np.ndarray]] = defaultdict(list)
     level_group_bandwidths: Dict[str, Dict[str, List[float]]] = {
+        group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER
+    }
+    level_group_bandwidths_l2: Dict[str, Dict[str, List[float]]] = {
         group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER
     }
     level_group_radials: Dict[str, Dict[str, List[np.ndarray]]] = {
         group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER
     }
+    level_per_layer_bandwidths: Dict[str, Dict[int, List[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     level_control_bandwidths: Dict[str, Dict[str, List[float]]] = {
         control_name: defaultdict(list) for control_name in prompt_controls
     }
@@ -449,24 +471,43 @@ def run_exp2(
                     getattr(level_data, "option_hardness_components", {}) or {}
                 ),
                 "bandwidth": result["bandwidth"],
+                "bandwidth_l2": result["bandwidth_l2"],
                 "radial_power": result["radial_power"].tolist(),
                 "W_t": result["W_t"].tolist(),
+                "W_t_l2": result["W_t_l2"].tolist(),
                 "num_layers": result["num_layers_extracted"],
                 "num_heads": result["num_heads_total"],
                 "patch_grid": list(result["patch_grid"]) if result.get("patch_grid") else None,
                 "fft_window": result.get("fft_window"),
                 "layer_groups": {},
+                "per_layer": [
+                    {
+                        "layer_index": int(item["layer_index"]),
+                        "bandwidth": float(item["bandwidth"]),
+                        "radial_power": item["radial_power"].tolist(),
+                    }
+                    for item in result.get("per_layer", [])
+                ],
                 "controls": {},
             }
 
             # Accumulate for hypothesis testing
             level_bandwidths[level_key].append(result["bandwidth"])
+            level_bandwidths_l2[level_key].append(result["bandwidth_l2"])
             level_radials[level_key].append(result["radial_power"])
+            for layer_item in result.get("per_layer", []):
+                level_per_layer_bandwidths[level_key][int(layer_item["layer_index"])].append(
+                    float(layer_item["bandwidth"])
+                )
 
             # Save W_t filter
             np.save(
                 filters_dir / f"{sample.image_id}_{level_key}.npy",
                 result["W_t"],
+            )
+            np.save(
+                filters_dir / f"{sample.image_id}_{level_key}_l2.npy",
+                result["W_t_l2"],
             )
 
             for group_name in LAYER_GROUP_ORDER:
@@ -475,17 +516,24 @@ def run_exp2(
                     continue
                 sample_record["levels"][level_key]["layer_groups"][group_name] = {
                     "bandwidth": group_result["bandwidth"],
+                    "bandwidth_l2": group_result["bandwidth_l2"],
                     "radial_power": group_result["radial_power"].tolist(),
                     "W_t": group_result["W_t"].tolist(),
+                    "W_t_l2": group_result["W_t_l2"].tolist(),
                     "layer_indices": group_result["layer_indices"],
                     "num_layers": group_result["num_layers_extracted"],
                     "num_heads": group_result["num_heads_total"],
                 }
                 level_group_bandwidths[group_name][level_key].append(group_result["bandwidth"])
+                level_group_bandwidths_l2[group_name][level_key].append(group_result["bandwidth_l2"])
                 level_group_radials[group_name][level_key].append(group_result["radial_power"])
                 np.save(
                     filters_dir / f"{sample.image_id}_{level_key}_{group_name}.npy",
                     group_result["W_t"],
+                )
+                np.save(
+                    filters_dir / f"{sample.image_id}_{level_key}_{group_name}_l2.npy",
+                    group_result["W_t_l2"],
                 )
 
             control_prompts = _build_control_prompts(prompt, prompt_controls, seed + idx * 997 + level.value)
@@ -604,6 +652,7 @@ def run_exp2(
 
     for lk in present_levels:
         bws = level_bandwidths[lk]
+        bws_l2 = level_bandwidths_l2[lk]
         radials = level_radials[lk]
         mean_radial = (
             np.mean(np.stack(radials), axis=0)
@@ -611,30 +660,41 @@ def run_exp2(
             else np.zeros(effective_band_count, dtype=np.float64)
         )
         W_t_avg = compute_filter_W_t(mean_radial)
+        W_t_avg_l2 = compute_filter_W_t(mean_radial, norm="l2")
 
         agg["per_level"][lk] = {
             "mean_bandwidth": float(np.mean(bws)),
+            "mean_bandwidth_l2": float(np.mean(bws_l2)) if bws_l2 else 0.0,
             "std_bandwidth": float(np.std(bws)),
+            "std_bandwidth_l2": float(np.std(bws_l2)) if bws_l2 else 0.0,
             "median_bandwidth": float(np.median(bws)),
+            "median_bandwidth_l2": float(np.median(bws_l2)) if bws_l2 else 0.0,
             "mean_radial_power": mean_radial.tolist(),
             "W_t_average": W_t_avg.tolist(),
+            "W_t_average_l2": W_t_avg_l2.tolist(),
             "num_samples": len(bws),
             "layer_groups": {},
         }
 
         for group_name in LAYER_GROUP_ORDER:
             group_bws = level_group_bandwidths[group_name].get(lk, [])
+            group_bws_l2 = level_group_bandwidths_l2[group_name].get(lk, [])
             group_radials = level_group_radials[group_name].get(lk, [])
             if not group_radials:
                 continue
             group_mean_radial = np.mean(np.stack(group_radials), axis=0)
             group_W_t = compute_filter_W_t(group_mean_radial)
+            group_W_t_l2 = compute_filter_W_t(group_mean_radial, norm="l2")
             agg["per_level"][lk]["layer_groups"][group_name] = {
                 "mean_bandwidth": float(np.mean(group_bws)),
+                "mean_bandwidth_l2": float(np.mean(group_bws_l2)) if group_bws_l2 else 0.0,
                 "std_bandwidth": float(np.std(group_bws)),
+                "std_bandwidth_l2": float(np.std(group_bws_l2)) if group_bws_l2 else 0.0,
                 "median_bandwidth": float(np.median(group_bws)),
+                "median_bandwidth_l2": float(np.median(group_bws_l2)) if group_bws_l2 else 0.0,
                 "mean_radial_power": group_mean_radial.tolist(),
                 "W_t_average": group_W_t.tolist(),
+                "W_t_average_l2": group_W_t_l2.tolist(),
                 "num_samples": len(group_bws),
             }
 
@@ -710,7 +770,27 @@ def run_exp2(
                 }
             agg["per_level"][lk]["controls"][control_name] = control_entry
 
-    def _mean_bandwidth_curve(level_names: List[str]) -> Dict[str, Any]:
+    agg["per_layer_bandwidth"] = {}
+    for lk in present_levels:
+        layer_map = level_per_layer_bandwidths.get(lk, {})
+        layer_indices = sorted(layer_map)
+        agg["per_layer_bandwidth"][lk] = {
+            "layer_indices": layer_indices,
+            "mean_gt": [
+                float(np.mean(layer_map[layer_index])) if layer_map[layer_index] else 0.0
+                for layer_index in layer_indices
+            ],
+            "std_gt": [
+                float(np.std(layer_map[layer_index])) if layer_map[layer_index] else 0.0
+                for layer_index in layer_indices
+            ],
+            "num_samples": [
+                len(layer_map[layer_index])
+                for layer_index in layer_indices
+            ],
+        }
+
+    def _mean_bandwidth_curve(level_names: List[str], *, value_suffix: str = "") -> Dict[str, Any]:
         curve: List[Dict[str, Any]] = []
         for group_name in ("overall",) + LAYER_GROUP_ORDER:
             values: List[float] = []
@@ -718,13 +798,13 @@ def run_exp2(
                 if level_key not in agg["per_level"]:
                     continue
                 if group_name == "overall":
-                    value = agg["per_level"][level_key].get("mean_bandwidth")
+                    value = agg["per_level"][level_key].get(f"mean_bandwidth{value_suffix}")
                 else:
                     value = (
                         agg["per_level"][level_key]
                         .get("layer_groups", {})
                         .get(group_name, {})
-                        .get("mean_bandwidth")
+                        .get(f"mean_bandwidth{value_suffix}")
                     )
                 if value is not None and np.isfinite(float(value)):
                     values.append(float(value))
@@ -748,6 +828,27 @@ def run_exp2(
     ]
     agg["primary_mean_Gt_curve"] = _mean_bandwidth_curve(primary_levels_for_curve)
     agg["wordy_mean_Gt_curve"] = _mean_bandwidth_curve(wordy_levels_for_curve)
+    agg["normalization_variants"] = {
+        "l2": {
+            "primary_mean_Gt_curve": _mean_bandwidth_curve(
+                primary_levels_for_curve,
+                value_suffix="_l2",
+            ),
+            "wordy_mean_Gt_curve": _mean_bandwidth_curve(
+                wordy_levels_for_curve,
+                value_suffix="_l2",
+            ),
+            "per_level": {
+                lk: {
+                    "mean_bandwidth_l2": agg["per_level"][lk].get("mean_bandwidth_l2"),
+                    "std_bandwidth_l2": agg["per_level"][lk].get("std_bandwidth_l2"),
+                    "median_bandwidth_l2": agg["per_level"][lk].get("median_bandwidth_l2"),
+                    "num_samples": agg["per_level"][lk].get("num_samples"),
+                }
+                for lk in present_levels
+            },
+        }
+    }
 
     complexity_points = _build_complexity_points(per_sample)
     agg["complexity_analysis"] = _summarize_complexity(complexity_points)
@@ -756,6 +857,7 @@ def run_exp2(
     for lk in present_levels:
         W_t_avg = np.array(agg["per_level"][lk]["W_t_average"])
         np.save(filters_dir / f"average_{lk}.npy", W_t_avg)
+        np.save(filters_dir / f"average_{lk}_l2.npy", np.array(agg["per_level"][lk]["W_t_average_l2"]))
         for group_name in LAYER_GROUP_ORDER:
             group_stats = agg["per_level"][lk]["layer_groups"].get(group_name)
             if group_stats is None:
@@ -764,11 +866,15 @@ def run_exp2(
                 filters_dir / f"average_{lk}_{group_name}.npy",
                 np.asarray(group_stats["W_t_average"], dtype=np.float64),
             )
+            np.save(
+                filters_dir / f"average_{lk}_{group_name}_l2.npy",
+                np.asarray(group_stats["W_t_average_l2"], dtype=np.float64),
+            )
 
     # --- Hypothesis tests ---
     tests: Dict[str, Any] = {}
 
-    # H1: Bandwidth increases with granularity
+    # H1: Bandwidth decreases with granularity as attention spectra sharpen.
     if len(primary_present_levels) >= 2:
         ranks = list(range(1, len(primary_present_levels) + 1))
         mean_bws = [np.mean(level_bandwidths[lk]) for lk in primary_present_levels]
@@ -777,9 +883,19 @@ def run_exp2(
         tests["spearman_bandwidth_vs_granularity"] = {
             "rho": rho,
             "p_value": p,
-            "target": "rho > 0.8 (bandwidth increases with granularity)",
-            "passed": rho > 0.8,
+            "target": f"rho < -{GATES['strong_spearman_rho_min']} (bandwidth decreases with granularity)",
+            "passed": rho < -GATES["strong_spearman_rho_min"],
             "values": dict(zip(primary_present_levels, mean_bws)),
+        }
+        mean_bws_l2 = [np.mean(level_bandwidths_l2[lk]) for lk in primary_present_levels]
+        rho_l2, p_l2 = spearman_correlation(ranks, mean_bws_l2)
+        tests["spearman_bandwidth_vs_granularity_l2"] = {
+            "rho": rho_l2,
+            "p_value": p_l2,
+            "target": f"rho < -{GATES['strong_spearman_rho_min']} (L2-normalized W_t)",
+            "passed": rho_l2 < -GATES["strong_spearman_rho_min"],
+            "values": dict(zip(primary_present_levels, mean_bws_l2)),
+            "normalization": "l2",
         }
 
         for group_name in LAYER_GROUP_ORDER:
@@ -794,9 +910,21 @@ def run_exp2(
             tests[f"spearman_bandwidth_vs_granularity_{group_name}"] = {
                 "rho": group_rho,
                 "p_value": group_p,
-                "target": "rho > 0.8",
-                "passed": group_rho > 0.8,
+                "target": f"rho < -{GATES['strong_spearman_rho_min']}",
+                "passed": group_rho < -GATES["strong_spearman_rho_min"],
                 "values": dict(zip(group_present, group_means)),
+            }
+            group_means_l2 = [
+                np.mean(level_group_bandwidths_l2[group_name][lk]) for lk in group_present
+            ]
+            group_rho_l2, group_p_l2 = spearman_correlation(group_ranks, group_means_l2)
+            tests[f"spearman_bandwidth_vs_granularity_{group_name}_l2"] = {
+                "rho": group_rho_l2,
+                "p_value": group_p_l2,
+                "target": f"rho < -{GATES['strong_spearman_rho_min']} (L2-normalized W_t)",
+                "passed": group_rho_l2 < -GATES["strong_spearman_rho_min"],
+                "values": dict(zip(group_present, group_means_l2)),
+                "normalization": "l2",
             }
 
     wordy_present_levels = [
@@ -809,8 +937,8 @@ def run_exp2(
         tests["spearman_bandwidth_vs_granularity_wordy"] = {
             "rho": rho,
             "p_value": p,
-            "target": "secondary wordy-ladder monotonicity only; no pooled monotonicity is run",
-            "passed": rho > 0.6,
+            "target": f"rho < -{GATES['secondary_spearman_rho_min']} (secondary wordy-ladder monotonicity only; no pooled monotonicity is run)",
+            "passed": rho < -GATES["secondary_spearman_rho_min"],
             "values": dict(zip(wordy_present_levels, mean_bws)),
         }
 
@@ -993,6 +1121,9 @@ def run_exp2(
             )
             _add_bandwidth_regression_views(f"horse_race_bandwidth_{group_name}", value_key)
     tests["hypothesis_supported"] = core_passed
+    agg.setdefault("normalization_variants", {}).setdefault("l2", {})["hypothesis_tests"] = {
+        key: value for key, value in tests.items() if key.endswith("_l2")
+    }
 
     # --- Log results ---
     logger.info("-" * 40)
@@ -1054,6 +1185,10 @@ def run_exp2(
         "total_time_s": total_time,
         **{
             f"{lk}_mean_bandwidth": agg["per_level"][lk]["mean_bandwidth"]
+            for lk in present_levels
+        },
+        **{
+            f"{lk}_mean_bandwidth_l2": agg["per_level"][lk]["mean_bandwidth_l2"]
             for lk in present_levels
         },
         "spearman_rho": sp.get("rho", 0),

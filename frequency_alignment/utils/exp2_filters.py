@@ -12,6 +12,8 @@ from .layer_groups import LAYER_GROUP_ORDER
 
 def load_exp2_filter_bank(
     exp2_out_dir: Path,
+    *,
+    norm: str = "l1",
 ) -> Tuple[
     Dict[str, Dict[str, np.ndarray]],
     Dict[str, Dict[Tuple[str, str], np.ndarray]],
@@ -24,12 +26,13 @@ def load_exp2_filter_bank(
 
     filters_dir = exp2_out_dir / "filters"
     level_keys = list(ALL_VQA_LEVEL_NAMES)
+    suffix = "_l2" if norm == "l2" else ""
     for level_key in level_keys:
-        overall_path = filters_dir / f"average_{level_key}.npy"
+        overall_path = filters_dir / f"average_{level_key}{suffix}.npy"
         if overall_path.exists():
             average_filters["overall"][level_key] = np.load(overall_path)
         for group_name in LAYER_GROUP_ORDER:
-            group_path = filters_dir / f"average_{level_key}_{group_name}.npy"
+            group_path = filters_dir / f"average_{level_key}_{group_name}{suffix}.npy"
             if group_path.exists():
                 average_filters[group_name][level_key] = np.load(group_path)
 
@@ -40,11 +43,13 @@ def load_exp2_filter_bank(
     for record in load_json(power_path):
         image_id = str(record.get("image_id"))
         for level_key, level_data in record.get("levels", {}).items():
-            w_t = level_data.get("W_t")
+            w_t = level_data.get("W_t_l2" if norm == "l2" else "W_t")
             if w_t:
                 sample_filters["overall"][(image_id, level_key)] = np.asarray(w_t, dtype=np.float64)
             for group_name in LAYER_GROUP_ORDER:
-                group_w_t = level_data.get("layer_groups", {}).get(group_name, {}).get("W_t")
+                group_w_t = level_data.get("layer_groups", {}).get(group_name, {}).get(
+                    "W_t_l2" if norm == "l2" else "W_t"
+                )
                 if group_w_t:
                     sample_filters[group_name][(image_id, level_key)] = np.asarray(
                         group_w_t,

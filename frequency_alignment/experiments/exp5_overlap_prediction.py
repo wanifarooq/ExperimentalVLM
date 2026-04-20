@@ -16,8 +16,9 @@ from ..analysis.continuous import (
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
+from ..analysis.gate_thresholds import GATES
 from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
-from ..analysis.spectral import compute_spectral_overlap
+from ..analysis.spectral import compute_spectral_overlap, compute_spectral_overlap_linear
 from ..analysis.statistics import bootstrap_ci, pearson_correlation, spearman_correlation
 from ..data.base import ALL_VQA_LEVEL_NAMES, ExperimentResult
 from ..utils.exp2_filters import load_exp2_filter_bank
@@ -125,6 +126,8 @@ def _build_overlap_pairs(
     grouped: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(
         lambda: {
             "predicted": [],
+            "predicted_quadratic": [],
+            "predicted_linear": [],
             "complexity_score": [],
             "question_complexity_score": [],
             "prompt_complexity_score": [],
@@ -170,13 +173,16 @@ def _build_overlap_pairs(
                 loglik_erosion = max(loglik_drift, 0.0)
                 loglik_recovery = min(loglik_drift, 0.0)
                 loglik_volatility = abs(loglik_drift)
-                predicted = compute_spectral_overlap(W_t, delta_f)
+                predicted_quadratic = compute_spectral_overlap(W_t, delta_f)
+                predicted_linear = compute_spectral_overlap_linear(W_t, delta_f)
 
                 pair = {
                     "image_id": image_id,
                     "level": level_key,
                     "perturbation": perturbation.get("name", "unknown"),
-                    "predicted": predicted,
+                    "predicted": predicted_quadratic,
+                    "predicted_quadratic": predicted_quadratic,
+                    "predicted_linear": predicted_linear,
                     "actual": accuracy_drop,
                     "accuracy_drop": accuracy_drop,
                     "loglik_erosion": loglik_erosion,
@@ -196,7 +202,9 @@ def _build_overlap_pairs(
                 sample_pairs.append(pair)
 
                 key = (level_key, pair["perturbation"])
-                grouped[key]["predicted"].append(predicted)
+                grouped[key]["predicted"].append(predicted_quadratic)
+                grouped[key]["predicted_quadratic"].append(predicted_quadratic)
+                grouped[key]["predicted_linear"].append(predicted_linear)
                 grouped[key]["complexity_score"].append(complexity_score)
                 grouped[key]["question_complexity_score"].append(question_complexity_score)
                 grouped[key]["prompt_complexity_score"].append(prompt_complexity_score)
@@ -227,6 +235,8 @@ def _build_overlap_pairs(
                 "level": level_key,
                 "perturbation": perturbation,
                 "predicted": float(np.mean(values["predicted"])),
+                "predicted_quadratic": float(np.mean(values["predicted_quadratic"])),
+                "predicted_linear": float(np.mean(values["predicted_linear"])),
                 "complexity_score": float(np.mean(values["complexity_score"])),
                 "question_complexity_score": float(np.mean(values["question_complexity_score"])),
                 "prompt_complexity_score": float(np.mean(values["prompt_complexity_score"])),
@@ -284,6 +294,65 @@ def _correlate(
     return predicted, actual
 
 
+def _overlap_variant_correlations(
+    grouped_pairs: List[Dict[str, Any]],
+    sample_pairs: List[Dict[str, Any]],
+    *,
+    actual_key: str = "actual",
+) -> Dict[str, Dict[str, Any]]:
+    variants = {
+        "quadratic": "predicted_quadratic",
+        "linear": "predicted_linear",
+    }
+    payload: Dict[str, Dict[str, Any]] = {}
+    for variant_name, predicted_key in variants.items():
+        variant_payload: Dict[str, Any] = {
+            "predicted_key": predicted_key,
+            "grouped": {
+                "aggregation_level": "grouped_perturbation_family",
+                "n": 0,
+                "pearson_r": None,
+                "pearson_p_value": None,
+                "spearman_rho": None,
+                "spearman_p_value": None,
+            },
+            "sample": {
+                "aggregation_level": "sample",
+                "n": 0,
+                "pearson_r": None,
+                "pearson_p_value": None,
+                "spearman_rho": None,
+                "spearman_p_value": None,
+            },
+        }
+        for level_name, rows in (
+            ("grouped", grouped_pairs),
+            ("sample", sample_pairs),
+        ):
+            usable = [
+                row
+                for row in rows
+                if row.get(predicted_key) is not None and row.get(actual_key) is not None
+            ]
+            variant_payload[level_name]["n"] = len(usable)
+            if len(usable) < 3:
+                continue
+            pred = np.asarray([row[predicted_key] for row in usable], dtype=np.float64)
+            actual = np.asarray([row[actual_key] for row in usable], dtype=np.float64)
+            r, p = pearson_correlation(pred, actual)
+            rho, rho_p = spearman_correlation(pred, actual)
+            variant_payload[level_name].update(
+                {
+                    "pearson_r": r,
+                    "pearson_p_value": p,
+                    "spearman_rho": rho,
+                    "spearman_p_value": rho_p,
+                }
+            )
+        payload[variant_name] = variant_payload
+    return payload
+
+
 def _filter_pairs_by_level_view(
     pairs: List[Dict[str, Any]],
     view_name: str,
@@ -309,6 +378,7 @@ def _grouped_view_correlation_summary(
             "spearman_rho_grouped": 0.0,
             "spearman_p_grouped": 1.0,
             "passed": False,
+            "target": f"r > {GATES['overlap_law_r_min']} with n >= {GATES['overlap_law_min_n']}",
         }
     pred_arr, actual_arr = _correlate(view_pairs)
     r_pearson, p_pearson = pearson_correlation(pred_arr, actual_arr)
@@ -321,7 +391,8 @@ def _grouped_view_correlation_summary(
         "pearson_p_grouped": p_pearson,
         "spearman_rho_grouped": rho_spearman,
         "spearman_p_grouped": p_spearman,
-        "passed": r_pearson > 0.7,
+        "target": f"r > {GATES['overlap_law_r_min']} with n >= {GATES['overlap_law_min_n']}",
+        "passed": r_pearson > GATES["overlap_law_r_min"] and len(view_pairs) >= GATES["overlap_law_min_n"],
     }
 
 
@@ -564,8 +635,10 @@ def _summarize_target(
         "pearson_predicted_vs_actual_grouped": {
             "r": r_pearson,
             "p_value": p_pearson,
-            "target": "r > 0.7",
-            "passed": r_pearson > 0.7,
+            "target": f"r > {GATES['overlap_law_r_min']} with n >= {GATES['overlap_law_min_n']}",
+            "passed": r_pearson > GATES["overlap_law_r_min"]
+            and len(grouped_target_pairs) >= GATES["overlap_law_min_n"],
+            "min_n": GATES["overlap_law_min_n"],
         },
         "spearman_predicted_vs_actual_grouped": {
             "rho": rho_spearman,
@@ -579,9 +652,10 @@ def _summarize_target(
             "r": view_summary["pearson_r_grouped"],
             "p_value": view_summary["pearson_p_grouped"],
             "n": view_summary["n_grouped_pairs"],
-            "target": "r > 0.7",
+            "target": f"r > {GATES['overlap_law_r_min']} with n >= {GATES['overlap_law_min_n']}",
             "passed": view_summary["passed"],
             "level_filter": view_summary["level_filter"],
+            "min_n": GATES["overlap_law_min_n"],
         }
     if sample_r is not None:
         tests["pearson_predicted_vs_actual_sample"] = {
@@ -598,6 +672,16 @@ def _summarize_target(
         }
     if pearson_ci is not None:
         tests["pearson_grouped_bootstrap_ci"] = pearson_ci
+    aggregation_note = (
+        "Points are perturbation families averaged within (image_id, level); "
+        "sample-level r available separately."
+    )
+    tests["pearson_predicted_vs_actual_grouped"]["aggregation_level"] = (
+        "grouped_perturbation_family"
+    )
+    tests["pearson_predicted_vs_actual_grouped"]["aggregation_note"] = aggregation_note
+    tests["pearson_predicted_vs_actual_sample"]["aggregation_level"] = "sample"
+    tests["pearson_predicted_vs_actual_sample"]["aggregation_note"] = aggregation_note
     tests["comparable_bridge_grouped"] = grouped_bridge
     tests["comparable_bridge_sample"] = (
         sample_bridge
@@ -646,9 +730,30 @@ def _summarize_target(
         r, p = pearson_correlation(level_pred, level_actual)
         per_level_corr[level_key] = {"pearson_r": r, "p_value": p, "n": len(level_pairs)}
 
+    overlap_law_variants = _overlap_variant_correlations(
+        grouped_target_pairs,
+        sample_target_pairs,
+        actual_key="actual",
+    )
+    for pair in grouped_target_pairs:
+        pair["aggregation_level"] = "grouped_perturbation_family"
+        pair["aggregation_note"] = aggregation_note
+        pair["pearson_r_grouped_context"] = r_pearson
+        pair["n_grouped_context"] = len(grouped_target_pairs)
+        pair["pearson_r_sample_context"] = sample_r
+        pair["n_sample_context"] = len(sample_target_pairs)
+    for pair in sample_target_pairs:
+        pair["aggregation_level"] = "sample"
+        pair["aggregation_note"] = aggregation_note
+        pair["pearson_r_grouped_context"] = r_pearson
+        pair["n_grouped_context"] = len(grouped_target_pairs)
+        pair["pearson_r_sample_context"] = sample_r
+        pair["n_sample_context"] = len(sample_target_pairs)
     summary = {
         "target": target_name,
         "label": target_spec["label"],
+        "aggregation_level": "grouped_perturbation_family",
+        "aggregation_note": aggregation_note,
         "n_grouped_pairs": len(grouped_target_pairs),
         "n_sample_pairs": len(sample_target_pairs),
         "pearson_r_grouped": r_pearson,
@@ -667,7 +772,9 @@ def _summarize_target(
         "comparable_bridge_sample": sample_bridge,
         "prediction_error_model_grouped": grouped_error_model,
         "prediction_error_model_sample": sample_error_model,
+        "overlap_law_variants": overlap_law_variants,
     }
+    tests["overlap_law_variants"] = overlap_law_variants
     metrics = {
         "n_grouped_pairs": len(grouped_target_pairs),
         "n_sample_pairs": len(sample_target_pairs),
@@ -704,7 +811,12 @@ def run_exp5(
     source_specs = _build_source_specs(primary_normalization)
 
     average_filters_by_group, sample_filters_by_group = load_exp2_filter_bank(exp2_dir)
+    average_filters_by_group_l2, sample_filters_by_group_l2 = load_exp2_filter_bank(
+        exp2_dir,
+        norm="l2",
+    )
     analyses: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    analyses_l2: Dict[str, Dict[str, Dict[str, Any]]] = {}
     source_metadata: Dict[str, Dict[str, str]] = {}
     for source_spec in source_specs:
         source_name = source_spec["name"]
@@ -768,8 +880,35 @@ def run_exp5(
                 "target_analyses": target_analyses,
                 "prediction_factor_horse_race": prediction_factor_horse_race,
             }
+        source_analyses_l2: Dict[str, Dict[str, Any]] = {}
+        for group_name in FILTER_ANALYSIS_ORDER:
+            if not average_filters_by_group_l2.get(group_name):
+                continue
+            sample_pairs_l2, grouped_pairs_l2 = _build_overlap_pairs(
+                exp1_dir,
+                average_filters_by_group_l2[group_name],
+                sample_filters_by_group_l2[group_name],
+                delta_key,
+            )
+            summarized_l2 = _summarize_target(
+                sample_pairs_l2,
+                grouped_pairs_l2,
+                PRIMARY_TARGET,
+                TARGET_SPECS[PRIMARY_TARGET],
+            )
+            if summarized_l2 is None:
+                continue
+            summary_l2, tests_l2, metrics_l2, _, _ = summarized_l2
+            source_analyses_l2[group_name] = {
+                "summary": summary_l2,
+                "tests": tests_l2,
+                "metrics": metrics_l2,
+                "normalization": "l2",
+            }
         if source_analyses:
             analyses[source_name] = source_analyses
+        if source_analyses_l2:
+            analyses_l2[source_name] = source_analyses_l2
 
     if not analyses:
         return ExperimentResult(
@@ -828,6 +967,7 @@ def run_exp5(
         "primary_delta_normalization": primary_normalization,
         "control_groups": control_groups,
         "source_metadata": source_metadata,
+        "normalization_variants": {"l2": {}},
     }
     tests_payload: Dict[str, Any] = {
         "analysis_groups": list(FILTER_ANALYSIS_ORDER),
@@ -837,6 +977,7 @@ def run_exp5(
         "primary_delta_normalization": primary_normalization,
         "control_groups": control_groups,
         "source_metadata": source_metadata,
+        "normalization_variants": {"l2": {}},
     }
     metrics: Dict[str, Any] = {}
     scatter_payload: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
@@ -955,6 +1096,17 @@ def run_exp5(
 
         summary_payload[source_name] = source_summary
         tests_payload[source_name] = source_tests
+
+    for source_name, source_analyses_l2 in analyses_l2.items():
+        summary_payload["normalization_variants"]["l2"][source_name] = {}
+        tests_payload["normalization_variants"]["l2"][source_name] = {}
+        for group_name, analysis_l2 in source_analyses_l2.items():
+            summary_payload["normalization_variants"]["l2"][source_name][group_name] = {
+                "summary": analysis_l2["summary"],
+                "metrics": analysis_l2["metrics"],
+                "normalization": "l2",
+            }
+            tests_payload["normalization_variants"]["l2"][source_name][group_name] = analysis_l2["tests"]
 
     image_primary = analyses.get("image_space", {}).get(primary_group)
     if image_primary is None and analyses.get("image_space"):

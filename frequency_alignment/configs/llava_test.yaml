@@ -1,0 +1,105 @@
+seed: 42
+deterministic: false
+device: auto
+cache_dir: .hf_cache
+out_dir: frequency_alignment_outputs_llava_test
+
+model:
+  primary: llava-hf/llava-v1.6-mistral-7b-hf
+  alternatives: []
+  quantization: null
+  device_map: auto
+  attn_implementation: null
+  attention_extract_implementation: eager
+  trust_remote_code: true
+
+data:
+  dataset: gqa
+  max_samples: 10
+  allow_download: true
+  seedbench_tsv: null
+  seedbench_image_root: null
+  partimagenet_dir: null
+
+perturbations:
+  severity_levels:
+    - 1
+  export_num_images: 1
+  overlay_mode: label_free
+  overlay_count: 3
+  include_natural: true
+  include_frequency: false
+  natural_types:
+    - translation
+    - padcrop
+    - scale
+    - scalepad_black
+    - scalepad_white
+    - rotation
+  frequency_types:
+    - lowpass_keep
+    - highpass_keep
+    - lowband_noise
+    - highband_noise
+    - allband_noise
+  severity_params:
+    1:
+      translate: 8
+      padcrop: 8
+      scale: 0.95
+      rotation: 20
+      freq_cutoff: 0.18
+      freq_epsilon: 0.03137
+      text_scale: 0.3
+
+analysis:
+  num_bands: 20
+  num_bands_mode: auto
+  num_bands_auto:
+    probe_samples: 6
+    coefficient: 0.6
+    rounding: ceil
+    statistic: median
+    min_bands: 12
+    max_bands: 25
+  suppress_dc: false
+  attention_layers: all
+  attention_fft_window: none
+  significance_level: 0.05
+  hypothesis_testing: true
+
+plotting:
+  profile: exhaustive
+  representative_samples: 10
+
+experiments:
+  exp1:
+    enabled: true
+    max_samples: 10
+    extract_vision_tokens: false
+    store_feature_delta_f: true
+  exp2:
+    enabled: true
+    max_samples: 10
+    layer_stride: 8
+    fft_window: none
+    prompt_controls:
+      - empty_language
+      - random_language
+  exp3:
+    enabled: false
+    max_samples: 10
+    perturbation_subset: null
+    post_fusion_layer_fraction: 0.8
+  exp4:
+    enabled: false
+    max_samples: 10
+    sweep_steps: 5
+  exp5:
+    enabled: false
+    primary_layer_group: late
+    primary_delta_normalization: relative
+  exp6:
+    enabled: false
+    max_samples: 3
+    dataset: partimagenet

@@ -237,6 +237,46 @@ def _csem_copy_path(out_path: Path) -> Path:
     return out_path.with_name(f"{out_path.stem}_csem{out_path.suffix}")
 
 
+def _append_exp5_overlap_aggregation_caption(
+    metadata_lines: List[str],
+    scatter_data: Sequence[Dict[str, Any]],
+    out_path: Path,
+    *,
+    fallback_r: Optional[float] = None,
+) -> List[str]:
+    if "exp5_overlap_scatter" not in out_path.name or not scatter_data:
+        return metadata_lines
+    first = scatter_data[0]
+    r_grouped = _optional_float(first.get("pearson_r_grouped_context"))
+    r_sample = _optional_float(first.get("pearson_r_sample_context"))
+    n_grouped = first.get("n_grouped_context")
+    n_sample = first.get("n_sample_context")
+    aggregation_level = str(first.get("aggregation_level") or "")
+    if r_grouped is None and aggregation_level == "grouped_perturbation_family":
+        r_grouped = fallback_r
+        n_grouped = len(scatter_data)
+    if r_sample is None and aggregation_level == "sample":
+        r_sample = fallback_r
+        n_sample = len(scatter_data)
+
+    def _fmt_r(value: Optional[float]) -> str:
+        return f"{value:.3f}" if value is not None else "n/a"
+
+    def _fmt_n(value: Any) -> str:
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return "n/a"
+
+    metadata_lines.append(
+        "Grouped r="
+        f"{_fmt_r(r_grouped)} (n={_fmt_n(n_grouped)}); "
+        f"sample r={_fmt_r(r_sample)} (n={_fmt_n(n_sample)}). "
+        "Points are perturbation families averaged within (image, level)."
+    )
+    return metadata_lines
+
+
 def _tight_layout(fig: plt.Figure, *, metadata_bottom: float = 0.08, top: float = 0.97) -> None:
     metadata = getattr(fig, "_fa_metadata_lines", None)
     if metadata:
@@ -1509,6 +1549,12 @@ def plot_overlap_scatter(
         metadata_lines.append(
             f"VisualSample={displayed_count} of {original_count}; correlation in title uses all source points"
         )
+    metadata_lines = _append_exp5_overlap_aggregation_caption(
+        metadata_lines,
+        scatter_data,
+        out_path,
+        fallback_r=pearson_r,
+    )
     _set_plot_metadata(
         fig,
         metadata_lines,
@@ -1593,15 +1639,20 @@ def plot_overlap_scatter_grid_by_level(
         axis.axis("off")
 
     fig.suptitle(title, fontsize=14, y=0.99)
+    metadata_lines = list(metadata) if metadata else _metadata_lines(
+        "View=multi-panel scatter",
+        "Panels=one level per subplot",
+        f"Y={y_label}",
+        f"Points={len(scatter_data)}",
+    )
+    metadata_lines = _append_exp5_overlap_aggregation_caption(
+        metadata_lines,
+        scatter_data,
+        out_path,
+    )
     _set_plot_metadata(
         fig,
-        metadata
-        or _metadata_lines(
-            "View=multi-panel scatter",
-            "Panels=one level per subplot",
-            f"Y={y_label}",
-            f"Points={len(scatter_data)}",
-        ),
+        metadata_lines,
     )
     _tight_layout(fig, metadata_bottom=0.07, top=0.95)
     _save_fig(fig, out_path)
@@ -1779,15 +1830,20 @@ def plot_overlap_scatter_grid_by_view(
         _apply_style(axis)
     axes[0].set_ylabel(y_label, fontsize=10)
     fig.suptitle(title, fontsize=13)
+    metadata_lines = list(metadata) if metadata else _metadata_lines(
+        "View=triple-view scatter grid",
+        "Panels=primary L1-L4, wordy L5-L8, pooled L1-L8",
+        "X=predicted spectral overlap",
+        f"Y={y_label}",
+    )
+    metadata_lines = _append_exp5_overlap_aggregation_caption(
+        metadata_lines,
+        scatter_data,
+        out_path,
+    )
     _set_plot_metadata(
         fig,
-        metadata
-        or _metadata_lines(
-            "View=triple-view scatter grid",
-            "Panels=primary L1-L4, wordy L5-L8, pooled L1-L8",
-            "X=predicted spectral overlap",
-            f"Y={y_label}",
-        ),
+        metadata_lines,
     )
     _tight_layout(fig)
     _save_fig(fig, out_path)
@@ -3146,6 +3202,63 @@ def _plot_exp2_mean_gt_curves(summary: Dict[str, Any], out_path: Path) -> None:
     _save_fig(fig, out_path)
 
 
+def _plot_exp2_gt_vs_layer(summary: Dict[str, Any], out_path: Path) -> None:
+    per_layer = summary.get("per_layer_bandwidth", {})
+    levels = _ordered_levels(per_layer.keys())
+    if not levels:
+        return
+
+    fig, ax = plt.subplots(figsize=(9.0, 5.4))
+    for level in levels:
+        payload = per_layer.get(level, {})
+        layer_indices = payload.get("layer_indices") or []
+        mean_gt = payload.get("mean_gt") or []
+        if not layer_indices or not mean_gt:
+            continue
+        is_wordy = level in (LEVEL_VIEWS["wordy"] or set())
+        ax.plot(
+            layer_indices,
+            mean_gt,
+            marker="o",
+            markersize=3.8,
+            linewidth=2.0 if not is_wordy else 1.8,
+            linestyle="--" if is_wordy else "-",
+            color=_LEVEL_COLORS.get(level, "#666666"),
+            label=_level_label(level),
+        )
+
+    ranges = summary.get("layer_groups", {}).get("ranges", {})
+    for group_name in ("early", "mid"):
+        boundary = ranges.get(group_name, {}).get("end")
+        if boundary is not None:
+            ax.axvline(
+                float(boundary) - 0.5,
+                linestyle="--",
+                linewidth=1.0,
+                color="#777777",
+                alpha=0.55,
+            )
+
+    ax.set_xlabel("Transformer Layer Index", fontsize=11)
+    ax.set_ylabel("Mean Effective Bandwidth G(t)", fontsize=11)
+    ax.set_title("Task-specific filter bandwidth across transformer depth", fontsize=13)
+    ax.legend(fontsize=8, ncol=2, loc="best")
+    _apply_style(ax)
+    _set_plot_metadata(
+        fig,
+        _plot_metadata(
+            experiment="2",
+            what="Per-layer effective bandwidth without early/mid/late binning",
+            aggregation="sample average by level and decoder layer",
+            x="decoder layer index",
+            y="mean effective bandwidth G(t)",
+            note="Solid=L1-L4 primary; dashed=L5-L8 wordy; vertical dashed lines mark layer-group boundaries",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
 def _plot_exp2_selected_samples(
     records: List[Dict[str, Any]],
     out_dir: Path,
@@ -4361,6 +4474,7 @@ def _generate_primary_l1_l4_plots_exp2_to_exp5(
         )
         _plot_exp2_group_spectra(exp2_summary, primary_dir / "exp2_group_spectra.png", suppress_dc=suppress_dc)
         _plot_exp2_group_bandwidth(exp2_summary, primary_dir / "exp2_group_bandwidth.png")
+        _plot_exp2_gt_vs_layer(exp2_summary, primary_dir / "exp2_gt_vs_layer.png")
         _plot_exp2_control_bandwidth(exp2_summary, primary_dir / "exp2_control_bandwidth.png")
         _plot_exp2_control_divergence(exp2_summary, primary_dir / "exp2_control_divergence.png")
         _plot_exp2_control_spectra(exp2_summary, primary_dir, suppress_dc=suppress_dc)
@@ -5801,6 +5915,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
         )
         _plot_exp2_group_bandwidth(exp2_summary, plots_dir / "exp2_group_bandwidth.png")
         _plot_exp2_mean_gt_curves(exp2_summary, plots_dir / "exp2_mean_gt_curves.png")
+        _plot_exp2_gt_vs_layer(exp2_summary, plots_dir / "exp2_gt_vs_layer.png")
         _plot_exp2_control_bandwidth(exp2_summary, plots_dir / "exp2_control_bandwidth.png")
         _plot_exp2_control_divergence(exp2_summary, plots_dir / "exp2_control_divergence.png")
         _plot_exp2_control_spectra(exp2_summary, plots_dir, suppress_dc=suppress_dc)

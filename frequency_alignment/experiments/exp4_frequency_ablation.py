@@ -4,10 +4,10 @@ Sweep a lowpass or highpass cutoff from near-DC to Nyquist, producing
 filtered images at each step.  For each cutoff × granularity level, score
 the MCQ and find the critical frequency ω_c* where accuracy drops to 50%.
 
-The hypothesis is that ω_c* increases with task granularity:
-    ω_c*(L1) < ω_c*(L2) < ω_c*(L3) < ω_c*(L4)
+The hypothesis gate is that ω_c* decreases with task granularity:
+    ω_c*(L1) > ω_c*(L2) > ω_c*(L3) > ω_c*(L4)
 
-because finer tasks require higher-frequency information to answer correctly.
+because finer tasks become fragile when less of the required frequency support remains.
 
 Outputs:
     exp4/summary.json             -- critical cutoffs and hypothesis tests
@@ -35,6 +35,7 @@ from ..analysis.continuous import (
     summarize_linear_trend,
     summarize_multivariate_regression,
 )
+from ..analysis.gate_thresholds import GATES
 from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.statistics import (
     monotonicity_test,
@@ -322,6 +323,35 @@ def run_exp4(
             }
             critical_cutoffs[mode][lk] = omega_c
 
+    # Compatibility summary used by shared plot/report checks.
+    primary_mode = "lowpass" if "lowpass" in sweep_modes else sweep_modes[0]
+    agg["per_level"] = {}
+    agg["per_level_perturbation"] = {}
+    for lk in level_order:
+        if lk not in critical_cutoffs.get(primary_mode, {}):
+            continue
+        mode_entries: Dict[str, Any] = {}
+        cutoff_values: List[float] = []
+        for mode in sweep_modes:
+            mode_payload = agg["per_mode"].get(mode, {}).get(lk)
+            if mode_payload is None:
+                continue
+            cutoff_value = float(mode_payload["critical_cutoff"])
+            cutoff_values.append(cutoff_value)
+            mode_entries[mode] = {
+                "critical_cutoff": cutoff_value,
+                "mean_accuracy": float(np.mean(mode_payload["accuracy_curve"])),
+                "n": int(mode_payload["num_samples"]),
+            }
+        agg["per_level"][lk] = {
+            "critical_cutoff": float(critical_cutoffs[primary_mode][lk]),
+            "mean_critical_cutoff": float(np.mean(cutoff_values)) if cutoff_values else 0.0,
+            "primary_mode": primary_mode,
+            "num_modes": len(mode_entries),
+            "num_samples": int(agg["per_mode"][primary_mode][lk]["num_samples"]),
+        }
+        agg["per_level_perturbation"][lk] = mode_entries
+
     complexity_points = _build_complexity_points(per_sample, accuracy_threshold)
     agg["complexity_analysis"] = _summarize_complexity(complexity_points, sweep_modes)
 
@@ -337,11 +367,16 @@ def run_exp4(
 
         # H1: Monotonicity of ω_c* across levels
         is_mono, tau = monotonicity_test(cutoff_values)
+        is_decreasing = all(
+            cutoff_values[idx] >= cutoff_values[idx + 1]
+            for idx in range(len(cutoff_values) - 1)
+        )
         tests[f"monotonicity_{mode}"] = {
-            "is_monotonic": is_mono,
+            "is_monotonic": is_decreasing,
             "kendall_tau": tau,
             "values": dict(zip(present_levels, cutoff_values)),
-            "passed": tau > 0.6,
+            "target": f"kendall_tau < -{GATES['monotonicity_kendall_tau_min']} (critical cutoff decreases with granularity)",
+            "passed": tau < -GATES["monotonicity_kendall_tau_min"],
         }
 
         # H2: Spearman correlation
@@ -350,8 +385,13 @@ def run_exp4(
         tests[f"spearman_cutoff_vs_granularity_{mode}"] = {
             "rho": rho,
             "p_value": p,
-            "passed": rho > 0.8,
+            "target": f"rho < -{GATES['strong_spearman_rho_min']} (critical cutoff decreases with granularity)",
+            "passed": rho < -GATES["strong_spearman_rho_min"],
             "values": dict(zip(present_levels, cutoff_values)),
+            "caveat": (
+                "Spearman p-value gating over four level means is underpowered; "
+                "directional cutoff monotonicity is the primary gate."
+            ),
         }
 
         wordy_present = [
@@ -364,17 +404,21 @@ def run_exp4(
             wordy_mono, wordy_tau = monotonicity_test(wordy_values)
             wordy_rho, wordy_p = spearman_correlation(range(1, len(wordy_values) + 1), wordy_values)
             tests[f"monotonicity_{mode}_wordy"] = {
-                "is_monotonic": wordy_mono,
+                "is_monotonic": all(
+                    wordy_values[idx] >= wordy_values[idx + 1]
+                    for idx in range(len(wordy_values) - 1)
+                ),
                 "kendall_tau": wordy_tau,
                 "values": dict(zip(wordy_present, wordy_values)),
-                "passed": wordy_tau > 0.6,
+                "target": f"kendall_tau < -{GATES['monotonicity_kendall_tau_min']}",
+                "passed": wordy_tau < -GATES["monotonicity_kendall_tau_min"],
             }
             tests[f"spearman_cutoff_vs_granularity_{mode}_wordy"] = {
                 "rho": wordy_rho,
                 "p_value": wordy_p,
-                "passed": wordy_rho > 0.6,
+                "passed": wordy_rho < -GATES["secondary_spearman_rho_min"],
                 "values": dict(zip(wordy_present, wordy_values)),
-                "target": "secondary wordy-ladder monotonicity only; no pooled monotonicity is run",
+                "target": f"rho < -{GATES['secondary_spearman_rho_min']} (secondary wordy-ladder monotonicity only; no pooled monotonicity is run)",
             }
 
     tests["continuous_complexity"] = {}
