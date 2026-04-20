@@ -643,7 +643,8 @@ def _summarize_target(
         "spearman_predicted_vs_actual_grouped": {
             "rho": rho_spearman,
             "p_value": p_spearman,
-            "passed": rho_spearman > 0.6,
+            "target": f"rho > {GATES['secondary_spearman_rho_min']}",
+            "passed": rho_spearman > GATES["secondary_spearman_rho_min"],
         },
         "pearson_predicted_vs_actual_grouped_views": grouped_view_summaries,
     }
@@ -661,7 +662,8 @@ def _summarize_target(
         tests["pearson_predicted_vs_actual_sample"] = {
             "r": sample_r,
             "p_value": sample_r_p,
-            "passed": sample_r > 0.3,
+            "target": f"r > {GATES['overlap_law_sample_r_min']}",
+            "passed": sample_r > GATES["overlap_law_sample_r_min"],
         }
     else:
         tests["pearson_predicted_vs_actual_sample"] = {

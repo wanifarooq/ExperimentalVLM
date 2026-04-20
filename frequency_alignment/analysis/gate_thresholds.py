@@ -10,5 +10,6 @@ GATES = {
     "controlled_r_min": 0.7,
     "strong_spearman_rho_min": 0.8,
     "secondary_spearman_rho_min": 0.6,
+    "overlap_law_sample_r_min": 0.3,
     "segmentation_baseline_abs_max": 0.5,
 }

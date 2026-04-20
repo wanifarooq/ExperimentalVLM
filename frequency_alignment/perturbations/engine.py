@@ -16,11 +16,12 @@ import re
 import string
 import sys
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 from ..analysis.spectral import compute_image_spectral_signature_stats
 
@@ -256,6 +257,68 @@ def _identity_image(image: Image.Image) -> Image.Image:
     return image.copy()
 
 
+def _apply_motion_blur(image: Image.Image, kernel_size: int) -> Image.Image:
+    """Apply a simple horizontal motion-blur kernel."""
+    k = max(3, int(kernel_size))
+    if k % 2 == 0:
+        k += 1
+    weights = [0.0] * (k * k)
+    center = k // 2
+    for x in range(k):
+        weights[center * k + x] = 1.0
+    return image.filter(ImageFilter.Kernel((k, k), weights, scale=float(k)))
+
+
+def _apply_occlusion(
+    image: Image.Image,
+    fraction: float,
+    *,
+    fill: Tuple[int, int, int] = (0, 0, 0),
+) -> Image.Image:
+    """Apply a centered cutout occlusion with area controlled by ``fraction``."""
+    frac = max(0.0, min(0.8, float(fraction)))
+    out = image.copy()
+    w, h = out.size
+    side_scale = math.sqrt(frac)
+    box_w = max(1, int(w * side_scale))
+    box_h = max(1, int(h * side_scale))
+    x0 = max(0, (w - box_w) // 2)
+    y0 = max(0, (h - box_h) // 2)
+    x1 = min(w, x0 + box_w)
+    y1 = min(h, y0 + box_h)
+    draw = ImageDraw.Draw(out)
+    if out.mode == "RGBA":
+        fill_value: Any = (*fill, 255)
+    elif out.mode == "RGB":
+        fill_value = fill
+    else:
+        fill_value = 0
+    draw.rectangle((x0, y0, x1, y1), fill=fill_value)
+    return out
+
+
+def _apply_gaussian_noise(
+    image: Image.Image,
+    std: float,
+    rng: _random.Random,
+) -> Image.Image:
+    """Apply additive Gaussian pixel noise with std measured on [0, 1]."""
+    arr = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    np_rng = np.random.RandomState(rng.randint(0, 2**31 - 1))
+    noisy = arr + np_rng.normal(0.0, float(std), size=arr.shape).astype(np.float32)
+    noisy = np.clip(noisy, 0.0, 1.0)
+    return Image.fromarray((noisy * 255.0).astype(np.uint8))
+
+
+def _apply_jpeg_compression(image: Image.Image, quality: int) -> Image.Image:
+    """Round-trip through JPEG to simulate compression artifacts."""
+    q = max(1, min(95, int(quality)))
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG", quality=q, optimize=False)
+    buffer.seek(0)
+    return Image.open(buffer).convert("RGB")
+
+
 def _centered_box_from_size(
     image: Image.Image,
     width: int,
@@ -407,11 +470,23 @@ def _build_overlay_specs(
 # Default severity parameters matching the segmentation harness
 _DEFAULT_SEVERITY = {
     1: {"translate": 4, "padcrop": 4, "scale": 0.95, "rotation": 10,
-        "freq_cutoff": 0.18, "freq_epsilon": 8 / 255, "text_scale": 0.3},
+        "freq_cutoff": 0.18, "freq_epsilon": 8 / 255, "text_scale": 0.3,
+        "gaussian_blur_radius": 1.0, "motion_blur_kernel": 3,
+        "occlusion_fraction": 0.08, "brightness_delta": 0.15,
+        "contrast_delta": 0.15, "gaussian_noise_std": 0.02,
+        "jpeg_quality": 70},
     2: {"translate": 8, "padcrop": 8, "scale": 0.90, "rotation": 20,
-        "freq_cutoff": 0.28, "freq_epsilon": 8 / 255, "text_scale": 0.5},
+        "freq_cutoff": 0.28, "freq_epsilon": 8 / 255, "text_scale": 0.5,
+        "gaussian_blur_radius": 2.0, "motion_blur_kernel": 5,
+        "occlusion_fraction": 0.14, "brightness_delta": 0.30,
+        "contrast_delta": 0.30, "gaussian_noise_std": 0.04,
+        "jpeg_quality": 50},
     3: {"translate": 12, "padcrop": 12, "scale": 0.85, "rotation": 30,
-        "freq_cutoff": 0.38, "freq_epsilon": 8 / 255, "text_scale": 0.7},
+        "freq_cutoff": 0.38, "freq_epsilon": 8 / 255, "text_scale": 0.7,
+        "gaussian_blur_radius": 3.0, "motion_blur_kernel": 7,
+        "occlusion_fraction": 0.20, "brightness_delta": 0.45,
+        "contrast_delta": 0.45, "gaussian_noise_std": 0.06,
+        "jpeg_quality": 30},
 }
 
 
@@ -484,6 +559,13 @@ def build_perturbation_suite(
         rot = sp.get("rotation", 10)
         fc = sp.get("freq_cutoff", 0.18)
         fe = sp.get("freq_epsilon", 8 / 255)
+        blur_radius = sp.get("gaussian_blur_radius", sp.get("blur_radius", 1.0))
+        motion_kernel = sp.get("motion_blur_kernel", 3)
+        occlusion_fraction = sp.get("occlusion_fraction", 0.08)
+        brightness_delta = sp.get("brightness_delta", 0.15)
+        contrast_delta = sp.get("contrast_delta", 0.15)
+        noise_std = sp.get("gaussian_noise_std", 0.02)
+        jpeg_quality = sp.get("jpeg_quality", 70)
 
         # -- Natural perturbations --
         if include_natural:
@@ -550,6 +632,69 @@ def build_perturbation_suite(
                     "natural",
                     lambda img, a=rot: fns["rotate_image"](img, -a),
                     lambda img, a=rot: fns["rotate_image"](img, -a),
+                ),
+                (
+                    "gaussian_blur",
+                    f"GaussianBlur({blur_radius})",
+                    "natural",
+                    lambda img, r=blur_radius: img.filter(ImageFilter.GaussianBlur(radius=float(r))),
+                    _identity_image,
+                ),
+                (
+                    "motion_blur",
+                    f"MotionBlur({motion_kernel})",
+                    "natural",
+                    lambda img, k=motion_kernel: _apply_motion_blur(img, int(k)),
+                    _identity_image,
+                ),
+                (
+                    "occlusion",
+                    f"Occlusion({occlusion_fraction:.2f})",
+                    "natural",
+                    lambda img, frac=occlusion_fraction: _apply_occlusion(img, float(frac)),
+                    _identity_image,
+                ),
+                (
+                    "brightness",
+                    f"Brightness(+{brightness_delta:.2f})",
+                    "natural",
+                    lambda img, d=brightness_delta: ImageEnhance.Brightness(img).enhance(1.0 + float(d)),
+                    _identity_image,
+                ),
+                (
+                    "brightness",
+                    f"Brightness(-{brightness_delta:.2f})",
+                    "natural",
+                    lambda img, d=brightness_delta: ImageEnhance.Brightness(img).enhance(max(0.05, 1.0 - float(d))),
+                    _identity_image,
+                ),
+                (
+                    "contrast",
+                    f"Contrast(+{contrast_delta:.2f})",
+                    "natural",
+                    lambda img, d=contrast_delta: ImageEnhance.Contrast(img).enhance(1.0 + float(d)),
+                    _identity_image,
+                ),
+                (
+                    "contrast",
+                    f"Contrast(-{contrast_delta:.2f})",
+                    "natural",
+                    lambda img, d=contrast_delta: ImageEnhance.Contrast(img).enhance(max(0.05, 1.0 - float(d))),
+                    _identity_image,
+                ),
+                (
+                    "gaussian_noise",
+                    f"GaussianNoise({noise_std:.3f})",
+                    "natural",
+                    lambda img, s=noise_std, rng=rng: _apply_gaussian_noise(img, float(s), rng),
+                    _identity_image,
+                ),
+                (
+                    "jpeg_compression",
+                    f"JPEG({jpeg_quality})",
+                    "natural",
+                    lambda img, q=jpeg_quality: _apply_jpeg_compression(img, int(q)),
+                    _identity_image,
                 ),
             ]
 

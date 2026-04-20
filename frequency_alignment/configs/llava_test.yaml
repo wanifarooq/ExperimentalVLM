@@ -36,6 +36,13 @@ perturbations:
     - scalepad_black
     - scalepad_white
     - rotation
+    - gaussian_blur
+    - motion_blur
+    - occlusion
+    - brightness
+    - contrast
+    - gaussian_noise
+    - jpeg_compression
   frequency_types:
     - lowpass_keep
     - highpass_keep
@@ -51,6 +58,13 @@ perturbations:
       freq_cutoff: 0.18
       freq_epsilon: 0.03137
       text_scale: 0.3
+      gaussian_blur_radius: 1.0
+      motion_blur_kernel: 3
+      occlusion_fraction: 0.08
+      brightness_delta: 0.15
+      contrast_delta: 0.15
+      gaussian_noise_std: 0.02
+      jpeg_quality: 70
 
 analysis:
   num_bands: 20
