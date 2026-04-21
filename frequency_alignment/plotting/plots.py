@@ -114,48 +114,6 @@ def _wordy_pair_note(level_pairs: Optional[Sequence[Tuple[str, str]]]) -> str:
     return "No validated matched wordy pairs available; plot skipped"
 
 
-_EXP1_PERTURBATION_OUTCOME_SPECS = (
-    (
-        "accuracy_drop",
-        "horse_race_mean_accuracy_drop_by_perturbation",
-        "exp1_coefficient_plot_accuracy_drop_by_perturbation.png",
-        "Coefficient Plot Series: Accuracy Drop by Perturbation",
-        "gated accuracy drop",
-        "Only clean-correct points are included in each perturbation-specific regression",
-    ),
-    (
-        "loglik_drift",
-        "horse_race_mean_loglik_drift_by_perturbation",
-        "exp1_coefficient_plot_loglik_drift_by_perturbation.png",
-        "Coefficient Plot Series: Log-Likelihood Drift by Perturbation",
-        "signed correct-answer log-likelihood drift",
-        "Positive values mean confidence erosion; negative values mean confidence recovery",
-    ),
-    (
-        "loglik_erosion",
-        "horse_race_mean_loglik_erosion_by_perturbation",
-        "exp1_coefficient_plot_loglik_erosion_by_perturbation.png",
-        "Coefficient Plot Series: Log-Likelihood Erosion by Perturbation",
-        "positive correct-answer log-likelihood drift",
-        "Only positive drifts contribute to this outcome",
-    ),
-    (
-        "loglik_recovery",
-        "horse_race_mean_loglik_recovery_by_perturbation",
-        "exp1_coefficient_plot_loglik_recovery_by_perturbation.png",
-        "Coefficient Plot Series: Log-Likelihood Recovery by Perturbation",
-        "negative correct-answer log-likelihood drift",
-        "More negative values indicate stronger confidence recovery",
-    ),
-    (
-        "loglik_volatility",
-        "horse_race_mean_loglik_volatility_by_perturbation",
-        "exp1_coefficient_plot_loglik_volatility_by_perturbation.png",
-        "Coefficient Plot Series: Log-Likelihood Volatility by Perturbation",
-        "absolute correct-answer log-likelihood drift",
-        "Higher values mean larger movement away from zero regardless of sign",
-    ),
-)
 
 
 def _metadata_lines(*parts: Optional[str]) -> List[str]:
@@ -2443,6 +2401,374 @@ def plot_dual_force_bars(
     _save_fig(fig, out_path)
 
 
+def _collect_cluster_robust_predictors(
+    regression: Dict[str, Any],
+) -> List[Tuple[str, float, Optional[float], Optional[float], Optional[float], Optional[float]]]:
+    """Return (key, beta, classical_se, cr_se, p_classical, p_cr) tuples."""
+    preds = (regression or {}).get("predictors") or {}
+    out: List[Tuple[str, float, Optional[float], Optional[float], Optional[float], Optional[float]]] = []
+    for key in (
+        "question_complexity_score",
+        "prompt_complexity_score",
+        "option_hardness_score",
+        "prediction_entropy",
+        "complexity_score",
+        "complexity_score_residual",
+        "clean_accuracy",
+    ):
+        info = preds.get(key)
+        if not isinstance(info, dict):
+            continue
+        beta = info.get("beta")
+        if beta is None or not np.isfinite(float(beta)):
+            continue
+        out.append(
+            (
+                key,
+                float(beta),
+                info.get("classical_stderr"),
+                info.get("cluster_robust_stderr"),
+                info.get("classical_p_value"),
+                info.get("cluster_robust_p_value"),
+            )
+        )
+    return out
+
+
+def plot_cluster_robust_coefficient_forest(
+    regression: Dict[str, Any],
+    out_path: Path,
+    *,
+    title: str,
+    subtitle: Optional[str] = None,
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    """Forest plot with both classical OLS and CR1 cluster-robust 95% CIs.
+
+    Highlights the design-effect inflation: CR1 bars are typically 2-6× wider
+    than classical on clustered repeated-measures data. This is the canonical
+    inference plot for the long-format specification.
+    """
+    rows = _collect_cluster_robust_predictors(regression)
+    if not rows:
+        return
+
+    labels = [_COEFFICIENT_LABELS.get(key, key) for key, *_ in rows]
+    y_positions = np.arange(len(rows))[::-1]
+    fig_height = max(3.6, 1.4 + 0.95 * len(rows))
+    fig, ax = plt.subplots(figsize=(9.0, fig_height))
+    ax.axvline(0.0, color="#555555", linestyle="--", linewidth=1.0, alpha=0.8)
+
+    for idx, (key, beta, c_se, cr_se, _c_p, _cr_p) in enumerate(rows):
+        color = _COEFFICIENT_COLORS.get(key, "#444444")
+        y = y_positions[idx]
+        # Classical interval (thin, behind)
+        if c_se is not None and np.isfinite(float(c_se)):
+            ax.errorbar(
+                beta, y - 0.14,
+                xerr=1.96 * float(c_se),
+                fmt="o", color=color, ecolor=color,
+                elinewidth=1.2, capsize=3, markersize=5, alpha=0.45,
+            )
+        # Cluster-robust interval (thick, foreground)
+        if cr_se is not None and np.isfinite(float(cr_se)):
+            ax.errorbar(
+                beta, y + 0.14,
+                xerr=1.96 * float(cr_se),
+                fmt="D", color=color, ecolor=color,
+                elinewidth=2.2, capsize=4, markersize=7, alpha=0.95,
+            )
+
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(labels, fontsize=10)
+    ax.set_xlabel("Coefficient (95% CI)", fontsize=11)
+    ax.set_title(title, fontsize=13, pad=22 if subtitle else 8)
+    if subtitle:
+        ax.text(0.0, 1.015, subtitle, transform=ax.transAxes, ha="left", va="bottom",
+                fontsize=9, color="#555555")
+    legend_handles = [
+        plt.Line2D([0], [0], marker="D", color="#444444", linestyle="None",
+                   markersize=7, label="CR1 cluster-robust (on image_id)"),
+        plt.Line2D([0], [0], marker="o", color="#444444", linestyle="None",
+                   markersize=5, alpha=0.45, label="Classical OLS"),
+    ]
+    ax.legend(handles=legend_handles, fontsize=8, loc="lower right")
+    ax.grid(axis="x", alpha=0.2, linewidth=0.6)
+    _apply_style(ax)
+    n_info = regression.get("n")
+    n_clusters = regression.get("n_clusters")
+    note_lines = _metadata_lines(
+        f"n={n_info} rows, G={n_clusters} image clusters",
+        f"Inference={regression.get('inference_mode')}",
+        "Diamond=CR1 (image_id cluster); circle=classical OLS",
+        "Wider CR1 bars indicate within-image dependence inflates effective uncertainty",
+    )
+    _set_plot_metadata(fig, metadata or note_lines)
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def plot_per_perturbation_csem_forest(
+    per_perturbation_payload: Dict[str, Any],
+    out_path: Path,
+    *,
+    predictor_key: str = "question_complexity_score",
+    title: str,
+    subtitle: Optional[str] = None,
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    """Forest of β for one predictor across all perturbation families.
+
+    Each row is one perturbation, sorted by effect magnitude. Background
+    colored by sign (green > 0, red < 0). Annotates the sign-stability
+    summary at the top.
+    """
+    per_pert = (per_perturbation_payload or {}).get("per_perturbation") or {}
+    sign_stab = (per_perturbation_payload or {}).get("sign_stability", {}).get(predictor_key) or {}
+    rows: List[Tuple[str, float, Optional[float], Optional[float]]] = []
+    for pert_name, fit in per_pert.items():
+        preds = (fit.get("predictors") or {}) if isinstance(fit, dict) else {}
+        info = preds.get(predictor_key)
+        if not isinstance(info, dict):
+            continue
+        beta = info.get("beta")
+        if beta is None or not np.isfinite(float(beta)):
+            continue
+        rows.append(
+            (
+                str(pert_name),
+                float(beta),
+                info.get("cluster_robust_stderr") or info.get("stderr"),
+                info.get("p_value"),
+            )
+        )
+    if not rows:
+        return
+    rows.sort(key=lambda r: r[1])
+
+    labels = [name.replace("_", " ") for name, *_ in rows]
+    y = np.arange(len(rows))
+    fig_height = max(3.6, 1.0 + 0.34 * len(rows))
+    fig, ax = plt.subplots(figsize=(9.0, fig_height))
+    ax.axvline(0.0, color="#555555", linestyle="--", linewidth=1.0, alpha=0.8)
+
+    for idx, (_name, beta, se, _p) in enumerate(rows):
+        color = "#2ca02c" if beta > 0 else "#d62728"
+        err = 1.96 * float(se) if se is not None and np.isfinite(float(se)) else 0.0
+        ax.errorbar(
+            beta, y[idx],
+            xerr=err,
+            fmt="s", color=color, ecolor=color,
+            elinewidth=1.5, capsize=3, markersize=6, alpha=0.9,
+        )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel(f"β for {_COEFFICIENT_LABELS.get(predictor_key, predictor_key)} (95% CI)", fontsize=11)
+    frac_pos = sign_stab.get("fraction_positive")
+    n_perts = sign_stab.get("n_perturbations") or len(rows)
+    if subtitle is None and frac_pos is not None:
+        subtitle = (
+            f"Sign stability: {int(round(frac_pos * n_perts))}/{n_perts} "
+            f"perturbations show β > 0 ({frac_pos * 100:.0f}%)"
+        )
+    ax.set_title(title, fontsize=13, pad=22 if subtitle else 8)
+    if subtitle:
+        ax.text(0.0, 1.015, subtitle, transform=ax.transAxes, ha="left", va="bottom",
+                fontsize=9, color="#555555")
+    ax.grid(axis="x", alpha=0.2, linewidth=0.6)
+    _apply_style(ax)
+    note_lines = _metadata_lines(
+        "Each row=one perturbation family with CR1 SE on image_id",
+        "Green=β>0 (theory direction); red=β<0",
+        "Within-perturbation estimate; free of suite-mix contamination",
+    )
+    _set_plot_metadata(fig, metadata or note_lines)
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def plot_delta_f_family_bar(
+    by_family_payload: Dict[str, Any],
+    out_path: Path,
+    *,
+    predictor_key: str = "question_complexity_score",
+    title: str,
+    subtitle: Optional[str] = None,
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    """Bar chart of β_Csem by ΔF-family (zero / low_freq / broadband / high_freq)."""
+    fits = (by_family_payload or {}).get("family_fits") or {}
+    ordered_families = ["zero", "low_freq", "broadband", "high_freq"]
+    rows: List[Tuple[str, float, Optional[float], int, Optional[int]]] = []
+    for fam in ordered_families:
+        fit = fits.get(fam)
+        if not isinstance(fit, dict) or fit.get("skipped"):
+            continue
+        preds = fit.get("predictors") or {}
+        info = preds.get(predictor_key)
+        if not isinstance(info, dict):
+            continue
+        beta = info.get("beta")
+        if beta is None or not np.isfinite(float(beta)):
+            continue
+        se = info.get("cluster_robust_stderr") or info.get("stderr")
+        rows.append(
+            (
+                fam,
+                float(beta),
+                float(se) if se is not None and np.isfinite(float(se)) else None,
+                int(fit.get("n") or 0),
+                fit.get("n_clusters"),
+            )
+        )
+    if not rows:
+        return
+
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    ax.axhline(0.0, color="#555555", linestyle="--", linewidth=1.0, alpha=0.8)
+    palette = {
+        "zero": "#9e9e9e",
+        "low_freq": "#1f77b4",
+        "broadband": "#8c6bb1",
+        "high_freq": "#d62728",
+    }
+    x = np.arange(len(rows))
+    bars = ax.bar(
+        x,
+        [b for _, b, *_ in rows],
+        color=[palette.get(f, "#444444") for f, *_ in rows],
+        alpha=0.85,
+        width=0.62,
+    )
+    errs = [1.96 * se if se is not None else 0.0 for _, _, se, *_ in rows]
+    betas = [rows[idx][1] for idx in range(len(rows))]
+    # Clip y-axis using a robust spread so huge CR1 intervals don't dominate the layout
+    lo = min(b - e for b, e in zip(betas, errs))
+    hi = max(b + e for b, e in zip(betas, errs))
+    bar_span = max(abs(min(betas)), abs(max(betas)), 1e-6)
+    y_lo = max(lo, -6.0 * bar_span)
+    y_hi = min(hi, 6.0 * bar_span)
+    y_range = max(0.02, y_hi - y_lo)
+    pad = 0.22 * y_range
+    ax.set_ylim(y_lo - pad, y_hi + pad)
+    ax.errorbar(
+        x,
+        betas,
+        yerr=errs,
+        fmt="none", ecolor="#333333", elinewidth=1.6, capsize=4,
+    )
+    label_offset = y_range * 0.05
+    for idx, bar in enumerate(bars):
+        height = bar.get_height()
+        n_rows = rows[idx][3]
+        # Place label outside the bar tip (above for +, below for -) — not above the error cap
+        if height >= 0:
+            label_y = height + label_offset
+            va = "bottom"
+        else:
+            label_y = height - label_offset
+            va = "top"
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            label_y,
+            f"β={height:.4f}\nn={n_rows}",
+            ha="center",
+            va=va,
+            fontsize=8,
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels([f.replace("_", " ") for f, *_ in rows], fontsize=10)
+    ax.set_ylabel(f"β for {_COEFFICIENT_LABELS.get(predictor_key, predictor_key)}", fontsize=11)
+    ax.set_title(title, fontsize=13, pad=22 if subtitle else 8)
+    if subtitle:
+        ax.text(0.0, 1.015, subtitle, transform=ax.transAxes, ha="left", va="bottom",
+                fontsize=9, color="#555555")
+    ax.grid(axis="y", alpha=0.2, linewidth=0.6)
+    _apply_style(ax)
+    note_lines = _metadata_lines(
+        "Rows stratified by radial ΔF spectral centroid",
+        "Zero: ||ΔF||≈0 (shift-only). Theory predicts β≈0 here",
+        "High-freq: ΔF centroid > 2/3 of band axis. Theory predicts largest β",
+        "Errors=95% CI using CR1 cluster-robust SEs on image_id",
+    )
+    _set_plot_metadata(fig, metadata or note_lines)
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def plot_design_effect_diagnostic(
+    long_format_payload: Dict[str, Any],
+    out_path: Path,
+    *,
+    title: str = "Design Effect: CR1 vs Classical Standard Errors",
+    subtitle: Optional[str] = None,
+    metadata: Optional[Sequence[str]] = None,
+) -> None:
+    """Bar chart of design effects per predictor.
+
+    A design effect of 1 means classical and CR1 agree (no cluster
+    dependence). Values ≫ 1 indicate classical SEs were optimistic —
+    the smoking gun that motivates cluster-robust inference.
+    """
+    fe_fit = (long_format_payload or {}).get("pooled_with_perturbation_fe") or {}
+    preds = fe_fit.get("predictors") or {}
+    rows: List[Tuple[str, float]] = []
+    for key in (
+        "question_complexity_score",
+        "prompt_complexity_score",
+        "option_hardness_score",
+        "prediction_entropy",
+    ):
+        info = preds.get(key)
+        if not isinstance(info, dict):
+            continue
+        de = info.get("design_effect")
+        if de is None or not np.isfinite(float(de)):
+            continue
+        rows.append((key, float(de)))
+    if not rows:
+        return
+
+    labels = [_COEFFICIENT_LABELS.get(k, k) for k, _ in rows]
+    values = [de for _, de in rows]
+    colors = [_COEFFICIENT_COLORS.get(k, "#444444") for k, _ in rows]
+
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    ax.axhline(1.0, color="#2ca02c", linestyle="--", linewidth=1.2, alpha=0.9,
+               label="No cluster dependence (DE=1)")
+    x = np.arange(len(rows))
+    bars = ax.bar(x, values, color=colors, alpha=0.85, width=0.62)
+    for idx, bar in enumerate(bars):
+        height = float(values[idx])
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height + 0.05,
+            f"{height:.2f}×",
+            ha="center", va="bottom", fontsize=9,
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=9, rotation=10)
+    ax.set_ylabel("Design Effect = (CR1 SE / Classical SE)²", fontsize=11)
+    ax.set_title(title, fontsize=13, pad=22 if subtitle else 8)
+    if subtitle:
+        ax.text(0.0, 1.015, subtitle, transform=ax.transAxes, ha="left", va="bottom",
+                fontsize=9, color="#555555")
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(axis="y", alpha=0.2, linewidth=0.6)
+    _apply_style(ax)
+    n_info = fe_fit.get("n")
+    n_clusters = fe_fit.get("n_clusters")
+    note_lines = _metadata_lines(
+        f"n={n_info} rows, G={n_clusters} image clusters",
+        "DE > 1 means within-image dependence inflated effective uncertainty",
+        "Classical OLS would have over-reported significance by sqrt(DE)",
+    )
+    _set_plot_metadata(fig, metadata or note_lines)
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
 def plot_coefficient_forest_series(
     regressions: Dict[str, Dict[str, Any]],
     out_path: Path,
@@ -4194,9 +4520,6 @@ def _generate_primary_l1_l4_plots(
         for y_key, y_label, file_name in (
             ("mean_accuracy_drop", "Mean Accuracy Drop", "exp1_complexity_accuracy_drop.png"),
             ("mean_loglik_drift", "Mean Log-Likelihood Drift", "exp1_complexity_loglik_drift.png"),
-            ("mean_loglik_erosion", "Mean Log-Likelihood Erosion", "exp1_complexity_loglik_erosion.png"),
-            ("mean_loglik_recovery", "Mean Log-Likelihood Recovery", "exp1_complexity_loglik_recovery.png"),
-            ("mean_loglik_volatility", "Mean Log-Likelihood Volatility", "exp1_complexity_loglik_volatility.png"),
         ):
             out_path = primary_dir / file_name
             plot_complexity_scatter(
@@ -4241,9 +4564,6 @@ def _generate_primary_l1_l4_plots(
         for base_key, file_name, title in (
             ("horse_race_mean_accuracy_drop", "exp1_coefficient_plot_accuracy_drop.png", "Accuracy Drop"),
             ("horse_race_mean_loglik_drift", "exp1_coefficient_plot_loglik_drift.png", "Log-Likelihood Drift"),
-            ("horse_race_mean_loglik_erosion", "exp1_coefficient_plot_loglik_erosion.png", "Log-Likelihood Erosion"),
-            ("horse_race_mean_loglik_recovery", "exp1_coefficient_plot_loglik_recovery.png", "Log-Likelihood Recovery"),
-            ("horse_race_mean_loglik_volatility", "exp1_coefficient_plot_loglik_volatility.png", "Log-Likelihood Volatility"),
         ):
             pooled = _primary_view_regression(cc, base_key, regression_mode="pooled")
             within = _primary_view_regression(cc, base_key, regression_mode="within_image")
@@ -4271,36 +4591,99 @@ def _generate_primary_l1_l4_plots(
                 ),
             )
 
-        for (
-            _outcome_key,
-            test_key,
-            main_filename,
-            main_title,
-            outcome_label,
-            note,
-        ) in _EXP1_PERTURBATION_OUTCOME_SPECS:
-            series = _collect_regression_series_from_payload_map(
-                cc.get(test_key, {}),
-                view_name="primary",
-            )
-            if not series:
-                continue
-            plot_coefficient_forest_series(
-                series,
-                primary_dir / main_filename,
-                title=f"Primary L1-L4: {main_title}",
+        # Publication-grade cluster-robust plots (long-format with perturbation FE)
+        lf_drift = cc.get("long_format_loglik_drift") or {}
+        lf_drift_fe = lf_drift.get("pooled_with_perturbation_fe")
+        if lf_drift_fe and lf_drift_fe.get("predictors"):
+            plot_cluster_robust_coefficient_forest(
+                lf_drift_fe,
+                primary_dir / "exp1_long_format_coefficient_forest_loglik_drift.png",
+                title="Primary L1-L4 Long-Format Horse Race: Log-Likelihood Drift",
+                subtitle="With perturbation fixed effects; CR1 cluster-robust SEs on image_id",
                 metadata=_primary_plot_metadata(
                     _plot_metadata(
                         experiment="1",
-                        what=f"Primary-ladder perturbation-specific horse race for {outcome_label}",
-                        aggregation="one subplot per perturbation type",
-                        x="standardized coefficient with 95% CI",
+                        what="Long-format (image × level × perturbation) regression with perturbation FE",
+                        aggregation="one row per (image, level, perturbation)",
+                        x="coefficient with 95% CI (classical + cluster-robust)",
                         y="predictor",
-                        note=note,
                         profile=profile,
                     )
                 ),
             )
+            plot_design_effect_diagnostic(
+                lf_drift,
+                primary_dir / "exp1_design_effect_loglik_drift.png",
+                title="Primary L1-L4 Design Effect: Log-Likelihood Drift",
+                subtitle="CR1 vs classical standard errors on long-format regression",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="1",
+                        what="Design effect (CR1/classical SE)² per predictor",
+                        aggregation="same model as Long-Format Horse Race plot",
+                        x="predictor",
+                        y="design effect (variance ratio)",
+                        profile=profile,
+                    )
+                ),
+            )
+        per_pert_drift = cc.get("per_perturbation_loglik_drift") or {}
+        if per_pert_drift.get("per_perturbation"):
+            plot_per_perturbation_csem_forest(
+                per_pert_drift,
+                primary_dir / "exp1_per_perturbation_csem_loglik_drift.png",
+                title="Primary L1-L4 β_Csem Across Perturbation Families (Log-Likelihood Drift)",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="1",
+                        what="Per-perturbation β_Csem with sign-stability summary",
+                        aggregation="one fit per perturbation; cluster-robust SEs",
+                        x="β for semantic complexity",
+                        y="perturbation family",
+                        profile=profile,
+                    )
+                ),
+            )
+        fam_drift = cc.get("by_delta_f_family_loglik_drift") or {}
+        if fam_drift.get("family_fits"):
+            plot_delta_f_family_bar(
+                fam_drift,
+                primary_dir / "exp1_delta_f_family_csem_loglik_drift.png",
+                title="Primary L1-L4 β_Csem by ΔF Family (Log-Likelihood Drift)",
+                subtitle="Theory: β≈0 on zero ΔF; largest β on high-frequency ΔF",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="1",
+                        what="β_Csem stratified by perturbation ΔF spectral family",
+                        aggregation="one fit per ΔF family",
+                        x="ΔF family (by radial spectral centroid)",
+                        y="β for semantic complexity",
+                        profile=profile,
+                    )
+                ),
+            )
+        drift_pert_regs = cc.get("horse_race_mean_loglik_drift_by_perturbation", {})
+        if drift_pert_regs:
+            series = _collect_regression_series_from_payload_map(
+                drift_pert_regs,
+                view_name="primary",
+            )
+            if series:
+                plot_coefficient_forest_series(
+                    series,
+                    primary_dir / "exp1_coefficient_plot_loglik_drift_by_perturbation.png",
+                    title="Primary L1-L4 Per-Perturbation Horse Race: Log-Likelihood Drift",
+                    metadata=_primary_plot_metadata(
+                        _plot_metadata(
+                            experiment="1",
+                            what="Primary-ladder perturbation-specific horse race for log-likelihood drift",
+                            aggregation="one subplot per perturbation type",
+                            x="standardized coefficient with 95% CI",
+                            y="predictor",
+                            profile=profile,
+                        )
+                    ),
+                )
 
     if exp1_detail:
         levels, perturbations, matrix = _exp1_level_perturbation_matrix(exp1_detail)
@@ -4346,7 +4729,7 @@ def _generate_primary_l1_l4_plots(
                 )
             ),
         )
-        for record in selected_exp1_records:
+        for record in selected_exp1_records[:1]:
             sample_id = str(record.get("image_id"))
             matched_exp2 = exp2_by_id.get(sample_id)
             for key, file_prefix, title, ylabel in (
@@ -5341,22 +5724,6 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             ),
             level_pairs=valid_wordy_pairs,
         )
-        _plot_wordy_control_pair_comparison(
-            {level: float(stats.get("mean_loglik_volatility", np.nan)) for level, stats in per_level.items()},
-            plots_dir / "exp1_wordy_control_loglik_volatility.png",
-            title="Wordy Control Comparison: Log-Likelihood Volatility",
-            ylabel="Mean Log-Likelihood Volatility",
-            metadata=_plot_metadata(
-                experiment="1",
-                what="Base level vs matched wordy control for absolute confidence movement",
-                aggregation="level-wise average over all perturbation evaluations",
-                x="matched base/control pair",
-                y="mean absolute correct-answer log-likelihood drift",
-                note=wordy_pair_note,
-                profile=profile,
-            ),
-            level_pairs=valid_wordy_pairs,
-        )
     if exp1_complexity:
         plot_complexity_scatter(
             exp1_complexity,
@@ -5390,60 +5757,9 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
-        plot_complexity_scatter(
-            exp1_complexity,
-            y_key="mean_loglik_erosion",
-            y_label="Mean Log-Likelihood Erosion",
-            out_path=plots_dir / "exp1_complexity_loglik_erosion.png",
-            title="Log-Likelihood Erosion vs Residualized Semantic Logic",
-            metadata=_plot_metadata(
-                experiment="1",
-                what="Residualized semantic logic vs directional confidence erosion",
-                aggregation="per-image per-level average over perturbations",
-                x="residualized semantic logic",
-                y="mean positive correct-answer log-likelihood drift",
-                note="Only positive drifts contribute; X is residual(semantic complexity ~ prompt load); dashed line is linear fit",
-                profile=profile,
-            ),
-        )
-        plot_complexity_scatter(
-            exp1_complexity,
-            y_key="mean_loglik_recovery",
-            y_label="Mean Log-Likelihood Recovery",
-            out_path=plots_dir / "exp1_complexity_loglik_recovery.png",
-            title="Log-Likelihood Recovery vs Residualized Semantic Logic",
-            metadata=_plot_metadata(
-                experiment="1",
-                what="Residualized semantic logic vs directional confidence recovery",
-                aggregation="per-image per-level average over perturbations",
-                x="residualized semantic logic",
-                y="mean negative correct-answer log-likelihood drift",
-                note="Only negative drifts contribute; X is residual(semantic complexity ~ prompt load); dashed line is linear fit",
-                profile=profile,
-            ),
-        )
-        plot_complexity_scatter(
-            exp1_complexity,
-            y_key="mean_loglik_volatility",
-            y_label="Mean Log-Likelihood Volatility",
-            out_path=plots_dir / "exp1_complexity_loglik_volatility.png",
-            title="Log-Likelihood Volatility vs Residualized Semantic Logic",
-            metadata=_plot_metadata(
-                experiment="1",
-                what="Residualized semantic logic vs absolute confidence movement",
-                aggregation="per-image per-level average over perturbations",
-                x="residualized semantic logic",
-                y="mean absolute correct-answer log-likelihood drift",
-                note="X is residual(semantic complexity ~ prompt load); black line is mean by exact residual score; dashed line is linear fit",
-                profile=profile,
-            ),
-        )
         for y_key, y_label, file_name, y_metadata in (
             ("mean_accuracy_drop", "Mean Accuracy Drop", "exp1_complexity_accuracy_drop.png", "mean gated accuracy drop"),
             ("mean_loglik_drift", "Mean Log-Likelihood Drift", "exp1_complexity_loglik_drift.png", "mean correct-answer log-likelihood drift"),
-            ("mean_loglik_erosion", "Mean Log-Likelihood Erosion", "exp1_complexity_loglik_erosion.png", "mean positive correct-answer log-likelihood drift"),
-            ("mean_loglik_recovery", "Mean Log-Likelihood Recovery", "exp1_complexity_loglik_recovery.png", "mean negative correct-answer log-likelihood drift"),
-            ("mean_loglik_volatility", "Mean Log-Likelihood Volatility", "exp1_complexity_loglik_volatility.png", "mean absolute correct-answer log-likelihood drift"),
         ):
             plot_complexity_scatter(
                 exp1_complexity,
@@ -5518,15 +5834,6 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     profile=profile,
                 ),
             )
-            _plot_view_forest_from_payload(
-                cc,
-                "horse_race_mean_accuracy_drop",
-                plots_dir / "exp1_coefficient_plot_accuracy_drop_views.png",
-                title="Triple-View Coefficients: Accuracy Drop",
-                note="Accuracy-drop regressions are filtered to clean-correct points; views separate primary, wordy, and pooled ladders",
-                experiment="1",
-                profile=profile,
-            )
         loglik_reg_pooled = cc.get("horse_race_mean_loglik_drift")
         loglik_reg_within = cc.get("horse_race_mean_loglik_drift_within_image")
         loglik_reg = loglik_reg_pooled or loglik_reg_within
@@ -5549,187 +5856,94 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     profile=profile,
                 ),
             )
-            _plot_view_forest_from_payload(
-                cc,
-                "horse_race_mean_loglik_drift",
-                plots_dir / "exp1_coefficient_plot_loglik_drift_views.png",
-                title="Triple-View Coefficients: Log-Likelihood Drift",
-                note="Views separate primary semantic ladder, wordy mirror ladder, and pooled analysis",
-                experiment="1",
-                profile=profile,
-            )
-        for outcome_key, file_name, title, note in (
-            (
-                "mean_loglik_erosion",
-                "exp1_coefficient_plot_loglik_erosion.png",
-                "Coefficient Plot: Log-Likelihood Erosion Controls",
-                "Outcome is mean positive correct-answer log-likelihood drift",
-            ),
-            (
-                "mean_loglik_recovery",
-                "exp1_coefficient_plot_loglik_recovery.png",
-                "Coefficient Plot: Log-Likelihood Recovery Controls",
-                "Outcome is mean negative correct-answer log-likelihood drift",
-            ),
-            (
-                "mean_loglik_volatility",
-                "exp1_coefficient_plot_loglik_volatility.png",
-                "Coefficient Plot: Log-Likelihood Volatility Controls",
-                "Outcome is mean absolute correct-answer log-likelihood drift",
-            ),
-        ):
-            pooled = cc.get(f"horse_race_{outcome_key}")
-            within = cc.get(f"horse_race_{outcome_key}_within_image")
-            regression = pooled or within
-            if not regression:
-                continue
-            plot_coefficient_forest(
-                regression,
-                plots_dir / file_name,
-                title=title,
-                subtitle="Pooled and within-image standardized coefficients",
-                primary_label="Pooled OLS" if pooled else "Within-Image Fixed Effects",
-                comparison_label="Within-Image Fixed Effects" if pooled and within else None,
-                comparison_regression=within if pooled else None,
+
+        # --- Publication-grade cluster-robust plots (long-format with perturbation FE) ---
+        lf_drift = cc.get("long_format_loglik_drift") or {}
+        lf_drift_fe = lf_drift.get("pooled_with_perturbation_fe")
+        if lf_drift_fe and lf_drift_fe.get("predictors"):
+            plot_cluster_robust_coefficient_forest(
+                lf_drift_fe,
+                plots_dir / "exp1_long_format_coefficient_forest_loglik_drift.png",
+                title="Long-Format Horse Race: Log-Likelihood Drift",
+                subtitle="With perturbation fixed effects; CR1 cluster-robust SEs on image_id",
                 metadata=_plot_metadata(
                     experiment="1",
-                    what="Directional drift controls using residualized semantic logic",
-                    aggregation="multivariate regression over per-image per-level averages",
-                    x="standardized coefficient with 95% CI",
+                    what="Long-format (image × level × perturbation) regression with perturbation FE",
+                    aggregation="one row per (image, level, perturbation)",
+                    x="coefficient with 95% CI (classical + cluster-robust)",
                     y="predictor",
-                    note=note,
+                    note="CR1 SEs (diamond) are the canonical inference; classical (circle) shown for comparison",
                     profile=profile,
                 ),
             )
-            _plot_view_forest_from_payload(
-                cc,
-                f"horse_race_{outcome_key}",
-                plots_dir / file_name.replace(".png", "_views.png"),
-                title=title.replace("Coefficient Plot", "Triple-View Coefficients"),
-                note=f"{note}; views separate primary, wordy, and pooled ladders",
-                experiment="1",
-                profile=profile,
-            )
-        for (
-            _outcome_key,
-            test_key,
-            main_filename,
-            main_title,
-            outcome_label,
-            note,
-        ) in _EXP1_PERTURBATION_OUTCOME_SPECS:
-            perturbation_regs = cc.get(test_key, {})
-            if not perturbation_regs:
-                continue
-            series = _collect_regression_series_from_payload_map(perturbation_regs)
-            if not series:
-                continue
-            plot_coefficient_forest_series(
-                series,
-                plots_dir / main_filename,
-                title=main_title,
+            plot_design_effect_diagnostic(
+                lf_drift,
+                plots_dir / "exp1_design_effect_loglik_drift.png",
+                title="Design Effect Diagnostic: Log-Likelihood Drift",
+                subtitle="CR1 vs classical standard errors on long-format regression",
                 metadata=_plot_metadata(
                     experiment="1",
-                    what=f"Perturbation-specific horse race for {outcome_label}",
-                    aggregation="one subplot per perturbation type",
-                    x="standardized coefficient with 95% CI",
-                    y="predictor",
-                    note=note,
+                    what="Design effect (CR1/classical SE)² per predictor",
+                    aggregation="same model as Long-Format Horse Race plot",
+                    x="predictor",
+                    y="design effect (variance ratio)",
+                    note="Values > 1 show classical OLS understates uncertainty",
                     profile=profile,
                 ),
             )
-    if exp1_samples:
-        family_points = _exp1_perturbation_family_points(exp1_samples)
-        if len(family_points) > 1:
-            family_outcome_specs = (
-                (
-                    "accuracy_drop",
-                    "exp1_coefficient_plot_accuracy_drop",
-                    "Accuracy Drop",
-                    "accuracy drop",
-                    "Only clean-correct points are included, so this measures fragility of existing knowledge",
-                    True,
-                ),
-                (
-                    "loglik_drift",
-                    "exp1_coefficient_plot_loglik_drift",
-                    "Log-Likelihood Drift",
-                    "signed correct-answer log-likelihood drift",
-                    "Positive values mean confidence erosion; negative values mean confidence recovery",
-                    False,
-                ),
-                (
-                    "loglik_erosion",
-                    "exp1_coefficient_plot_loglik_erosion",
-                    "Log-Likelihood Erosion",
-                    "positive correct-answer log-likelihood drift",
-                    "Only positive drifts contribute to this outcome",
-                    False,
-                ),
-                (
-                    "loglik_recovery",
-                    "exp1_coefficient_plot_loglik_recovery",
-                    "Log-Likelihood Recovery",
-                    "negative correct-answer log-likelihood drift",
-                    "More negative values indicate stronger confidence recovery",
-                    False,
-                ),
-                (
-                    "loglik_volatility",
-                    "exp1_coefficient_plot_loglik_volatility",
-                    "Log-Likelihood Volatility",
-                    "absolute correct-answer log-likelihood drift",
-                    "Higher values mean larger movement away from zero regardless of sign",
-                    False,
+        per_pert_drift = cc.get("per_perturbation_loglik_drift") or {}
+        if per_pert_drift.get("per_perturbation"):
+            plot_per_perturbation_csem_forest(
+                per_pert_drift,
+                plots_dir / "exp1_per_perturbation_csem_loglik_drift.png",
+                title="β_Csem Across Perturbation Families (Log-Likelihood Drift)",
+                metadata=_plot_metadata(
+                    experiment="1",
+                    what="Per-perturbation β_Csem with sign-stability summary",
+                    aggregation="one fit per perturbation; cluster-robust SEs",
+                    x="β for semantic complexity",
+                    y="perturbation family",
+                    note="Sign stability verifies the pooled signal is not driven by one outlier family",
+                    profile=profile,
                 ),
             )
-            for family in sorted(family_points):
-                family_label = family.replace("_", " ").title()
-                raw_points = family_points[family]
-                for y_key, filename_prefix, title_suffix, outcome_label, note, gate_clean_correct in family_outcome_specs:
-                    points = raw_points
-                    if gate_clean_correct:
-                        points = [
-                            point
-                            for point in raw_points
-                            if float(point.get("clean_accuracy", 0.0) or 0.0) == 1.0
-                        ]
-                    predictor_keys = _horse_race_predictor_keys(points)
-                    pooled = summarize_multivariate_regression(
-                        points,
-                        y_key=y_key,
-                        x_keys=predictor_keys,
-                    )
-                    within = summarize_multivariate_regression(
-                        points,
-                        y_key=y_key,
-                        x_keys=predictor_keys,
-                        group_key="image_id",
-                        demean_by_group=True,
-                    )
-                    regression = pooled if pooled.get("predictors") else within
-                    comparison = within if pooled.get("predictors") and within.get("predictors") else None
-                    if not regression or not regression.get("predictors"):
-                        continue
-                    plot_coefficient_forest(
-                        regression,
-                        plots_dir / f"{filename_prefix}_{_safe_name(family)}.png",
-                        title=f"Coefficient Plot: {family_label} {title_suffix}",
-                        subtitle="Predictors for one perturbation family",
-                        primary_label="Pooled OLS" if pooled.get("predictors") else "Within-Image Fixed Effects",
-                        comparison_label="Within-Image Fixed Effects" if comparison is not None else None,
-                        comparison_regression=comparison,
-                        metadata=_plot_metadata(
-                            experiment="1",
-                            what=f"Perturbation-family-specific horse race for {outcome_label}",
-                            aggregation="per-image per-level average over perturbations in the selected family",
-                            x="standardized coefficient with 95% CI",
-                            y="predictor",
-                            selection=f"family={family}",
-                            note=note,
-                            profile=profile,
-                        ),
-                    )
+        fam_drift = cc.get("by_delta_f_family_loglik_drift") or {}
+        if fam_drift.get("family_fits"):
+            plot_delta_f_family_bar(
+                fam_drift,
+                plots_dir / "exp1_delta_f_family_csem_loglik_drift.png",
+                title="β_Csem by ΔF Family (Log-Likelihood Drift)",
+                subtitle="Theory: β≈0 on zero ΔF; largest β on high-frequency ΔF",
+                metadata=_plot_metadata(
+                    experiment="1",
+                    what="β_Csem stratified by perturbation ΔF spectral family",
+                    aggregation="one fit per ΔF family",
+                    x="ΔF family (by radial spectral centroid)",
+                    y="β for semantic complexity",
+                    note="Falsifiable prediction: zero family should show β≈0",
+                    profile=profile,
+                ),
+            )
+        # Keep per-perturbation grid ONLY for loglik_drift (primary outcome)
+        drift_pert_key = "horse_race_mean_loglik_drift_by_perturbation"
+        drift_pert_regs = cc.get(drift_pert_key, {})
+        if drift_pert_regs:
+            series = _collect_regression_series_from_payload_map(drift_pert_regs)
+            if series:
+                plot_coefficient_forest_series(
+                    series,
+                    plots_dir / "exp1_coefficient_plot_loglik_drift_by_perturbation.png",
+                    title="Per-Perturbation Horse Race: Log-Likelihood Drift",
+                    metadata=_plot_metadata(
+                        experiment="1",
+                        what="Per-perturbation full horse race (all predictors)",
+                        aggregation="one subplot per perturbation type",
+                        x="standardized coefficient with 95% CI",
+                        y="predictor",
+                        note="Shows all predictors per perturbation; CR1 SEs on image_id",
+                        profile=profile,
+                    ),
+                )
     if exp1_detail:
         levels, perturbations, matrix = _exp1_level_perturbation_matrix(exp1_detail)
         _plot_heatmap(
@@ -5771,7 +5985,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
-        for record in selected_exp1_records:
+        for record in selected_exp1_records[:1]:
             sample_id = str(record.get("image_id"))
             matched_exp2 = exp2_by_id.get(sample_id)
             delta_f = _exp1_sample_spectra(record, "delta_f")

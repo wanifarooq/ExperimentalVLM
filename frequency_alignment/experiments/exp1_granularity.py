@@ -25,11 +25,15 @@ from PIL import Image
 
 from ..analysis.continuous import (
     attach_complexity_residual,
+    classify_delta_f_family,
+    summarize_by_delta_f_family_horse_race,
     summarize_by_score,
     summarize_fixed_effects_trend,
     summarize_horse_race_view,
     summarize_linear_trend,
+    summarize_long_format_horse_race,
     summarize_multivariate_regression,
+    summarize_per_perturbation_horse_race,
 )
 from ..analysis.gate_thresholds import GATES
 from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
@@ -247,6 +251,83 @@ def _build_perturbation_complexity_points(per_sample: List[Dict[str, Any]]) -> D
     return grouped
 
 
+def _build_long_format_rows(
+    per_sample: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Emit one row per (image, level, perturbation) for long-format analysis.
+
+    Each row carries the full complexity predictor bundle, the four signed
+    outcome variables (drift / erosion / recovery / volatility / accuracy_drop),
+    ``delta_f_norm`` plus ``delta_f_family`` (classified from the radial ΔF
+    spectrum), and the ``perturbation_type`` label. This is the canonical
+    analysis table for cluster-robust regressions with perturbation fixed
+    effects.
+    """
+
+    rows: List[Dict[str, Any]] = []
+    for record in per_sample:
+        image_id = str(record.get("image_id"))
+        for level_key, level_data in record.get("levels", {}).items():
+            clean_accuracy = (
+                1.0 if level_data.get("clean", {}).get("correct", False) else 0.0
+            )
+            base = {
+                "image_id": image_id,
+                "level": level_key,
+                "question_complexity_score": float(
+                    level_data.get("question_complexity_score", 0.0) or 0.0
+                ),
+                "prompt_complexity_score": float(
+                    level_data.get("prompt_complexity_score", 0.0) or 0.0
+                ),
+                "option_hardness_score": float(
+                    level_data.get("option_hardness_score", 0.0) or 0.0
+                ),
+                "prediction_entropy": _optional_float(
+                    level_data.get("prediction_entropy")
+                ),
+                "complexity_score": float(
+                    level_data.get("complexity_score", 0.0) or 0.0
+                ),
+                "clean_accuracy": clean_accuracy,
+            }
+            for perturbation in level_data.get("perturbations", []):
+                name = str(
+                    perturbation.get("name")
+                    or perturbation.get("perturbation")
+                    or "unknown"
+                )
+                drift_raw = perturbation.get("loglik_drift")
+                if drift_raw is None:
+                    continue
+                drift = float(drift_raw)
+                delta_f = perturbation.get("delta_f") or []
+                family = classify_delta_f_family(delta_f) if delta_f else "unknown"
+                row = dict(base)
+                row.update(
+                    {
+                        "perturbation_type": name,
+                        "delta_f_family": family,
+                        "delta_f_norm": float(
+                            perturbation.get("delta_f_norm", 0.0) or 0.0
+                        ),
+                        "delta_f_peak_band": int(
+                            perturbation.get("delta_f_peak_band", 0) or 0
+                        ),
+                        "accuracy_drop": float(
+                            perturbation.get("accuracy_drop", 0.0) or 0.0
+                        ),
+                        "loglik_drift": drift,
+                        "loglik_erosion": max(drift, 0.0),
+                        "loglik_recovery": min(drift, 0.0),
+                        "loglik_volatility": abs(drift),
+                    }
+                )
+                rows.append(row)
+    attach_complexity_residual(rows)
+    return rows
+
+
 def _summarize_perturbation_specific_horse_races(
     perturbation_points: Dict[str, List[Dict[str, Any]]],
     *,
@@ -280,6 +361,7 @@ def _summarize_perturbation_specific_horse_races(
                 used_points,
                 y_key=y_key,
                 x_keys=predictors,
+                cluster_key="image_id",
             ),
             "within_image": summarize_multivariate_regression(
                 used_points,
@@ -287,6 +369,7 @@ def _summarize_perturbation_specific_horse_races(
                 x_keys=predictors,
                 group_key="image_id",
                 demean_by_group=True,
+                cluster_key="image_id",
             ),
         }
         view_payload: Dict[str, Any] = {}
@@ -744,6 +827,7 @@ def _run_hypothesis_tests(
     agg: Dict[str, Any],
     complexity_points: Optional[List[Dict[str, Any]]] = None,
     perturbation_points: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    long_format_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run statistical tests on aggregated results.
 
@@ -866,7 +950,7 @@ def _run_hypothesis_tests(
                 "ci_95_upper": hi,
             }
 
-    # Summary verdict
+    # Provisional summary verdict (recomputed at end to include cluster-robust gates)
     core_tests = [
         tests.get("spearman_drop_vs_granularity", {}).get("passed", False),
         tests.get("monotonicity_accuracy_drop", {}).get("passed", False),
@@ -976,6 +1060,7 @@ def _run_hypothesis_tests(
                 accuracy_drop_points,
                 y_key="mean_accuracy_drop",
                 x_keys=accuracy_predictors,
+                cluster_key="image_id",
             ),
             "horse_race_mean_accuracy_drop_within_image": summarize_multivariate_regression(
                 accuracy_drop_points,
@@ -983,11 +1068,13 @@ def _run_hypothesis_tests(
                 x_keys=accuracy_predictors,
                 group_key="image_id",
                 demean_by_group=True,
+                cluster_key="image_id",
             ),
             "horse_race_mean_loglik_drift": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_drift",
                 x_keys=all_predictors,
+                cluster_key="image_id",
             ),
             "horse_race_mean_loglik_drift_within_image": summarize_multivariate_regression(
                 complexity_points,
@@ -995,11 +1082,13 @@ def _run_hypothesis_tests(
                 x_keys=all_predictors,
                 group_key="image_id",
                 demean_by_group=True,
+                cluster_key="image_id",
             ),
             "horse_race_mean_loglik_erosion": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_erosion",
                 x_keys=all_predictors,
+                cluster_key="image_id",
             ),
             "horse_race_mean_loglik_erosion_within_image": summarize_multivariate_regression(
                 complexity_points,
@@ -1007,11 +1096,13 @@ def _run_hypothesis_tests(
                 x_keys=all_predictors,
                 group_key="image_id",
                 demean_by_group=True,
+                cluster_key="image_id",
             ),
             "horse_race_mean_loglik_recovery": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_recovery",
                 x_keys=all_predictors,
+                cluster_key="image_id",
             ),
             "horse_race_mean_loglik_recovery_within_image": summarize_multivariate_regression(
                 complexity_points,
@@ -1019,11 +1110,13 @@ def _run_hypothesis_tests(
                 x_keys=all_predictors,
                 group_key="image_id",
                 demean_by_group=True,
+                cluster_key="image_id",
             ),
             "horse_race_mean_loglik_volatility": summarize_multivariate_regression(
                 complexity_points,
                 y_key="mean_loglik_volatility",
                 x_keys=all_predictors,
+                cluster_key="image_id",
             ),
             "horse_race_mean_loglik_volatility_within_image": summarize_multivariate_regression(
                 complexity_points,
@@ -1031,6 +1124,7 @@ def _run_hypothesis_tests(
                 x_keys=all_predictors,
                 group_key="image_id",
                 demean_by_group=True,
+                cluster_key="image_id",
             ),
         }
         cc = tests["continuous_complexity"]
@@ -1084,6 +1178,223 @@ def _run_hypothesis_tests(
                     y_key="loglik_volatility",
                 )
             )
+
+        # --- Publication-grade cluster-robust, long-format, stratified blocks ---
+        if long_format_rows:
+            lf_predictors = _horse_race_predictors(long_format_rows)
+            lf_accuracy_rows = [
+                row
+                for row in long_format_rows
+                if float(row.get("clean_accuracy", 0.0) or 0.0) == 1.0
+            ]
+            lf_accuracy_predictors = _horse_race_predictors(lf_accuracy_rows)
+            outcome_specs = [
+                ("accuracy_drop", lf_accuracy_rows, lf_accuracy_predictors),
+                ("loglik_drift", long_format_rows, lf_predictors),
+                ("loglik_erosion", long_format_rows, lf_predictors),
+                ("loglik_recovery", long_format_rows, lf_predictors),
+                ("loglik_volatility", long_format_rows, lf_predictors),
+            ]
+            cc = tests["continuous_complexity"]
+            cc["long_format_row_counts"] = {
+                "n_rows_total": len(long_format_rows),
+                "n_rows_clean_correct": len(lf_accuracy_rows),
+                "unique_images": len({str(r.get("image_id")) for r in long_format_rows}),
+                "unique_perturbations": len(
+                    {str(r.get("perturbation_type")) for r in long_format_rows}
+                ),
+                "unique_levels": len({str(r.get("level")) for r in long_format_rows}),
+            }
+            for outcome_key, rows, preds in outcome_specs:
+                if not rows or not preds:
+                    continue
+                cc[f"long_format_{outcome_key}"] = summarize_long_format_horse_race(
+                    rows,
+                    y_key=outcome_key,
+                    x_keys=preds,
+                    cluster_key="image_id",
+                    perturbation_key="perturbation_type",
+                )
+                cc[f"per_perturbation_{outcome_key}"] = summarize_per_perturbation_horse_race(
+                    rows,
+                    y_key=outcome_key,
+                    x_keys=preds,
+                    cluster_key="image_id",
+                    perturbation_key="perturbation_type",
+                )
+                cc[f"by_delta_f_family_{outcome_key}"] = summarize_by_delta_f_family_horse_race(
+                    rows,
+                    y_key=outcome_key,
+                    x_keys=preds,
+                    cluster_key="image_id",
+                    family_key="delta_f_family",
+                )
+
+            # --- Gate: cluster-robust long-format β_Csem > 0 with p <= 0.05 ---
+            drift_lf = cc.get("long_format_loglik_drift", {})
+            fe_fit = drift_lf.get("pooled_with_perturbation_fe", {}) or {}
+            fe_preds = fe_fit.get("predictors", {}) or {}
+            csem_info = fe_preds.get("question_complexity_score", {}) or {}
+            cprompt_info = fe_preds.get("prompt_complexity_score", {}) or {}
+            csem_beta = csem_info.get("beta")
+            cprompt_beta = cprompt_info.get("beta")
+            csem_p = csem_info.get("p_value")
+            cprompt_p = cprompt_info.get("p_value")
+            p_max = GATES.get("long_format_dual_force_beta_p_max", GATES["dual_force_beta_p_max"])
+            csem_pass = (
+                csem_beta is not None
+                and csem_p is not None
+                and float(csem_beta) > 0.0
+                and float(csem_p) <= p_max
+            )
+            cprompt_pass = (
+                cprompt_beta is not None
+                and cprompt_p is not None
+                and float(cprompt_beta) < 0.0
+                and float(cprompt_p) <= p_max
+            )
+            tests["long_format_dual_force_loglik_drift"] = {
+                "csem_beta": csem_beta,
+                "csem_p_value": csem_p,
+                "cprompt_beta": cprompt_beta,
+                "cprompt_p_value": cprompt_p,
+                "inference_mode": fe_fit.get("inference_mode"),
+                "n_rows": fe_fit.get("n"),
+                "n_clusters": fe_fit.get("n_clusters"),
+                "target": (
+                    f"cluster-robust β_Csem > 0 AND β_Cprompt < 0 with p <= {p_max} "
+                    "in long-format regression with perturbation FE"
+                ),
+                "passed": bool(csem_pass and cprompt_pass),
+            }
+
+            # --- Gate: β_Csem sign stability across perturbation families ---
+            per_pert_drift = cc.get("per_perturbation_loglik_drift", {}) or {}
+            sign_stab = per_pert_drift.get("sign_stability", {}) or {}
+            csem_stab = sign_stab.get("question_complexity_score", {}) or {}
+            frac_pos = float(csem_stab.get("fraction_positive", 0.0) or 0.0)
+            min_frac = GATES.get("perturbation_sign_stability_min_fraction", 0.6)
+            tests["per_perturbation_csem_sign_stability"] = {
+                "fraction_positive": frac_pos,
+                "n_perturbations": csem_stab.get("n_perturbations", 0),
+                "mean_beta": csem_stab.get("mean_beta"),
+                "median_beta": csem_stab.get("median_beta"),
+                "std_beta": csem_stab.get("std_beta"),
+                "target": (
+                    f"β_Csem positive in >= {min_frac:.0%} of perturbation-specific fits"
+                ),
+                "passed": frac_pos >= min_frac,
+            }
+
+            # --- Gate: ΔF-family falsifiable prediction ---
+            # We interpret the gate *defensively*: the theory predicts β_Csem ≈ 0
+            # on the zero-ΔF family and β_Csem > 0 on the high-frequency family.
+            # We only FAIL the gate if the data *actively* contradicts the theory
+            # (wrong-signed β with p <= 0.05). Underpowered or absent strata
+            # (skipped, too few rows, p > 0.05) are treated as non-falsifying.
+            fam_drift = cc.get("by_delta_f_family_loglik_drift", {}) or {}
+            fam_fits = fam_drift.get("family_fits", {}) or {}
+
+            def _not_falsified(fit: Dict[str, Any], *, expected_sign: int) -> bool:
+                if not fit or fit.get("skipped"):
+                    return True
+                preds = fit.get("predictors", {}) or {}
+                info = preds.get("question_complexity_score", {}) or {}
+                beta = info.get("beta")
+                p_val = info.get("p_value")
+                if beta is None or p_val is None:
+                    return True
+                if float(p_val) > 0.05:
+                    return True
+                # Significant: must not be in the wrong direction
+                if expected_sign > 0 and float(beta) <= 0.0:
+                    return False
+                if expected_sign < 0 and float(beta) >= 0.0:
+                    return False
+                if expected_sign == 0 and abs(float(beta)) > 1e-3:
+                    # Significant non-zero on zero-ΔF family — falsifying
+                    return False
+                return True
+
+            zero_fit = fam_fits.get("zero") or {}
+            high_fit = fam_fits.get("high_freq") or {}
+            low_fit = fam_fits.get("low_freq") or {}
+            broadband_fit = fam_fits.get("broadband") or {}
+            zero_ok = _not_falsified(zero_fit, expected_sign=0)
+            high_ok = _not_falsified(high_fit, expected_sign=+1)
+            # We also require that *at least one* non-zero family shows the
+            # positive β_Csem signal, so the gate doesn't pass vacuously when
+            # every family is underpowered.
+            positive_family_fits = [
+                f
+                for f in (high_fit, low_fit, broadband_fit)
+                if f
+                and not f.get("skipped")
+                and ((f.get("predictors") or {}).get("question_complexity_score") or {}).get("beta") is not None
+            ]
+
+            def _family_positive(fit: Dict[str, Any]) -> bool:
+                info = (fit.get("predictors") or {}).get("question_complexity_score", {}) or {}
+                beta = info.get("beta")
+                p_val = info.get("p_value")
+                return (
+                    beta is not None
+                    and p_val is not None
+                    and float(beta) > 0.0
+                    and float(p_val) <= 0.05
+                )
+
+            any_family_supports = any(_family_positive(f) for f in positive_family_fits)
+
+            def _csem_summary(fit: Dict[str, Any]) -> Dict[str, Any]:
+                if not fit or fit.get("skipped"):
+                    return {
+                        "n_rows": fit.get("n_rows") or fit.get("n"),
+                        "skipped": bool(fit.get("skipped")),
+                    }
+                info = (fit.get("predictors") or {}).get("question_complexity_score", {}) or {}
+                return {
+                    "csem_beta": info.get("beta"),
+                    "csem_p_value": info.get("p_value"),
+                    "n_rows": fit.get("n"),
+                    "n_clusters": fit.get("n_clusters"),
+                    "skipped": False,
+                }
+
+            tests["delta_f_family_falsifiable_prediction"] = {
+                "zero_family": _csem_summary(zero_fit),
+                "low_freq_family": _csem_summary(low_fit),
+                "broadband_family": _csem_summary(broadband_fit),
+                "high_freq_family": _csem_summary(high_fit),
+                "target": (
+                    "Theory is not actively falsified on any ΔF family "
+                    "(β_Csem not significantly wrong-signed) AND at least one "
+                    "non-zero ΔF family shows β_Csem > 0 with p <= 0.05"
+                ),
+                "zero_family_not_falsified": zero_ok,
+                "high_freq_family_not_falsified": high_ok,
+                "any_non_zero_family_supports_theory": any_family_supports,
+                "passed": bool(zero_ok and high_ok and any_family_supports),
+            }
+
+    # --- Final composite verdict (includes cluster-robust gates when available) ---
+    composite_tests = [
+        tests.get("spearman_drop_vs_granularity", {}).get("passed", False),
+        tests.get("monotonicity_accuracy_drop", {}).get("passed", False),
+    ]
+    composite_labels = ["spearman_drop_vs_granularity", "monotonicity_accuracy_drop"]
+    for name in (
+        "long_format_dual_force_loglik_drift",
+        "per_perturbation_csem_sign_stability",
+        "delta_f_family_falsifiable_prediction",
+    ):
+        if name in tests:
+            composite_tests.append(bool(tests[name].get("passed", False)))
+            composite_labels.append(name)
+    tests["hypothesis_supported"] = all(composite_tests)
+    tests["num_criteria_passed"] = sum(1 for t in composite_tests if t)
+    tests["num_criteria_total"] = len(composite_tests)
+    tests["composite_criteria"] = composite_labels
 
     return tests
 
@@ -1248,10 +1559,16 @@ def run_exp1(
     agg = _aggregate_results(per_sample_results)
     complexity_points = _build_complexity_points(per_sample_results)
     perturbation_complexity_points = _build_perturbation_complexity_points(per_sample_results)
+    long_format_rows = _build_long_format_rows(per_sample_results)
     agg["complexity_analysis"] = _summarize_complexity(complexity_points)
 
     # --- Hypothesis testing ---
-    hypothesis_tests = _run_hypothesis_tests(agg, complexity_points, perturbation_complexity_points)
+    hypothesis_tests = _run_hypothesis_tests(
+        agg,
+        complexity_points,
+        perturbation_complexity_points,
+        long_format_rows=long_format_rows,
+    )
 
     # --- Log key results ---
     logger.info("-" * 40)
