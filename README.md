@@ -15,11 +15,9 @@ Current frequency-alignment details:
 - Exp 5 treats the `late` layer group and relative-normalized image-space spectra as the main branch, while raw spectra, vision-feature spectra, and other layer groups remain controls.
 - Exp 5 also emits prediction-factor summaries for observed accuracy drop: `zscore(log1p(S_pred))`, raw semantic complexity, prompt load, and option hardness, with the same primary-marginal vs wordy/pooled-regression split.
 
-For the current scientific design and hypotheses, see `frequency_alignment/RESEARCH_PLAN_FREQUENCY_ALIGNMENT.md`.
+For the scientific design, math, experiments, gates, and plot catalogue, see `full_project_explanation.md` at the repo root.
 
 For commands, configs, outputs, and troubleshooting, see `frequency_alignment/experiment_run.md`.
-
-For implementation-level details, see `frequency_alignment/TECHNICAL_DOCUMENTATION.txt`.
 
 ## Features
 - Compare predictions across perturbations with MCQ log-likelihood scoring or free-text representations (`label`, `text`, `text_mcq`, `semantic` placeholder).

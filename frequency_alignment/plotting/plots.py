@@ -3968,12 +3968,34 @@ def _plot_exp3_group_correlations(tests: Dict[str, Any], out_path: Path) -> None
     )
 
 
+def _profile_spectral_centroid(centroid_profile: Sequence[float]) -> float:
+    arr = np.asarray(centroid_profile, dtype=np.float64)
+    if arr.size == 0:
+        return float("nan")
+    total = float(arr.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        return float("nan")
+    band_idx = np.arange(arr.size, dtype=np.float64)
+    return float((band_idx * arr).sum() / total) / max(arr.size - 1, 1)
+
+
+def _frequency_tier_labels(n_groups: int) -> List[str]:
+    if n_groups <= 1:
+        return ["Broadband"]
+    if n_groups == 2:
+        return ["Low-ω", "High-ω"]
+    if n_groups == 3:
+        return ["Low-ω", "Mid-ω", "High-ω"]
+    if n_groups == 4:
+        return ["Low-ω", "Mid-low-ω", "Mid-high-ω", "High-ω"]
+    return [f"Band {i + 1}/{n_groups}" for i in range(n_groups)]
+
+
 def _plot_exp3_profile_groups(summary: Dict[str, Any], out_path: Path) -> None:
     grouping = summary.get("profile_grouping", {}).get("groups", {})
     if not grouping:
         return
 
-    group_names = sorted(grouping.keys(), key=lambda name: int(str(name).split("_")[-1]))
     levels = _ordered_levels({
         level
         for group_data in grouping.values()
@@ -3982,28 +4004,68 @@ def _plot_exp3_profile_groups(summary: Dict[str, Any], out_path: Path) -> None:
     if not levels:
         return
 
-    matrix = np.full((len(group_names), len(levels)), np.nan, dtype=float)
-    for row, group_name in enumerate(group_names):
-        group_data = grouping.get(group_name, {})
-        per_level = group_data.get("per_level", {})
-        for col, level in enumerate(levels):
-            value = per_level.get(level, {}).get("mean_post_drift_scalar_all")
-            if value is not None:
-                matrix[row, col] = float(value)
+    ranked = sorted(
+        grouping.items(),
+        key=lambda item: (
+            _profile_spectral_centroid(item[1].get("centroid_profile", [])),
+            str(item[0]),
+        ),
+    )
+    group_names = [name for name, _ in ranked]
+    tier_labels = _frequency_tier_labels(len(group_names))
+    row_labels = [
+        f"{tier} ({name.replace('_', ' ')})"
+        for tier, name in zip(tier_labels, group_names)
+    ]
+
+    def _build_matrix(value_key: str) -> np.ndarray:
+        matrix = np.full((len(group_names), len(levels)), np.nan, dtype=float)
+        for row, group_name in enumerate(group_names):
+            per_level = grouping.get(group_name, {}).get("per_level", {})
+            for col, level in enumerate(levels):
+                value = per_level.get(level, {}).get(value_key)
+                if value is not None:
+                    matrix[row, col] = float(value)
+        return matrix
+
+    level_labels = [_level_label(level) for level in levels]
+    centroid_note = (
+        "Rows sorted low→high by spectral centroid of each profile's pre-drift band spectrum"
+    )
 
     _plot_heatmap(
-        matrix,
-        [group_name.replace("_", " ").title() for group_name in group_names],
-        [_level_label(level) for level in levels],
+        _build_matrix("mean_post_drift_scalar_all"),
+        row_labels,
+        level_labels,
         out_path,
         "Post-Fusion Response by Pre-Drift Profile Group",
         "Mean Post-Fusion Drift (all tokens)",
         cmap="YlOrRd",
         metadata=_metadata_lines(
             "Experiment=3",
-            "Rows=matched pre-drift profile groups",
+            "Rows=pre-drift profile groups (sorted low→high frequency)",
             "Cols=task levels",
             "Value=mean post-fusion drift on all tokens",
+            centroid_note,
+        ),
+    )
+
+    amp_out_path = out_path.with_name(f"{out_path.stem}_amplification{out_path.suffix}")
+    _plot_heatmap(
+        _build_matrix("mean_response_amplification"),
+        row_labels,
+        level_labels,
+        amp_out_path,
+        "Post/Pre Amplification by Pre-Drift Profile Group",
+        "Mean Response Amplification (post/pre)",
+        cmap="YlOrRd",
+        metadata=_metadata_lines(
+            "Experiment=3",
+            "Rows=pre-drift profile groups (sorted low→high frequency)",
+            "Cols=task levels",
+            "Value=mean post-fusion drift / pre-fusion drift (baseline-normalized)",
+            "H3 prediction: low-ω rows peak at L1; high-ω rows peak at L4",
+            centroid_note,
         ),
     )
 
@@ -4520,6 +4582,9 @@ def _generate_primary_l1_l4_plots(
         for y_key, y_label, file_name in (
             ("mean_accuracy_drop", "Mean Accuracy Drop", "exp1_complexity_accuracy_drop.png"),
             ("mean_loglik_drift", "Mean Log-Likelihood Drift", "exp1_complexity_loglik_drift.png"),
+            ("mean_loglik_erosion", "Mean Log-Likelihood Erosion", "exp1_complexity_loglik_erosion.png"),
+            ("mean_loglik_recovery", "Mean Log-Likelihood Recovery", "exp1_complexity_loglik_recovery.png"),
+            ("mean_loglik_volatility", "Mean Log-Likelihood Volatility", "exp1_complexity_loglik_volatility.png"),
         ):
             out_path = primary_dir / file_name
             plot_complexity_scatter(
@@ -4564,6 +4629,9 @@ def _generate_primary_l1_l4_plots(
         for base_key, file_name, title in (
             ("horse_race_mean_accuracy_drop", "exp1_coefficient_plot_accuracy_drop.png", "Accuracy Drop"),
             ("horse_race_mean_loglik_drift", "exp1_coefficient_plot_loglik_drift.png", "Log-Likelihood Drift"),
+            ("horse_race_mean_loglik_erosion", "exp1_coefficient_plot_loglik_erosion.png", "Log-Likelihood Erosion"),
+            ("horse_race_mean_loglik_recovery", "exp1_coefficient_plot_loglik_recovery.png", "Log-Likelihood Recovery"),
+            ("horse_race_mean_loglik_volatility", "exp1_coefficient_plot_loglik_volatility.png", "Log-Likelihood Volatility"),
         ):
             pooled = _primary_view_regression(cc, base_key, regression_mode="pooled")
             within = _primary_view_regression(cc, base_key, regression_mode="within_image")
@@ -4662,28 +4730,37 @@ def _generate_primary_l1_l4_plots(
                     )
                 ),
             )
-        drift_pert_regs = cc.get("horse_race_mean_loglik_drift_by_perturbation", {})
-        if drift_pert_regs:
+        for outcome_label, test_key, file_name in (
+            ("Accuracy Drop", "horse_race_mean_accuracy_drop_by_perturbation", "exp1_coefficient_plot_accuracy_drop_by_perturbation.png"),
+            ("Log-Likelihood Drift", "horse_race_mean_loglik_drift_by_perturbation", "exp1_coefficient_plot_loglik_drift_by_perturbation.png"),
+            ("Log-Likelihood Erosion", "horse_race_mean_loglik_erosion_by_perturbation", "exp1_coefficient_plot_loglik_erosion_by_perturbation.png"),
+            ("Log-Likelihood Recovery", "horse_race_mean_loglik_recovery_by_perturbation", "exp1_coefficient_plot_loglik_recovery_by_perturbation.png"),
+            ("Log-Likelihood Volatility", "horse_race_mean_loglik_volatility_by_perturbation", "exp1_coefficient_plot_loglik_volatility_by_perturbation.png"),
+        ):
+            pert_regs = cc.get(test_key, {})
+            if not pert_regs:
+                continue
             series = _collect_regression_series_from_payload_map(
-                drift_pert_regs,
+                pert_regs,
                 view_name="primary",
             )
-            if series:
-                plot_coefficient_forest_series(
-                    series,
-                    primary_dir / "exp1_coefficient_plot_loglik_drift_by_perturbation.png",
-                    title="Primary L1-L4 Per-Perturbation Horse Race: Log-Likelihood Drift",
-                    metadata=_primary_plot_metadata(
-                        _plot_metadata(
-                            experiment="1",
-                            what="Primary-ladder perturbation-specific horse race for log-likelihood drift",
-                            aggregation="one subplot per perturbation type",
-                            x="standardized coefficient with 95% CI",
-                            y="predictor",
-                            profile=profile,
-                        )
-                    ),
-                )
+            if not series:
+                continue
+            plot_coefficient_forest_series(
+                series,
+                primary_dir / file_name,
+                title=f"Primary L1-L4 Per-Perturbation Horse Race: {outcome_label}",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="1",
+                        what=f"Primary-ladder perturbation-specific horse race for {outcome_label.lower()}",
+                        aggregation="one subplot per perturbation type",
+                        x="standardized coefficient with 95% CI",
+                        y="predictor",
+                        profile=profile,
+                    )
+                ),
+            )
 
     if exp1_detail:
         levels, perturbations, matrix = _exp1_level_perturbation_matrix(exp1_detail)
@@ -4729,7 +4806,7 @@ def _generate_primary_l1_l4_plots(
                 )
             ),
         )
-        for record in selected_exp1_records[:1]:
+        for record in selected_exp1_records:
             sample_id = str(record.get("image_id"))
             matched_exp2 = exp2_by_id.get(sample_id)
             for key, file_prefix, title, ylabel in (
@@ -5724,6 +5801,22 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             ),
             level_pairs=valid_wordy_pairs,
         )
+        _plot_wordy_control_pair_comparison(
+            {level: float(stats.get("mean_loglik_volatility", np.nan)) for level, stats in per_level.items()},
+            plots_dir / "exp1_wordy_control_loglik_volatility.png",
+            title="Wordy Control Comparison: Log-Likelihood Volatility",
+            ylabel="Mean Log-Likelihood Volatility",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Base level vs matched wordy control for absolute confidence movement",
+                aggregation="level-wise average over all perturbation evaluations",
+                x="matched base/control pair",
+                y="mean absolute correct-answer log-likelihood drift",
+                note=wordy_pair_note,
+                profile=profile,
+            ),
+            level_pairs=valid_wordy_pairs,
+        )
     if exp1_complexity:
         plot_complexity_scatter(
             exp1_complexity,
@@ -5757,9 +5850,60 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
+        plot_complexity_scatter(
+            exp1_complexity,
+            y_key="mean_loglik_erosion",
+            y_label="Mean Log-Likelihood Erosion",
+            out_path=plots_dir / "exp1_complexity_loglik_erosion.png",
+            title="Log-Likelihood Erosion vs Residualized Semantic Logic",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Residualized semantic logic vs directional confidence erosion",
+                aggregation="per-image per-level average over perturbations",
+                x="residualized semantic logic",
+                y="mean positive correct-answer log-likelihood drift",
+                note="Only positive drifts contribute; X is residual(semantic complexity ~ prompt load); dashed line is linear fit",
+                profile=profile,
+            ),
+        )
+        plot_complexity_scatter(
+            exp1_complexity,
+            y_key="mean_loglik_recovery",
+            y_label="Mean Log-Likelihood Recovery",
+            out_path=plots_dir / "exp1_complexity_loglik_recovery.png",
+            title="Log-Likelihood Recovery vs Residualized Semantic Logic",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Residualized semantic logic vs directional confidence recovery",
+                aggregation="per-image per-level average over perturbations",
+                x="residualized semantic logic",
+                y="mean negative correct-answer log-likelihood drift",
+                note="Only negative drifts contribute; X is residual(semantic complexity ~ prompt load); dashed line is linear fit",
+                profile=profile,
+            ),
+        )
+        plot_complexity_scatter(
+            exp1_complexity,
+            y_key="mean_loglik_volatility",
+            y_label="Mean Log-Likelihood Volatility",
+            out_path=plots_dir / "exp1_complexity_loglik_volatility.png",
+            title="Log-Likelihood Volatility vs Residualized Semantic Logic",
+            metadata=_plot_metadata(
+                experiment="1",
+                what="Residualized semantic logic vs absolute confidence movement",
+                aggregation="per-image per-level average over perturbations",
+                x="residualized semantic logic",
+                y="mean absolute correct-answer log-likelihood drift",
+                note="X is residual(semantic complexity ~ prompt load); black line is mean by exact residual score; dashed line is linear fit",
+                profile=profile,
+            ),
+        )
         for y_key, y_label, file_name, y_metadata in (
             ("mean_accuracy_drop", "Mean Accuracy Drop", "exp1_complexity_accuracy_drop.png", "mean gated accuracy drop"),
             ("mean_loglik_drift", "Mean Log-Likelihood Drift", "exp1_complexity_loglik_drift.png", "mean correct-answer log-likelihood drift"),
+            ("mean_loglik_erosion", "Mean Log-Likelihood Erosion", "exp1_complexity_loglik_erosion.png", "mean positive correct-answer log-likelihood drift"),
+            ("mean_loglik_recovery", "Mean Log-Likelihood Recovery", "exp1_complexity_loglik_recovery.png", "mean negative correct-answer log-likelihood drift"),
+            ("mean_loglik_volatility", "Mean Log-Likelihood Volatility", "exp1_complexity_loglik_volatility.png", "mean absolute correct-answer log-likelihood drift"),
         ):
             plot_complexity_scatter(
                 exp1_complexity,
@@ -5834,6 +5978,15 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     profile=profile,
                 ),
             )
+            _plot_view_forest_from_payload(
+                cc,
+                "horse_race_mean_accuracy_drop",
+                plots_dir / "exp1_coefficient_plot_accuracy_drop_views.png",
+                title="Triple-View Coefficients: Accuracy Drop",
+                note="Accuracy-drop regressions are filtered to clean-correct points; views separate primary, wordy, and pooled ladders",
+                experiment="1",
+                profile=profile,
+            )
         loglik_reg_pooled = cc.get("horse_race_mean_loglik_drift")
         loglik_reg_within = cc.get("horse_race_mean_loglik_drift_within_image")
         loglik_reg = loglik_reg_pooled or loglik_reg_within
@@ -5855,6 +6008,67 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     note="Shows pooled OLS and within-image fixed-effects when available; outcome is mean correct-answer log-likelihood drift",
                     profile=profile,
                 ),
+            )
+            _plot_view_forest_from_payload(
+                cc,
+                "horse_race_mean_loglik_drift",
+                plots_dir / "exp1_coefficient_plot_loglik_drift_views.png",
+                title="Triple-View Coefficients: Log-Likelihood Drift",
+                note="Views separate primary semantic ladder, wordy mirror ladder, and pooled analysis",
+                experiment="1",
+                profile=profile,
+            )
+        for outcome_key, file_name, title, note in (
+            (
+                "mean_loglik_erosion",
+                "exp1_coefficient_plot_loglik_erosion.png",
+                "Coefficient Plot: Log-Likelihood Erosion Controls",
+                "Outcome is mean positive correct-answer log-likelihood drift",
+            ),
+            (
+                "mean_loglik_recovery",
+                "exp1_coefficient_plot_loglik_recovery.png",
+                "Coefficient Plot: Log-Likelihood Recovery Controls",
+                "Outcome is mean negative correct-answer log-likelihood drift",
+            ),
+            (
+                "mean_loglik_volatility",
+                "exp1_coefficient_plot_loglik_volatility.png",
+                "Coefficient Plot: Log-Likelihood Volatility Controls",
+                "Outcome is mean absolute correct-answer log-likelihood drift",
+            ),
+        ):
+            pooled = cc.get(f"horse_race_{outcome_key}")
+            within = cc.get(f"horse_race_{outcome_key}_within_image")
+            regression = pooled or within
+            if not regression:
+                continue
+            plot_coefficient_forest(
+                regression,
+                plots_dir / file_name,
+                title=title,
+                subtitle="Pooled and within-image standardized coefficients",
+                primary_label="Pooled OLS" if pooled else "Within-Image Fixed Effects",
+                comparison_label="Within-Image Fixed Effects" if pooled and within else None,
+                comparison_regression=within if pooled else None,
+                metadata=_plot_metadata(
+                    experiment="1",
+                    what="Directional drift controls using residualized semantic logic",
+                    aggregation="multivariate regression over per-image per-level averages",
+                    x="standardized coefficient with 95% CI",
+                    y="predictor",
+                    note=note,
+                    profile=profile,
+                ),
+            )
+            _plot_view_forest_from_payload(
+                cc,
+                f"horse_race_{outcome_key}",
+                plots_dir / file_name.replace(".png", "_views.png"),
+                title=title.replace("Coefficient Plot", "Triple-View Coefficients"),
+                note=f"{note}; views separate primary, wordy, and pooled ladders",
+                experiment="1",
+                profile=profile,
             )
 
         # --- Publication-grade cluster-robust plots (long-format with perturbation FE) ---
@@ -5924,26 +6138,58 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     profile=profile,
                 ),
             )
-        # Keep per-perturbation grid ONLY for loglik_drift (primary outcome)
-        drift_pert_key = "horse_race_mean_loglik_drift_by_perturbation"
-        drift_pert_regs = cc.get(drift_pert_key, {})
-        if drift_pert_regs:
-            series = _collect_regression_series_from_payload_map(drift_pert_regs)
-            if series:
-                plot_coefficient_forest_series(
-                    series,
-                    plots_dir / "exp1_coefficient_plot_loglik_drift_by_perturbation.png",
-                    title="Per-Perturbation Horse Race: Log-Likelihood Drift",
-                    metadata=_plot_metadata(
-                        experiment="1",
-                        what="Per-perturbation full horse race (all predictors)",
-                        aggregation="one subplot per perturbation type",
-                        x="standardized coefficient with 95% CI",
-                        y="predictor",
-                        note="Shows all predictors per perturbation; CR1 SEs on image_id",
-                        profile=profile,
-                    ),
-                )
+        for outcome_label, test_key, file_name, note in (
+            (
+                "Accuracy Drop",
+                "horse_race_mean_accuracy_drop_by_perturbation",
+                "exp1_coefficient_plot_accuracy_drop_by_perturbation.png",
+                "Only clean-correct points are included in each perturbation-specific regression",
+            ),
+            (
+                "Log-Likelihood Drift",
+                "horse_race_mean_loglik_drift_by_perturbation",
+                "exp1_coefficient_plot_loglik_drift_by_perturbation.png",
+                "Positive values mean confidence erosion; negative values mean confidence recovery",
+            ),
+            (
+                "Log-Likelihood Erosion",
+                "horse_race_mean_loglik_erosion_by_perturbation",
+                "exp1_coefficient_plot_loglik_erosion_by_perturbation.png",
+                "Only positive drifts contribute to this outcome",
+            ),
+            (
+                "Log-Likelihood Recovery",
+                "horse_race_mean_loglik_recovery_by_perturbation",
+                "exp1_coefficient_plot_loglik_recovery_by_perturbation.png",
+                "More negative values indicate stronger confidence recovery",
+            ),
+            (
+                "Log-Likelihood Volatility",
+                "horse_race_mean_loglik_volatility_by_perturbation",
+                "exp1_coefficient_plot_loglik_volatility_by_perturbation.png",
+                "Higher values mean larger movement away from zero regardless of sign",
+            ),
+        ):
+            pert_regs = cc.get(test_key, {})
+            if not pert_regs:
+                continue
+            series = _collect_regression_series_from_payload_map(pert_regs)
+            if not series:
+                continue
+            plot_coefficient_forest_series(
+                series,
+                plots_dir / file_name,
+                title=f"Per-Perturbation Horse Race: {outcome_label}",
+                metadata=_plot_metadata(
+                    experiment="1",
+                    what=f"Per-perturbation full horse race for {outcome_label.lower()}",
+                    aggregation="one subplot per perturbation type",
+                    x="standardized coefficient with 95% CI",
+                    y="predictor",
+                    note=note,
+                    profile=profile,
+                ),
+            )
     if exp1_detail:
         levels, perturbations, matrix = _exp1_level_perturbation_matrix(exp1_detail)
         _plot_heatmap(
@@ -5985,7 +6231,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 profile=profile,
             ),
         )
-        for record in selected_exp1_records[:1]:
+        for record in selected_exp1_records:
             sample_id = str(record.get("image_id"))
             matched_exp2 = exp2_by_id.get(sample_id)
             delta_f = _exp1_sample_spectra(record, "delta_f")

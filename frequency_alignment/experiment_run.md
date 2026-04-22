@@ -318,7 +318,7 @@ Representative plot families include:
 ## Analysis Settings
 
 - `analysis.num_bands_mode: auto` probes the model patch grid and freezes one run-level linear radial bin count. This keeps `W_t`, `delta_f`, `delta_f_vision`, Exp 3 drift spectra, and Exp 5 overlap vectors aligned.
-- `analysis.suppress_dc` controls whether the DC band is included in the actual math. It is currently `false` in both provided configs.
+- `analysis.suppress_dc` controls whether the DC band is included in the actual math. It is currently `false` in all three provided configs (`default.yaml`, `local_test.yaml`, `llava_test.yaml`).
 - `analysis.attention_fft_window` / `experiments.exp2.fft_window` controls optional attention-map windowing before FFT. Current configs set this to `none`.
 - `experiments.exp5.primary_layer_group` defaults to `late`; the code-level Exp 5 primary target is `loglik_volatility`.
 - Complexity scatter plots use `complexity_score_residual` on the x-axis when available and also emit `_csem` copies against raw `complexity_score`.
