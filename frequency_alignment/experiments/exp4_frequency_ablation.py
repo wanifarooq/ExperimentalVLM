@@ -151,6 +151,50 @@ def _summarize_complexity(
     return summary
 
 
+def _cutoff_curve_diagnostic(
+    accuracy_curve: List[float],
+    cutoffs: List[float],
+    *,
+    threshold: float,
+    critical_cutoff: float,
+) -> Dict[str, Any]:
+    """Summarize whether the cutoff curve is interior or boundary-limited."""
+    if not accuracy_curve or not cutoffs:
+        return {
+            "loss_curve": [],
+            "threshold_crossed": False,
+            "critical_cutoff_at_boundary": False,
+        }
+
+    acc = np.asarray(accuracy_curve, dtype=np.float64)
+    ctf = np.asarray(cutoffs, dtype=np.float64)
+    loss = 1.0 - acc
+
+    min_acc_idx = int(np.argmin(acc))
+    max_loss_idx = int(np.argmax(loss))
+    last_idx = max(0, len(cutoffs) - 1)
+    boundary_idx = {0, last_idx}
+    threshold_crossed = bool(np.any(acc < float(threshold)))
+
+    return {
+        "loss_curve": [float(x) for x in loss.tolist()],
+        "threshold_crossed": threshold_crossed,
+        "min_accuracy": float(acc[min_acc_idx]),
+        "min_accuracy_cutoff": float(ctf[min_acc_idx]),
+        "min_accuracy_index": min_acc_idx,
+        "min_accuracy_at_boundary": min_acc_idx in boundary_idx,
+        "max_loss": float(loss[max_loss_idx]),
+        "max_loss_cutoff": float(ctf[max_loss_idx]),
+        "max_loss_index": max_loss_idx,
+        "max_loss_at_boundary": max_loss_idx in boundary_idx,
+        "critical_cutoff_at_lower_boundary": bool(np.isclose(critical_cutoff, float(ctf[0]))),
+        "critical_cutoff_at_upper_boundary": bool(np.isclose(critical_cutoff, float(ctf[-1]))),
+        "critical_cutoff_at_boundary": bool(
+            np.isclose(critical_cutoff, float(ctf[0])) or np.isclose(critical_cutoff, float(ctf[-1]))
+        ),
+    }
+
+
 def run_exp4(
     cfg: dict,
     out_dir: Path,
@@ -314,11 +358,19 @@ def run_exp4(
             omega_c = compute_critical_cutoff(
                 acc_curve, reference_cutoffs, threshold=accuracy_threshold,
             )
+            diagnostic = _cutoff_curve_diagnostic(
+                acc_curve,
+                reference_cutoffs,
+                threshold=accuracy_threshold,
+                critical_cutoff=omega_c,
+            )
 
             agg["per_mode"][mode][lk] = {
                 "accuracy_curve": acc_curve,
+                "loss_curve": diagnostic["loss_curve"],
                 "cutoffs": reference_cutoffs,
                 "critical_cutoff": omega_c,
+                "cutoff_diagnostic": diagnostic,
                 "num_samples": len(accuracy_data[mode].get(lk, {}).get(0, [])),
             }
             critical_cutoffs[mode][lk] = omega_c
@@ -515,7 +567,29 @@ def run_exp4(
         logger.info("Mode: %s", mode)
         for lk in level_order:
             if lk in critical_cutoffs.get(mode, {}):
-                logger.info("  %s: ω_c* = %.4f", lk, critical_cutoffs[mode][lk])
+                mode_payload = agg["per_mode"].get(mode, {}).get(lk, {})
+                diagnostic = mode_payload.get("cutoff_diagnostic", {})
+                loss_curve = [
+                    round(float(value), 3)
+                    for value in (mode_payload.get("loss_curve") or [])
+                ]
+                boundary_tag = (
+                    "boundary"
+                    if diagnostic.get("critical_cutoff_at_boundary")
+                    else "interior"
+                )
+                logger.info(
+                    "  %s: ω_c* = %.4f [%s] threshold_crossed=%s max_loss=%.3f@%.3f "
+                    "max_loss_boundary=%s loss_curve=%s",
+                    lk,
+                    critical_cutoffs[mode][lk],
+                    boundary_tag,
+                    diagnostic.get("threshold_crossed"),
+                    float(diagnostic.get("max_loss", 0.0) or 0.0),
+                    float(diagnostic.get("max_loss_cutoff", 0.0) or 0.0),
+                    diagnostic.get("max_loss_at_boundary"),
+                    loss_curve,
+                )
     sp = tests.get("spearman_cutoff_vs_granularity_lowpass", {})
     logger.info(
         "  Spearman(granularity, ω_c*): rho=%.3f, p=%.4f [%s]",

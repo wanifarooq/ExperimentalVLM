@@ -320,6 +320,69 @@ class HFVLMAdapter(VLMAdapter):
         _, patch_grid = self._flatten_vision_tokens(image)
         return patch_grid
 
+    def _infer_patch_grid_via_processor(
+        self,
+        image: Image.Image,
+    ) -> Optional[Tuple[int, int]]:
+        """Infer patch grid without a vision forward pass when possible.
+
+        For Qwen3-VL models, the processor emits ``image_grid_thw`` directly.
+        That is cheaper and more robust than probing through
+        ``get_vision_tokens`` and avoids silent failures in the auto-K probe.
+        """
+        if self._processor is None:
+            return None
+
+        image_processor = getattr(self._processor, "image_processor", None)
+        if image_processor is None:
+            return None
+
+        try:
+            vision_inputs = image_processor(
+                images=[image],
+                return_tensors="pt",
+            )
+        except Exception as exc:
+            logger.debug(
+                "Vision-only preprocessing failed for patch-grid inference on %s: %s",
+                self._model_id,
+                exc,
+            )
+            return None
+
+        grid = vision_inputs.get("image_grid_thw")
+        if grid is not None:
+            try:
+                visual_module = getattr(getattr(self._model, "model", None), "visual", None)
+                merge_size = int(getattr(visual_module, "spatial_merge_size", 1) or 1)
+                _, h, w = [int(x) for x in grid[0].tolist()]
+                return (max(1, h // merge_size), max(1, w // merge_size))
+            except Exception as exc:
+                logger.debug(
+                    "image_grid_thw patch-grid inference failed for %s: %s",
+                    self._model_id,
+                    exc,
+                )
+
+        pixel_values = vision_inputs.get("pixel_values")
+        if isinstance(pixel_values, torch.Tensor) and pixel_values.ndim >= 4:
+            height = int(pixel_values.shape[-2])
+            width = int(pixel_values.shape[-1])
+            visual_module = getattr(getattr(self._model, "model", None), "visual", None)
+            vision_config = getattr(getattr(self._model, "config", None), "vision_config", None)
+            patch_size = (
+                getattr(visual_module, "patch_size", None)
+                or getattr(vision_config, "patch_size", None)
+            )
+            merge_size = int(getattr(visual_module, "spatial_merge_size", 1) or 1)
+            if patch_size:
+                return (
+                    max(1, math.ceil(height / int(patch_size)) // merge_size),
+                    max(1, math.ceil(width / int(patch_size)) // merge_size),
+                )
+
+        return None
+
     def score_options(
         self,
         image: Image.Image,
@@ -442,6 +505,22 @@ class HFVLMAdapter(VLMAdapter):
         return flat_tokens.reshape(1, h, w, -1)
 
     def get_patch_grid_shape(self, image: Image.Image) -> Tuple[int, int]:
+        patch_grid = self._infer_patch_grid_via_processor(image)
+        if patch_grid is not None and patch_grid[0] > 0 and patch_grid[1] > 0:
+            return patch_grid
+
+        try:
+            inputs = self._build_inputs(image, "")
+            patch_grid = self._get_patch_grid_from_inputs(inputs, image)
+            if patch_grid is not None and patch_grid[0] > 0 and patch_grid[1] > 0:
+                return patch_grid
+        except Exception as exc:
+            logger.debug(
+                "Fallback patch-grid inference via full inputs failed for %s: %s",
+                self._model_id,
+                exc,
+            )
+
         _, patch_grid = self._flatten_vision_tokens(image)
         return patch_grid or (0, 0)
 

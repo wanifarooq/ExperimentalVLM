@@ -1,0 +1,174 @@
+# Server profile for 2x+ NVIDIA A100-class GPUs, severity-1 only.
+# Identical to default.yaml except perturbations.severity_levels = [1].
+# Intended use:
+#   python -m frequency_alignment.run_experiment --experiment all \
+#     --config frequency_alignment/configs/server_severity1.yaml \
+#     --max-samples 500
+
+seed: 42
+deterministic: false
+device: cuda:0
+cache_dir: .hf_cache
+out_dir: frequency_alignment_outputs
+
+model:
+  primary: Qwen/Qwen3-VL-30B-A3B-Instruct
+  alternatives:
+    - Qwen/Qwen3-VL-2B-Instruct
+    - Qwen/Qwen3-VL-8B-Instruct
+    - llava-hf/llava-v1.6-mistral-7b-hf
+    - OpenGVLab/InternVL3-8B-hf
+  quantization: null
+  device_map: auto
+  attn_implementation: null
+  attention_extract_implementation: eager
+  trust_remote_code: true
+
+data:
+  dataset: gqa
+  max_samples: 1000
+  allow_download: true
+  seedbench_tsv: null
+  seedbench_image_root: null
+  partimagenet_dir: null
+
+perturbations:
+  severity_levels:
+    - 1
+  # Save clean + all perturbation images for the first N successful samples per experiment. Use 0 to disable.
+  export_num_images: 1
+  # Overlay families are task-agnostic by default so the same nuisance text/box perturbations
+  # are reused across the VQA levels without accidentally encoding answer labels.
+  overlay_mode: label_free
+  overlay_count: 3
+  include_natural: true
+  include_frequency: true
+  natural_types:
+    - translation
+    - padcrop
+    - scale
+    - scalepad_black
+    - scalepad_white
+    - rotation
+    - gaussian_blur
+    - motion_blur
+    - occlusion
+    - brightness
+    - contrast
+    - gaussian_noise
+    - jpeg_compression
+    - text_overlay
+    - box_overlay
+    - random_text
+  frequency_types:
+    - lowpass_keep
+    - highpass_keep
+    - lowband_noise
+    - highband_noise
+    - allband_noise
+  severity_params:
+    1:
+      translate: 4
+      padcrop: 4
+      scale: 0.95
+      rotation: 10
+      freq_cutoff: 0.18
+      freq_epsilon: 0.03137
+      text_scale: 0.3
+      gaussian_blur_radius: 1.0
+      motion_blur_kernel: 3
+      occlusion_fraction: 0.08
+      brightness_delta: 0.15
+      contrast_delta: 0.15
+      gaussian_noise_std: 0.02
+      jpeg_quality: 70
+    2:
+      translate: 8
+      padcrop: 8
+      scale: 0.90
+      rotation: 20
+      freq_cutoff: 0.28
+      freq_epsilon: 0.03137
+      text_scale: 0.5
+      gaussian_blur_radius: 2.0
+      motion_blur_kernel: 5
+      occlusion_fraction: 0.14
+      brightness_delta: 0.30
+      contrast_delta: 0.30
+      gaussian_noise_std: 0.04
+      jpeg_quality: 50
+    3:
+      translate: 12
+      padcrop: 12
+      scale: 0.85
+      rotation: 30
+      freq_cutoff: 0.38
+      freq_epsilon: 0.03137
+      text_scale: 0.7
+      gaussian_blur_radius: 3.0
+      motion_blur_kernel: 7
+      occlusion_fraction: 0.20
+      brightness_delta: 0.45
+      contrast_delta: 0.45
+      gaussian_noise_std: 0.06
+      jpeg_quality: 30
+
+analysis:
+  # Fallback manual band count. In auto mode the runner probes a few real images,
+  # infers the model patch grid, and freezes one run-level count from the median grid.
+  num_bands: 20
+  num_bands_mode: auto
+  num_bands_auto:
+    probe_samples: 8
+    coefficient: 0.6
+    rounding: ceil
+    statistic: median
+    min_bands: 14
+    max_bands: 30
+  suppress_dc: false
+  attention_layers: all
+  # Set to hann / hamming to enable windowing, or none / off / false to disable it.
+  attention_fft_window: none
+  significance_level: 0.05
+  hypothesis_testing: true
+
+plotting:
+  profile: exhaustive
+  representative_samples: 10
+
+experiments:
+  exp1:
+    enabled: true
+    max_samples: 1000
+    extract_vision_tokens: true
+    store_feature_delta_f: true
+  exp2:
+    enabled: true
+    max_samples: 200
+    layer_stride: 2
+    # Overrides analysis.attention_fft_window. Use none / off / false to disable.
+    fft_window: none
+    prompt_controls:
+      - empty_language
+      - random_language
+  exp3:
+    enabled: true
+    max_samples: 200
+    # Set to null to use all perturbations for each sample.
+    perturbation_subset: 10
+    post_fusion_layer_fraction: 0.8
+  exp4:
+    enabled: true
+    max_samples: 500
+    sweep_steps: 20
+    sweep_modes:
+      - lowpass
+      - highpass
+  exp5:
+    enabled: true
+    primary_layer_group: late
+    primary_delta_normalization: relative
+  exp6:
+    enabled: true
+    max_samples: 300
+    dataset: partimagenet

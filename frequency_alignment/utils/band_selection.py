@@ -48,10 +48,10 @@ def _probe_patch_grids(
     cfg: Dict[str, Any],
     *,
     max_probe_samples: int,
-) -> Tuple[List[Tuple[int, int]], List[str]]:
+) -> Tuple[List[Tuple[int, int]], List[str], List[Dict[str, Any]]]:
     samples = load_multilevel_vqa_dataset(cfg, max_samples=max_probe_samples)
     if not samples:
-        return [], []
+        return [], [], []
 
     model_cfg = cfg.get("model", {})
     model_id = model_cfg.get("primary", "Qwen/Qwen3-VL-8B-Instruct")
@@ -61,6 +61,7 @@ def _probe_patch_grids(
     adapter = get_adapter(model_id)
     patch_grids: List[Tuple[int, int]] = []
     sample_ids: List[str] = []
+    failures: List[Dict[str, Any]] = []
 
     try:
         adapter.load(
@@ -88,10 +89,22 @@ def _probe_patch_grids(
                 patch_grid = adapter.get_patch_grid_shape(image)
             except Exception as exc:
                 logger.warning("Could not infer patch grid for %s: %s", sample.image_id, exc)
+                failures.append({"image_id": str(sample.image_id), "reason": str(exc)})
                 continue
 
             h, w = patch_grid or (0, 0)
             if h <= 0 or w <= 0:
+                logger.warning(
+                    "Patch-grid probe returned an empty grid for %s (model=%s)",
+                    sample.image_id,
+                    model_id,
+                )
+                failures.append(
+                    {
+                        "image_id": str(sample.image_id),
+                        "reason": f"empty_patch_grid:{patch_grid}",
+                    }
+                )
                 continue
             patch_grids.append((int(h), int(w)))
             sample_ids.append(str(sample.image_id))
@@ -101,7 +114,7 @@ def _probe_patch_grids(
         except Exception:
             logger.debug("Adapter unload after band probe failed", exc_info=True)
 
-    return patch_grids, sample_ids
+    return patch_grids, sample_ids, failures
 
 
 def resolve_num_bands_config(
@@ -137,7 +150,10 @@ def resolve_num_bands_config(
     statistic = str(auto_cfg.get("statistic", "median")).strip().lower()
 
     try:
-        patch_grids, sample_ids = _probe_patch_grids(cfg, max_probe_samples=probe_samples)
+        patch_grids, sample_ids, probe_failures = _probe_patch_grids(
+            cfg,
+            max_probe_samples=probe_samples,
+        )
     except Exception as exc:
         logger.warning("Auto num_bands probe failed; using fallback=%d: %s", fallback_num_bands, exc)
         resolution_info.update(
@@ -151,6 +167,12 @@ def resolve_num_bands_config(
 
     if not patch_grids:
         resolution_info["status"] = "fallback_no_patch_grids"
+        resolution_info["probe_failures"] = probe_failures
+        logger.warning(
+            "Auto num_bands probe found no valid patch grids for model=%s; using fallback=%d",
+            cfg.get("model", {}).get("primary"),
+            fallback_num_bands,
+        )
         analysis_cfg["num_bands_resolution"] = resolution_info
         return cfg
 
@@ -186,6 +208,7 @@ def resolve_num_bands_config(
             "probe_samples": probe_samples,
             "probed_patch_grids": [[int(h), int(w)] for h, w in patch_grids],
             "probed_sample_ids": sample_ids,
+            "probe_failures": probe_failures,
             "token_counts": token_counts,
             "representative_token_count": representative_tokens,
         }
