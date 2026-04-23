@@ -258,15 +258,32 @@ def _identity_image(image: Image.Image) -> Image.Image:
 
 
 def _apply_motion_blur(image: Image.Image, kernel_size: int) -> Image.Image:
-    """Apply a simple horizontal motion-blur kernel."""
+    """Apply a horizontal motion-blur kernel of arbitrary odd size.
+
+    PIL's ``ImageFilter.Kernel`` rejects kernels larger than 5x5, so at
+    severity 3 (kernel=7) we implement the uniform horizontal blur directly
+    via a numpy cumsum moving average.
+    """
     k = max(3, int(kernel_size))
     if k % 2 == 0:
         k += 1
-    weights = [0.0] * (k * k)
-    center = k // 2
-    for x in range(k):
-        weights[center * k + x] = 1.0
-    return image.filter(ImageFilter.Kernel((k, k), weights, scale=float(k)))
+
+    arr = np.asarray(image)
+    squeezed = False
+    if arr.ndim == 2:
+        arr = arr[..., None]
+        squeezed = True
+    pad = k // 2
+    padded = np.pad(arr.astype(np.float32), ((0, 0), (pad, pad), (0, 0)), mode="edge")
+    cs = np.cumsum(padded, axis=1)
+    cs = np.concatenate(
+        [np.zeros((cs.shape[0], 1, cs.shape[2]), dtype=cs.dtype), cs], axis=1
+    )
+    blurred = (cs[:, k:, :] - cs[:, :-k, :]) / float(k)
+    blurred = np.clip(blurred, 0.0, 255.0).astype(np.uint8)
+    if squeezed:
+        blurred = blurred[..., 0]
+    return Image.fromarray(blurred, mode=image.mode)
 
 
 def _apply_occlusion(
