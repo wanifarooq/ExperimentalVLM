@@ -18,7 +18,11 @@ from ..analysis.continuous import (
 )
 from ..analysis.gate_thresholds import GATES
 from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
-from ..analysis.spectral import compute_spectral_overlap, compute_spectral_overlap_linear
+from ..analysis.spectral import (
+    compute_overlap_integral,
+    compute_spectral_overlap,
+    compute_spectral_overlap_linear,
+)
 from ..analysis.statistics import bootstrap_ci, pearson_correlation, spearman_correlation
 from ..data.base import ALL_VQA_LEVEL_NAMES, ExperimentResult
 from ..utils.exp2_filters import load_exp2_filter_bank
@@ -128,6 +132,7 @@ def _build_overlap_pairs(
             "predicted": [],
             "predicted_quadratic": [],
             "predicted_linear": [],
+            "predicted_first_order": [],
             "complexity_score": [],
             "question_complexity_score": [],
             "prompt_complexity_score": [],
@@ -175,6 +180,7 @@ def _build_overlap_pairs(
                 loglik_volatility = abs(loglik_drift)
                 predicted_quadratic = compute_spectral_overlap(W_t, delta_f)
                 predicted_linear = compute_spectral_overlap_linear(W_t, delta_f)
+                predicted_first_order = compute_overlap_integral(W_t, delta_f)
 
                 pair = {
                     "image_id": image_id,
@@ -183,6 +189,7 @@ def _build_overlap_pairs(
                     "predicted": predicted_quadratic,
                     "predicted_quadratic": predicted_quadratic,
                     "predicted_linear": predicted_linear,
+                    "predicted_first_order": predicted_first_order,
                     "actual": accuracy_drop,
                     "accuracy_drop": accuracy_drop,
                     "loglik_erosion": loglik_erosion,
@@ -205,6 +212,7 @@ def _build_overlap_pairs(
                 grouped[key]["predicted"].append(predicted_quadratic)
                 grouped[key]["predicted_quadratic"].append(predicted_quadratic)
                 grouped[key]["predicted_linear"].append(predicted_linear)
+                grouped[key]["predicted_first_order"].append(predicted_first_order)
                 grouped[key]["complexity_score"].append(complexity_score)
                 grouped[key]["question_complexity_score"].append(question_complexity_score)
                 grouped[key]["prompt_complexity_score"].append(prompt_complexity_score)
@@ -237,6 +245,7 @@ def _build_overlap_pairs(
                 "predicted": float(np.mean(values["predicted"])),
                 "predicted_quadratic": float(np.mean(values["predicted_quadratic"])),
                 "predicted_linear": float(np.mean(values["predicted_linear"])),
+                "predicted_first_order": float(np.mean(values["predicted_first_order"])),
                 "complexity_score": float(np.mean(values["complexity_score"])),
                 "question_complexity_score": float(np.mean(values["question_complexity_score"])),
                 "prompt_complexity_score": float(np.mean(values["prompt_complexity_score"])),
@@ -303,6 +312,7 @@ def _overlap_variant_correlations(
     variants = {
         "quadratic": "predicted_quadratic",
         "linear": "predicted_linear",
+        "first_order": "predicted_first_order",
     }
     payload: Dict[str, Dict[str, Any]] = {}
     for variant_name, predicted_key in variants.items():
@@ -1148,6 +1158,56 @@ def run_exp5(
         for source_name in ("image_space", "vision_feature_space")
         if analyses.get(source_name)
     )
+
+    # --- First-order overlap table: rows = perturbation families, cols = levels ---
+    # Built from raw_grouped_pairs of the primary analysis group ("overall") for each
+    # source. Gives a clean lookup for plots and downstream gates.
+    first_order_tables: Dict[str, Any] = {}
+    for source_name, source_analyses in analyses.items():
+        primary = source_analyses.get(primary_group)
+        if primary is None:
+            continue
+        raw_pairs = primary.get("raw_grouped_pairs") or []
+        levels_seen: List[str] = []
+        perts_seen: List[str] = []
+        cell_values: Dict[Tuple[str, str], Dict[str, float]] = {}
+        for row in raw_pairs:
+            level_key = str(row.get("level"))
+            pert_name = str(row.get("perturbation"))
+            if level_key not in levels_seen:
+                levels_seen.append(level_key)
+            if pert_name not in perts_seen:
+                perts_seen.append(pert_name)
+            cell_values[(level_key, pert_name)] = {
+                "first_order": float(row.get("predicted_first_order", 0.0) or 0.0),
+                "linear": float(row.get("predicted_linear", 0.0) or 0.0),
+                "quadratic": float(row.get("predicted_quadratic", 0.0) or 0.0),
+                "mean_loglik_drift": float(row.get("mean_loglik_drift", 0.0) or 0.0),
+                "mean_loglik_volatility": float(row.get("mean_loglik_volatility", 0.0) or 0.0),
+                "mean_accuracy_drop": float(row.get("accuracy_drop", 0.0) or 0.0),
+                "n": int(row.get("n", 0) or 0),
+            }
+
+        ordered_levels = [lk for lk in ALL_VQA_LEVEL_NAMES if lk in levels_seen]
+        ordered_perts = list(perts_seen)
+
+        matrix_first_order = [
+            [cell_values.get((lk, pk), {}).get("first_order", None) for lk in ordered_levels]
+            for pk in ordered_perts
+        ]
+        first_order_tables[source_name] = {
+            "levels": ordered_levels,
+            "perturbations": ordered_perts,
+            "matrix_first_order": matrix_first_order,
+            "cells": {
+                f"{lk}|{pk}": cell_values.get((lk, pk), {})
+                for lk in ordered_levels
+                for pk in ordered_perts
+                if (lk, pk) in cell_values
+            },
+        }
+    if first_order_tables:
+        summary_payload["first_order_overlap_tables"] = first_order_tables
 
     save_json(summary_payload, out_dir / "summary.json")
     save_json(tests_payload, out_dir / "hypothesis_tests.json")

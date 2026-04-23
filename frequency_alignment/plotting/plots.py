@@ -4535,6 +4535,292 @@ def _plot_exp5_per_level_corr_by_source(summary: Dict[str, Any], source_name: st
     )
 
 
+# --- Peak-consolidation / overlap-integral plots (revised theory) -----------
+
+
+def _collect_per_level_shape(
+    exp2_summary: Dict[str, Any],
+    level_keys: Sequence[str],
+    metric_key: str,
+) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    per_level = (exp2_summary or {}).get("per_level", {}) or {}
+    for lk in level_keys:
+        shape = per_level.get(lk, {}).get("shape_metrics") or {}
+        val = shape.get(metric_key)
+        if val is not None:
+            out[lk] = float(val)
+    return out
+
+
+def _plot_exp2_per_level_W_t(summary: Dict[str, Any], out_path: Path) -> None:
+    """Bar plot of W_t(ω) per level, small-multiples across all 8 levels."""
+    per_level = (summary or {}).get("per_level", {}) or {}
+    levels = [lk for lk in ALL_VQA_LEVEL_NAMES if lk in per_level and per_level[lk].get("W_t_average")]
+    if not levels:
+        return
+
+    ncols = 4
+    nrows = int(np.ceil(len(levels) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 2.6 * nrows), squeeze=False)
+    for idx, lk in enumerate(levels):
+        ax = axes[idx // ncols][idx % ncols]
+        w = np.asarray(per_level[lk]["W_t_average"], dtype=np.float64)
+        x = np.arange(w.size)
+        ax.bar(x, w, color=_LEVEL_COLORS.get(lk, "#444"), width=0.85)
+        shape = per_level[lk].get("shape_metrics", {}) or {}
+        top3 = shape.get("top_3_mass")
+        tail = shape.get("tail_mass_fraction")
+        subtitle = []
+        if top3 is not None:
+            subtitle.append(f"top3={top3:.2f}")
+        if tail is not None:
+            subtitle.append(f"tail={tail:.2f}")
+        ax.set_title(
+            f"{_LEVEL_LABELS.get(lk, lk)}\n{' '.join(subtitle)}",
+            fontsize=9,
+        )
+        ax.set_ylim(0, max(0.05, float(np.max(w)) * 1.1))
+        ax.tick_params(labelsize=7)
+        _apply_style(ax)
+    for j in range(len(levels), nrows * ncols):
+        axes[j // ncols][j % ncols].set_visible(False)
+    fig.suptitle("Per-Level W_t(ω) — Peak Consolidation View", y=0.99)
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=2",
+            "Bars=normalised radial attention power per band",
+            "Annotations=top-3 mass fraction, tail mass fraction",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def _plot_exp2_shape_curves(summary: Dict[str, Any], out_path: Path) -> None:
+    """Top-k mass and tail fraction vs level (primary ladder, with wordy overlay)."""
+    primary = [lk for lk in ALL_VQA_LEVEL_NAMES if lk in (LEVEL_VIEWS["primary"] or set())]
+    wordy = [lk for lk in ALL_VQA_LEVEL_NAMES if lk in (LEVEL_VIEWS["wordy"] or set())]
+    metrics = [
+        ("top_3_mass", "Top-3 Mass", "#2ca02c"),
+        ("top_2_mass", "Top-2 Mass", "#1f77b4"),
+        ("tail_mass_fraction", "High-Freq Tail Mass", "#d62728"),
+        ("centroid_normalised", "Centroid (normalised)", "#7f7f7f"),
+    ]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4 * len(metrics), 3.2), squeeze=False)
+    for col, (metric_key, ylabel, color) in enumerate(metrics):
+        ax = axes[0][col]
+        primary_vals = _collect_per_level_shape(summary, primary, metric_key)
+        wordy_vals = _collect_per_level_shape(summary, wordy, metric_key)
+        if primary_vals:
+            xp = list(range(len(primary)))
+            yp = [primary_vals.get(lk, np.nan) for lk in primary]
+            ax.plot(xp, yp, "-o", color=color, label="Primary L1..L4")
+            ax.set_xticks(xp)
+            ax.set_xticklabels([lk.split("_")[0] for lk in primary], fontsize=8)
+        if wordy_vals:
+            xw = list(range(len(wordy)))
+            yw = [wordy_vals.get(lk, np.nan) for lk in wordy]
+            ax.plot(xw, yw, "--s", color=color, alpha=0.6, label="Wordy L5..L8")
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.set_title(ylabel, fontsize=10)
+        ax.legend(fontsize=7, loc="best")
+        _apply_style(ax)
+    fig.suptitle("Filter Shape vs Granularity (Peak-Consolidation Signature)", y=1.02)
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=2",
+            "Lines=primary L1..L4 and wordy L5..L8 ladders",
+            "Prediction=top-3 mass drops, top-2 rises, tail rises, centroid barely moves",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def _plot_exp2_wordy_convergence(summary: Dict[str, Any], out_path: Path) -> None:
+    """Per-layer-group centroid / top-k delta between wordy and base pairs."""
+    per_level = (summary or {}).get("per_level", {}) or {}
+    if not per_level:
+        return
+    primary = [lk for lk in ALL_VQA_LEVEL_NAMES if lk in (LEVEL_VIEWS["primary"] or set()) and lk in per_level]
+    wordy = [lk for lk in ALL_VQA_LEVEL_NAMES if lk in (LEVEL_VIEWS["wordy"] or set()) and lk in per_level]
+    pairs = list(zip(primary, wordy))
+    if not pairs:
+        return
+
+    group_order = _FILTER_ANALYSIS_ORDER[1:]  # drop "overall"
+    metrics = [
+        ("centroid_normalised", "Δ Centroid (wordy − base)"),
+        ("top_3_mass", "Δ Top-3 Mass"),
+        ("tail_mass_fraction", "Δ Tail Mass"),
+    ]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4.2 * len(metrics), 3.2), squeeze=False)
+    for col, (metric_key, title) in enumerate(metrics):
+        ax = axes[0][col]
+        for pair_idx, (base_lk, wordy_lk) in enumerate(pairs):
+            deltas = []
+            for grp in group_order:
+                base_entry = per_level.get(base_lk, {}).get("layer_groups", {}).get(grp, {})
+                wordy_entry = per_level.get(wordy_lk, {}).get("layer_groups", {}).get(grp, {})
+                b = (base_entry.get("shape_metrics") or {}).get(metric_key)
+                w = (wordy_entry.get("shape_metrics") or {}).get(metric_key)
+                if b is None or w is None:
+                    deltas.append(np.nan)
+                else:
+                    deltas.append(float(w) - float(b))
+            ax.plot(
+                list(range(len(group_order))),
+                deltas,
+                "-o",
+                label=f"{base_lk.split('_')[0]}→{wordy_lk.split('_')[0]}",
+                color=_LEVEL_COLORS.get(wordy_lk, "#444"),
+            )
+        ax.axhline(0.0, color="black", linewidth=0.7, linestyle=":")
+        ax.set_xticks(list(range(len(group_order))))
+        ax.set_xticklabels(group_order)
+        ax.set_title(title, fontsize=10)
+        ax.legend(fontsize=7, loc="best")
+        _apply_style(ax)
+    fig.suptitle("Wordy Convergence Across Layer Groups (Δ = Wordy − Base)", y=1.02)
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=2",
+            "Lines=one per (base, wordy) pair",
+            "Prediction=|Δ| large in early layers, shrinks towards late layers",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def _plot_exp5_overlap_integral_heatmap(
+    exp5_summary: Dict[str, Any],
+    source_name: str,
+    out_path: Path,
+) -> None:
+    """Heatmap of first-order overlap integral ⟨W_t, ΔF⟩ per (level, perturbation)."""
+    tables = (exp5_summary or {}).get("first_order_overlap_tables", {}) or {}
+    entry = tables.get(source_name)
+    if not entry:
+        return
+    levels = list(entry.get("levels", []))
+    perts = list(entry.get("perturbations", []))
+    matrix = entry.get("matrix_first_order", [])
+    if not levels or not perts or not matrix:
+        return
+
+    arr = np.array(
+        [[np.nan if v is None else float(v) for v in row] for row in matrix],
+        dtype=np.float64,
+    )
+    fig, ax = plt.subplots(figsize=(max(5, 0.7 * len(levels) + 2), max(3.2, 0.3 * len(perts) + 1.5)))
+    im = ax.imshow(arr, aspect="auto", cmap="viridis")
+    ax.set_xticks(list(range(len(levels))))
+    ax.set_xticklabels([lk.split("_")[0] for lk in levels], fontsize=9)
+    ax.set_yticks(list(range(len(perts))))
+    ax.set_yticklabels(perts, fontsize=7)
+    ax.set_title(f"First-Order Overlap ⟨W_t, ΔF⟩ — {_exp5_source_label(source_name)}")
+    fig.colorbar(im, ax=ax, label="Σ_ω W_t(ω)·ΔF(ω)")
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=5",
+            f"Source={_exp5_source_label(source_name)}",
+            "Cells=first-order overlap integral (theory form)",
+        ),
+    )
+    _tight_layout(fig, metadata_bottom=0.12)
+    _save_fig(fig, out_path)
+
+
+def _plot_exp5_first_order_overlap_vs_drift(
+    exp5_summary: Dict[str, Any],
+    source_name: str,
+    out_path: Path,
+) -> None:
+    """Scatter of first-order overlap vs mean loglik drift, coloured by level."""
+    tables = (exp5_summary or {}).get("first_order_overlap_tables", {}) or {}
+    entry = tables.get(source_name)
+    cells = (entry or {}).get("cells", {})
+    if not cells:
+        return
+    xs: List[float] = []
+    ys: List[float] = []
+    colors: List[str] = []
+    labels_used: Set[str] = set()
+    fig, ax = plt.subplots(figsize=(5.6, 4.4))
+    for cell_key, cell in cells.items():
+        level = cell_key.split("|", 1)[0]
+        x = cell.get("first_order")
+        y = cell.get("mean_loglik_drift")
+        if x is None or y is None:
+            continue
+        xs.append(float(x))
+        ys.append(float(y))
+        color = _LEVEL_COLORS.get(level, "#333")
+        colors.append(color)
+        if level not in labels_used:
+            ax.scatter([], [], color=color, label=_LEVEL_LABELS.get(level, level))
+            labels_used.add(level)
+    if not xs:
+        return
+    ax.scatter(xs, ys, c=colors, alpha=0.8, s=40, edgecolors="white", linewidths=0.5)
+    # Linear fit line
+    if len(xs) >= 3:
+        coefs = np.polyfit(xs, ys, 1)
+        xgrid = np.linspace(min(xs), max(xs), 50)
+        ax.plot(xgrid, coefs[0] * xgrid + coefs[1], "k--", alpha=0.5, linewidth=1.0)
+        # Pearson r
+        r = float(np.corrcoef(xs, ys)[0, 1]) if len(xs) >= 2 else 0.0
+        ax.set_title(f"Drift vs First-Order Overlap — {_exp5_source_label(source_name)}  (r={r:.2f}, n={len(xs)})")
+    else:
+        ax.set_title(f"Drift vs First-Order Overlap — {_exp5_source_label(source_name)}")
+    ax.set_xlabel("First-order overlap Σ W_t(ω)·ΔF(ω)")
+    ax.set_ylabel("Mean log-likelihood drift")
+    ax.legend(fontsize=7, loc="best")
+    _apply_style(ax)
+    _set_plot_metadata(
+        fig,
+        _metadata_lines(
+            "Experiment=5",
+            f"Source={_exp5_source_label(source_name)}",
+            "Points=one per (level, perturbation family) grouped pair",
+        ),
+    )
+    _tight_layout(fig)
+    _save_fig(fig, out_path)
+
+
+def _generate_theory_refresh_plots(
+    results_dir: Path,
+    plots_dir: Path,
+    exp2_summary: Optional[Dict[str, Any]],
+    exp5_summary: Optional[Dict[str, Any]],
+) -> None:
+    """Dispatcher for the five peak-consolidation / overlap plots."""
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    if exp2_summary:
+        _plot_exp2_per_level_W_t(exp2_summary, plots_dir / "exp2_per_level_W_t.png")
+        _plot_exp2_shape_curves(exp2_summary, plots_dir / "exp2_shape_curves.png")
+        _plot_exp2_wordy_convergence(exp2_summary, plots_dir / "exp2_wordy_convergence.png")
+    if exp5_summary:
+        for source_name in ("image_space", "vision_feature_space"):
+            _plot_exp5_overlap_integral_heatmap(
+                exp5_summary,
+                source_name,
+                plots_dir / f"exp5_overlap_integral_heatmap_{source_name}.png",
+            )
+            _plot_exp5_first_order_overlap_vs_drift(
+                exp5_summary,
+                source_name,
+                plots_dir / f"exp5_first_order_overlap_vs_drift_{source_name}.png",
+            )
+
+
 def _generate_primary_l1_l4_plots(
     results_dir: Path,
     config: Optional[Dict[str, Any]],
@@ -4899,6 +5185,8 @@ def _generate_primary_l1_l4_plots(
         exp2_complexity=exp2_complexity,
         exp2_tests=exp2_tests,
     )
+
+    _generate_theory_refresh_plots(results_dir, primary_dir, exp2_summary, exp5_summary)
 
     entries = [copy.deepcopy(entry) for entry in _PLOT_MANIFEST[manifest_start:]]
     _write_plot_manifest_entries(primary_dir, profile, entries)
@@ -7193,6 +7481,8 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             "vision_feature_space",
             plots_dir / "exp5_per_level_correlation_vision_groups.png",
         )
+        # Peak-consolidation / first-order overlap plots (revised theory)
+        _generate_theory_refresh_plots(results_dir, plots_dir, exp2_summary, exp5_summary)
         if exp5_sample_by_group_and_target:
             primary_group = exp5_summary.get("primary_group", "late")
             primary_target = exp5_summary.get("primary_target", "accuracy_drop")

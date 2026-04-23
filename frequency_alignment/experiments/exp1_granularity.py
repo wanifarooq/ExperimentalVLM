@@ -906,6 +906,44 @@ def _run_hypothesis_tests(
             "passed": wordy_tau > GATES["monotonicity_kendall_tau_min"],
         }
 
+    # Wordy-vs-base drift volatility split (revised Theorem 4 prediction).
+    # Under the peak-consolidation / prompt-length-prior story, wordy prompts
+    # relocate filter mass off-DC, reducing overlap with low-freq-dominated
+    # perturbations and therefore shrinking per-sample drift volatility.
+    primary_present_levels = [
+        lk for lk in ALL_VQA_LEVEL_NAMES
+        if lk in (LEVEL_VIEWS["primary"] or set()) and lk in per_level
+    ]
+    wordy_order = [
+        lk for lk in ALL_VQA_LEVEL_NAMES
+        if lk in (LEVEL_VIEWS["wordy"] or set()) and lk in per_level
+    ]
+    volatility_pairs: Dict[str, Any] = {}
+    if primary_present_levels and wordy_order:
+        pair_ratios: List[float] = []
+        for base_lk, wordy_lk in zip(primary_present_levels, wordy_order):
+            base_std = float(per_level.get(base_lk, {}).get("std_loglik_drift", 0.0) or 0.0)
+            wordy_std = float(per_level.get(wordy_lk, {}).get("std_loglik_drift", 0.0) or 0.0)
+            if base_std <= 0.0:
+                continue
+            var_ratio = (wordy_std ** 2) / (base_std ** 2)
+            pair_ratios.append(var_ratio)
+            volatility_pairs[f"{base_lk}__vs__{wordy_lk}"] = {
+                "base_std_loglik_drift": base_std,
+                "wordy_std_loglik_drift": wordy_std,
+                "variance_ratio_wordy_over_base": var_ratio,
+                "passed": bool(var_ratio < 1.0),
+            }
+        if pair_ratios:
+            mean_ratio = float(np.mean(pair_ratios))
+            tests["wordy_volatility_reduction"] = {
+                "per_pair": volatility_pairs,
+                "mean_variance_ratio_wordy_over_base": mean_ratio,
+                "num_pairs": len(pair_ratios),
+                "target": "mean_variance_ratio_wordy_over_base < 1.0",
+                "passed": bool(mean_ratio < 1.0),
+            }
+
     # H3: ANOVA across levels — are the groups significantly different?
     # Collect per-perturbation drops grouped by level
     per_level_all_drops: Dict[str, List[float]] = defaultdict(list)

@@ -41,6 +41,7 @@ from ..analysis.spectral import (
     compute_attention_power_spectrum_by_layer,
     compute_attention_power_spectrum_multi,
     compute_effective_bandwidth,
+    compute_filter_shape_metrics,
     compute_filter_W_t,
     spectral_vector_length,
 )
@@ -672,6 +673,7 @@ def run_exp2(
             "mean_radial_power": mean_radial.tolist(),
             "W_t_average": W_t_avg.tolist(),
             "W_t_average_l2": W_t_avg_l2.tolist(),
+            "shape_metrics": compute_filter_shape_metrics(W_t_avg),
             "num_samples": len(bws),
             "layer_groups": {},
         }
@@ -695,6 +697,7 @@ def run_exp2(
                 "mean_radial_power": group_mean_radial.tolist(),
                 "W_t_average": group_W_t.tolist(),
                 "W_t_average_l2": group_W_t_l2.tolist(),
+                "shape_metrics": compute_filter_shape_metrics(group_W_t),
                 "num_samples": len(group_bws),
             }
 
@@ -712,6 +715,7 @@ def run_exp2(
                 "median_bandwidth": float(np.median(control_bws)),
                 "mean_radial_power": control_mean_radial.tolist(),
                 "W_t_average": control_W_t.tolist(),
+                "shape_metrics": compute_filter_shape_metrics(control_W_t),
                 "mean_js_divergence_to_task": float(
                     np.mean(level_control_divergences[control_name]["js_divergence"][lk])
                 ),
@@ -746,6 +750,7 @@ def run_exp2(
                     "median_bandwidth": float(np.median(group_bws)),
                     "mean_radial_power": group_mean_radial.tolist(),
                     "W_t_average": group_W_t.tolist(),
+                    "shape_metrics": compute_filter_shape_metrics(group_W_t),
                     "mean_js_divergence_to_task": float(
                         np.mean(
                             level_control_group_divergences[control_name][group_name]["js_divergence"][lk]
@@ -941,6 +946,112 @@ def run_exp2(
             "passed": rho < -GATES["secondary_spearman_rho_min"],
             "values": dict(zip(wordy_present_levels, mean_bws)),
         }
+
+    # --- Peak-consolidation / tail-growth shape tests (revised Theorem 2) ---
+    def _shape_series(level_keys: List[str], metric_key: str) -> List[float]:
+        out: List[float] = []
+        for lk in level_keys:
+            shape = agg["per_level"].get(lk, {}).get("shape_metrics", {}) or {}
+            out.append(float(shape.get(metric_key, 0.0)))
+        return out
+
+    shape_tests: Dict[str, Any] = {}
+    if len(primary_present_levels) >= 2:
+        ranks = list(range(1, len(primary_present_levels) + 1))
+
+        top3_series = _shape_series(primary_present_levels, "top_3_mass")
+        rho_t3, p_t3 = spearman_correlation(ranks, top3_series)
+        shape_tests["spearman_top3_mass_vs_granularity"] = {
+            "rho": rho_t3,
+            "p_value": p_t3,
+            "target": "rho < 0 (top-3 mass drops as granularity increases; peak consolidation)",
+            "passed": rho_t3 < 0.0,
+            "values": dict(zip(primary_present_levels, top3_series)),
+        }
+
+        top2_series = _shape_series(primary_present_levels, "top_2_mass")
+        rho_t2, p_t2 = spearman_correlation(ranks, top2_series)
+        shape_tests["spearman_top2_mass_vs_granularity"] = {
+            "rho": rho_t2,
+            "p_value": p_t2,
+            "target": "rho > 0 (top-2 mass rises as mass consolidates into fewer peaks)",
+            "passed": rho_t2 > 0.0,
+            "values": dict(zip(primary_present_levels, top2_series)),
+        }
+
+        tail_series = _shape_series(primary_present_levels, "tail_mass_fraction")
+        rho_tail, p_tail = spearman_correlation(ranks, tail_series)
+        shape_tests["spearman_tail_mass_vs_granularity"] = {
+            "rho": rho_tail,
+            "p_value": p_tail,
+            "target": "rho > 0 (high-freq tail grows as granularity increases)",
+            "passed": rho_tail > 0.0,
+            "values": dict(zip(primary_present_levels, tail_series)),
+        }
+
+        centroid_series = _shape_series(primary_present_levels, "centroid_normalised")
+        rho_c, p_c = spearman_correlation(ranks, centroid_series)
+        shape_tests["spearman_centroid_vs_granularity"] = {
+            "rho": rho_c,
+            "p_value": p_c,
+            "target": "informational (centroid shift expected to be small under peak-consolidation)",
+            "passed": None,
+            "values": dict(zip(primary_present_levels, centroid_series)),
+        }
+
+    # --- Wordy convergence: |shape(base) - shape(wordy)| should shrink from early to late layers ---
+    wordy_pairs: List[Tuple[str, str]] = []
+    if LEVEL_VIEWS.get("primary") and LEVEL_VIEWS.get("wordy"):
+        primary_ordered = [lk for lk in present_levels if lk in (LEVEL_VIEWS["primary"] or set())]
+        wordy_ordered = [lk for lk in present_levels if lk in (LEVEL_VIEWS["wordy"] or set())]
+        wordy_pairs = list(zip(primary_ordered, wordy_ordered))
+
+    def _layer_group_shape(level_key: str, group_name: str, metric_key: str) -> Optional[float]:
+        shape = (
+            agg["per_level"].get(level_key, {})
+            .get("layer_groups", {}).get(group_name, {})
+            .get("shape_metrics")
+        )
+        if shape is None:
+            return None
+        return float(shape.get(metric_key, 0.0))
+
+    wordy_convergence: Dict[str, Any] = {}
+    for metric_key in ("top_3_mass", "top_2_mass", "tail_mass_fraction", "centroid_normalised"):
+        per_group_abs_delta: Dict[str, List[float]] = {g: [] for g in LAYER_GROUP_ORDER}
+        per_pair_deltas: Dict[str, Dict[str, float]] = {}
+        for base_lk, wordy_lk in wordy_pairs:
+            pair_entry: Dict[str, float] = {}
+            for group_name in LAYER_GROUP_ORDER:
+                base_val = _layer_group_shape(base_lk, group_name, metric_key)
+                wordy_val = _layer_group_shape(wordy_lk, group_name, metric_key)
+                if base_val is None or wordy_val is None:
+                    continue
+                delta = float(wordy_val - base_val)
+                pair_entry[group_name] = delta
+                per_group_abs_delta[group_name].append(abs(delta))
+            if pair_entry:
+                per_pair_deltas[f"{base_lk}__vs__{wordy_lk}"] = pair_entry
+
+        mean_abs_delta = {
+            g: (float(np.mean(vals)) if vals else None) for g, vals in per_group_abs_delta.items()
+        }
+        early = mean_abs_delta.get("early")
+        late = mean_abs_delta.get("late")
+        passed = None
+        if early is not None and late is not None:
+            passed = bool(late < early)
+        wordy_convergence[metric_key] = {
+            "mean_abs_delta_per_layer_group": mean_abs_delta,
+            "per_pair_deltas": per_pair_deltas,
+            "target": "mean_abs_delta_late < mean_abs_delta_early (wordy over-steer corrects by late layers)",
+            "passed": passed,
+        }
+
+    if shape_tests:
+        tests["shape_consolidation"] = shape_tests
+    if wordy_convergence:
+        tests["wordy_layerwise_convergence"] = wordy_convergence
 
     # H2: ANOVA on bandwidths across levels
     groups = [level_bandwidths[lk] for lk in primary_present_levels if level_bandwidths[lk]]

@@ -606,3 +606,113 @@ def compute_spectral_overlap_linear(
     d = np.asarray(delta_f, dtype=np.float64)
     min_len = min(len(w), len(d))
     return float(np.sum(w[:min_len] * d[:min_len] ** 2))
+
+
+def compute_overlap_integral(
+    W_t: np.ndarray,
+    delta_f: np.ndarray,
+) -> float:
+    """First-order overlap integral matching the theoretical drift form.
+
+    .. math::
+
+        \\langle W_t, \\Delta F \\rangle = \\sum_\\omega W_t(\\omega) \\cdot \\Delta F(\\omega)
+
+    Both factors appear linearly. ``delta_f`` is the radially binned
+    perturbation signature as stored by the pipeline (already non-negative).
+    This is the quantity predicted to drive drift under the
+    peak-consolidation / relocation story.
+    """
+    w = np.asarray(W_t, dtype=np.float64)
+    d = np.asarray(delta_f, dtype=np.float64)
+    min_len = min(len(w), len(d))
+    if min_len == 0:
+        return 0.0
+    return float(np.sum(w[:min_len] * d[:min_len]))
+
+
+def top_k_mass_fraction(
+    W_t: np.ndarray,
+    k: int,
+) -> float:
+    """Return the sum of the ``k`` largest values in ``W_t``.
+
+    ``W_t`` is expected to be an l1-normalised filter (summing to 1). The
+    return value is the cumulative mass captured by the top ``k`` bins and
+    is a direct measure of how peaked the filter is.
+    """
+    w = np.asarray(W_t, dtype=np.float64)
+    if w.size == 0 or k <= 0:
+        return 0.0
+    k_eff = int(min(k, w.size))
+    # np.partition puts the k_eff largest values in the last k_eff positions
+    # without full sort.
+    top = np.partition(w, w.size - k_eff)[-k_eff:]
+    return float(np.sum(top))
+
+
+def tail_mass_fraction(
+    W_t: np.ndarray,
+    split: float = 0.5,
+) -> float:
+    """Return the mass of ``W_t`` lying on bands with index ≥ split·(N-1).
+
+    ``split`` is expressed as a fraction of the band index range; 0.5 means
+    "the upper half of bands." The index convention matches
+    ``spectral_band_centers`` — lower indices are lower frequencies.
+    """
+    w = np.asarray(W_t, dtype=np.float64)
+    if w.size == 0:
+        return 0.0
+    split_frac = float(np.clip(split, 0.0, 1.0))
+    split_idx = int(np.ceil(split_frac * (w.size - 1)))
+    split_idx = max(0, min(split_idx, w.size))
+    return float(np.sum(w[split_idx:]))
+
+
+def spectral_centroid(
+    W_t: np.ndarray,
+) -> float:
+    """First moment of the filter along the band-index axis.
+
+    Returns the mass-weighted mean band index. If ``W_t`` sums to zero the
+    midpoint of the axis is returned (i.e. no information).
+    """
+    w = np.asarray(W_t, dtype=np.float64)
+    if w.size == 0:
+        return 0.0
+    total = float(np.sum(w))
+    if total <= _EPS:
+        return float(w.size - 1) / 2.0
+    idx = np.arange(w.size, dtype=np.float64)
+    return float(np.sum(idx * w) / total)
+
+
+def compute_filter_shape_metrics(
+    W_t: np.ndarray,
+    *,
+    top_ks: Tuple[int, ...] = (1, 2, 3, 5),
+    tail_split: float = 0.5,
+) -> Dict[str, float]:
+    """Bundle of shape descriptors for a filter W_t.
+
+    Returns peak concentration (``top_k_mass``), high-frequency tail mass
+    (``tail_mass_fraction``), spectral centroid (``centroid_index``), and the
+    normalised centroid (``centroid_normalised``, in [0, 1] by dividing by
+    ``num_bands-1``). These three together let us discriminate pure
+    narrowing, relocation, and peak-consolidation scenarios without having
+    to inspect the full W_t vector.
+    """
+    w = np.asarray(W_t, dtype=np.float64)
+    num_bands = int(w.size)
+    denom_bands = max(1, num_bands - 1)
+    metrics: Dict[str, float] = {
+        "num_bands": num_bands,
+        "tail_mass_fraction": tail_mass_fraction(w, split=tail_split),
+        "tail_split_fraction": float(tail_split),
+        "centroid_index": spectral_centroid(w),
+    }
+    metrics["centroid_normalised"] = metrics["centroid_index"] / float(denom_bands)
+    for k in top_ks:
+        metrics[f"top_{int(k)}_mass"] = top_k_mass_fraction(w, int(k))
+    return metrics
