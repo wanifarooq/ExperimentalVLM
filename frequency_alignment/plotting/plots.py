@@ -5186,7 +5186,12 @@ def _generate_primary_l1_l4_plots(
         exp2_tests=exp2_tests,
     )
 
-    _generate_theory_refresh_plots(results_dir, primary_dir, exp2_summary, exp5_summary)
+    exp5_summary_for_theory_refresh = _filter_summary_to_levels(
+        _load_json(results_dir / "exp5" / "summary.json")
+    )
+    _generate_theory_refresh_plots(
+        results_dir, primary_dir, exp2_summary, exp5_summary_for_theory_refresh,
+    )
 
     entries = [copy.deepcopy(entry) for entry in _PLOT_MANIFEST[manifest_start:]]
     _write_plot_manifest_entries(primary_dir, profile, entries)
