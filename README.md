@@ -19,6 +19,8 @@ For the scientific design, math, experiments, gates, and plot catalogue, see `fu
 
 For commands, configs, outputs, and troubleshooting, see `frequency_alignment/experiment_run.md`.
 
+For the paper, slides, and a structured literature review, see `paper/main.tex`, `paper/slides.tex`, and `paper/LITERATURE.md`.
+
 ## Features
 - Compare predictions across perturbations with MCQ log-likelihood scoring or free-text representations (`label`, `text`, `text_mcq`, `semantic` placeholder).
 - Perturbations: translation, pad/crop, scale, scale+pad (black/white), text overlays, rotation.
