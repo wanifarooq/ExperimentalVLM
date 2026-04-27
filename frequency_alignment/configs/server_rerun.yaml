@@ -1,8 +1,10 @@
-# Server follow-up ablation after the 2026-04-22 500-sample smoke run.
+# Server follow-up after the 2026-04-22 500-sample smoke run.
 # Differences vs server_severity1.yaml:
-#   - analysis.suppress_dc: true       (Exp 3 profiles were 0.80-0.96 DC-pinned; Exp 5 image-space r=0.21)
 #   - perturbations.severity_levels: [1, 2, 3]  (Exp 4 ω_c* was pinned at Nyquist under severity 1 alone)
 #   - experiments.exp6.enabled: false  (user keeps segmentation leg silent; matches prior-run CLI choice)
+# DC convention: suppress_dc: false (DC ON), matching the canonical setting after the 2026-04-23
+# 200-sample paired ablation (DC ON Exp 5 r=0.471 vs DC OFF r=0.055). The earlier suppress_dc: true
+# experiment is retained only as a diagnostic ablation; do not use it as the production setting.
 # Everything else mirrors default.yaml so the run remains comparable.
 #
 # Intended use:
@@ -127,7 +129,7 @@ analysis:
     statistic: median
     min_bands: 14
     max_bands: 30
-  suppress_dc: true
+  suppress_dc: false
   attention_layers: all
   attention_fft_window: none
   significance_level: 0.05

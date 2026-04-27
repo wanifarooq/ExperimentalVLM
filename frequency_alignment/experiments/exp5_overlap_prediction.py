@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 FILTER_ANALYSIS_ORDER = ("overall",) + LAYER_GROUP_ORDER
 PRIMARY_TARGET = "loglik_volatility"
+PRIMARY_OVERLAP_VARIANT = "first_order"
 TARGET_SPECS: Dict[str, Dict[str, Any]] = {
     "accuracy_drop": {
         "grouped_key": "accuracy_drop",
@@ -67,6 +68,14 @@ TARGET_SPECS: Dict[str, Dict[str, Any]] = {
 }
 TARGET_ORDER = tuple(TARGET_SPECS.keys())
 _EPS = 1e-8
+
+
+def _perturbation_family_name(name: Any) -> str:
+    """Stable perturbation family label, independent of severity/parameters."""
+    text = str(name or "unknown")
+    text = text.split("|sev", 1)[0]
+    text = text.split("(", 1)[0]
+    return text.strip() or "unknown"
 
 
 def _build_source_specs(primary_normalization: str) -> List[Dict[str, str]]:
@@ -127,7 +136,7 @@ def _build_overlap_pairs(
     exp1_records = _load_jsonl(exp1_out_dir / "per_sample.jsonl")
 
     sample_pairs: List[Dict[str, Any]] = []
-    grouped: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(
+    grouped: Dict[Tuple[str, str, str], Dict[str, Any]] = defaultdict(
         lambda: {
             "predicted": [],
             "predicted_quadratic": [],
@@ -165,6 +174,8 @@ def _build_overlap_pairs(
 
             clean_correct = float(bool(level_data.get("clean", {}).get("correct", False)))
             for perturbation in level_data.get("perturbations", []):
+                perturbation_name = perturbation.get("name", "unknown")
+                perturbation_family = _perturbation_family_name(perturbation_name)
                 delta_f = np.asarray(perturbation.get(delta_key) or [], dtype=np.float64)
                 if delta_f.size == 0:
                     continue
@@ -185,8 +196,9 @@ def _build_overlap_pairs(
                 pair = {
                     "image_id": image_id,
                     "level": level_key,
-                    "perturbation": perturbation.get("name", "unknown"),
-                    "predicted": predicted_quadratic,
+                    "perturbation": perturbation_name,
+                    "perturbation_family": perturbation_family,
+                    "predicted": predicted_first_order,
                     "predicted_quadratic": predicted_quadratic,
                     "predicted_linear": predicted_linear,
                     "predicted_first_order": predicted_first_order,
@@ -208,8 +220,8 @@ def _build_overlap_pairs(
                 }
                 sample_pairs.append(pair)
 
-                key = (level_key, pair["perturbation"])
-                grouped[key]["predicted"].append(predicted_quadratic)
+                key = (image_id, level_key, perturbation_family)
+                grouped[key]["predicted"].append(predicted_first_order)
                 grouped[key]["predicted_quadratic"].append(predicted_quadratic)
                 grouped[key]["predicted_linear"].append(predicted_linear)
                 grouped[key]["predicted_first_order"].append(predicted_first_order)
@@ -229,7 +241,7 @@ def _build_overlap_pairs(
                 grouped[key]["ic"].append(ic)
 
     grouped_pairs: List[Dict[str, Any]] = []
-    for (level_key, perturbation), values in sorted(grouped.items()):
+    for (image_id, level_key, perturbation_family), values in sorted(grouped.items()):
         clean_accuracy = float(np.mean(values["clean_correct"]))
         perturbed_accuracy = float(np.mean(values["perturbed_correct"]))
         net_drop = float(np.mean(values["net_change"]))
@@ -239,9 +251,11 @@ def _build_overlap_pairs(
 
         grouped_pairs.append(
             {
-                "label": f"{level_key}|{perturbation}",
+                "label": f"{image_id}|{level_key}|{perturbation_family}",
+                "image_id": image_id,
                 "level": level_key,
-                "perturbation": perturbation,
+                "perturbation": perturbation_family,
+                "perturbation_family": perturbation_family,
                 "predicted": float(np.mean(values["predicted"])),
                 "predicted_quadratic": float(np.mean(values["predicted_quadratic"])),
                 "predicted_linear": float(np.mean(values["predicted_linear"])),
@@ -583,10 +597,13 @@ def _summarize_prediction_factor_horse_race(
             level_filter=level_filter,
         )
     return {
-        "description": "Multivariate horse race for observed target: spectral overlap vs raw semantic complexity, prompt load, and option hardness.",
+        "description": (
+            "Multivariate horse race for observed target: first-order spectral overlap "
+            "vs raw semantic complexity, prompt load, and option hardness."
+        ),
         "outcome": y_key,
         "predictors": predictors,
-        "prediction_transform": "zscore(log1p(predicted_overlap))",
+        "prediction_transform": "zscore(log1p(predicted_first_order_overlap))",
         "n_candidate_rows": len(rows),
         "predicted_log1p_mean": float(pred_mean),
         "predicted_log1p_std": float(pred_std),
@@ -685,7 +702,7 @@ def _summarize_target(
     if pearson_ci is not None:
         tests["pearson_grouped_bootstrap_ci"] = pearson_ci
     aggregation_note = (
-        "Points are perturbation families averaged within (image_id, level); "
+        "Points are perturbation-family means within each (image_id, level); "
         "sample-level r available separately."
     )
     tests["pearson_predicted_vs_actual_grouped"]["aggregation_level"] = (
@@ -764,6 +781,8 @@ def _summarize_target(
     summary = {
         "target": target_name,
         "label": target_spec["label"],
+        "primary_overlap_variant": PRIMARY_OVERLAP_VARIANT,
+        "primary_predicted_key": "predicted_first_order",
         "aggregation_level": "grouped_perturbation_family",
         "aggregation_note": aggregation_note,
         "n_grouped_pairs": len(grouped_target_pairs),
@@ -976,6 +995,8 @@ def run_exp5(
         "targets": list(TARGET_ORDER),
         "primary_group": primary_group,
         "primary_target": PRIMARY_TARGET,
+        "primary_overlap_variant": PRIMARY_OVERLAP_VARIANT,
+        "primary_predicted_key": "predicted_first_order",
         "primary_delta_normalization": primary_normalization,
         "control_groups": control_groups,
         "source_metadata": source_metadata,
@@ -986,6 +1007,8 @@ def run_exp5(
         "targets": list(TARGET_ORDER),
         "primary_group": primary_group,
         "primary_target": PRIMARY_TARGET,
+        "primary_overlap_variant": PRIMARY_OVERLAP_VARIANT,
+        "primary_predicted_key": "predicted_first_order",
         "primary_delta_normalization": primary_normalization,
         "control_groups": control_groups,
         "source_metadata": source_metadata,
@@ -1003,6 +1026,8 @@ def run_exp5(
             "targets": list(TARGET_ORDER),
             "primary_group": primary_group,
             "primary_target": PRIMARY_TARGET,
+            "primary_overlap_variant": PRIMARY_OVERLAP_VARIANT,
+            "primary_predicted_key": "predicted_first_order",
             "domain": source_metadata[source_name]["domain"],
             "delta_normalization": source_metadata[source_name]["normalization"],
             "control_groups": control_groups,
@@ -1019,6 +1044,8 @@ def run_exp5(
             "targets": list(TARGET_ORDER),
             "primary_group": primary_group,
             "primary_target": PRIMARY_TARGET,
+            "primary_overlap_variant": PRIMARY_OVERLAP_VARIANT,
+            "primary_predicted_key": "predicted_first_order",
             "domain": source_metadata[source_name]["domain"],
             "delta_normalization": source_metadata[source_name]["normalization"],
             "control_groups": control_groups,

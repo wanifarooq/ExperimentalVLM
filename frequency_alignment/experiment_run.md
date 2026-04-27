@@ -1,15 +1,17 @@
 # Frequency Alignment Run Guide
 
-Last updated: April 24, 2026.
+Last updated: April 27, 2026.
 
 ## Current Scientific Status
 
-The original hypothesis still stands: language conditioning acts like a task-specific frequency filter `W_t`, and robustness depends on the overlap between `W_t` and perturbation energy. After the 2026-04-22 500-sample smoke run, the theory framing has been refined (see `full_project_explanation.md` status banner):
+The original hypothesis still stands: language conditioning acts like a task-specific frequency filter `W_t`, and robustness depends on the overlap between `W_t` and perturbation energy. After the 2026-04-23 paired 200-sample runs (one DC OFF, one DC ON), the framing has been corrected once more (see `full_project_explanation.md` status banner):
 
-- **Peak consolidation**, not uniform narrowing, is the mechanism behind decreasing `G(t)` with granularity — fewer dominant low-freq peaks, fattened high-freq tail, under mass conservation.
+- **Three-stage layer trajectory.** `W_t` shape is **early = prompt-length prior** (longer prompts → more concentrated filter, levels cluster by token count), **mid = uniform compression** (`G_mid ≈ 2.06–2.59` across all 8 levels), **late = `Csem`-driven downward concentration** (clean granularity ladder, `ρ(G_late, rank) = −1.0`).
+- **Granularity axis = downward concentration.** Late-layer top-2 mass *rises*, tail mass *falls*, `G_late` shrinks with granularity. The earlier "peak consolidation + tail growth" framing is retracted: tail thins, it does not fatten.
+- **Wordiness axis = layer-trajectory asymmetry.** Wordy mirrors start *more* concentrated than their semantic counterparts at early layers (length prior) and end *more* relaxed at late layers (asymmetric relaxation). The wordy↔base gap *grows* with depth, it does not converge — see `exp2/hypothesis_tests.json::wordy_layerwise_divergence` (renamed from the retracted `wordy_layerwise_convergence`).
+- **DC ON is canonical.** The 2026-04-23 paired ablation shows Exp 5 first-order overlap `r = 0.471, p ≈ 10⁻³⁶` with DC ON vs `r = 0.055` with DC OFF. All five configs now use `suppress_dc: false`.
 - **First-order overlap** `⟨W_t, ΔF⟩ = Σ_ω W_t(ω)·ΔF_p(ω)` is the unifying drift predictor (stored in `exp5/summary.json::first_order_overlap_tables`).
-- **Prompt-length prior** (new Theorem 4): wordy prompts trigger premature peak consolidation at shallow layers; layer-wise reconciliation is observable in `exp2/hypothesis_tests.json::wordy_layerwise_convergence`.
-- **Low-freq perturbations dominate drift**; fine tasks are *differentially* more sensitive to high-freq perturbations via the grown tail.
+- **Low-freq perturbations dominate drift.** Both `W_t` (late) and natural `ΔF` concentrate on DC and DC-adjacent bins, which is why DC ON is the load-bearing convention.
 
 Existing two-factor machinery is retained and gains a direct mechanistic reading:
 
@@ -32,15 +34,15 @@ Existing two-factor machinery is retained and gains a direct mechanistic reading
   - Purpose: full experimental runs with vision-token drift enabled.
 - `frequency_alignment/configs/server_severity1.yaml`
   - Same server model as `default.yaml` but `perturbations.severity_levels: [1]` only.
-  - `analysis.suppress_dc: false`.
+  - `analysis.suppress_dc: false` (DC ON, canonical).
   - Used for the 2026-04-22 500-sample first-pass smoke run on the server.
 - `frequency_alignment/configs/server_rerun.yaml` *(introduced 2026-04-23)*
-  - Theory-refresh follow-up ablation.
+  - Multi-severity follow-up.
   - `perturbations.severity_levels: [1, 2, 3]` (Exp 4 cutoff pinning required severity > 1).
-  - `analysis.suppress_dc: true` (DC dominance in Exp 3 was diluting granularity signal).
+  - `analysis.suppress_dc: false` (DC ON, canonical setting after the 2026-04-23 paired ablation).
   - `perturbations.include_frequency: true` (bandpass perturbations restored).
   - `experiments.exp6.enabled: false` (keeps segmentation leg silent in this run).
-  - Intended for verifying the peak-consolidation / prompt-length-prior predictions.
+  - Intended for verifying the three-stage trajectory + first-order overlap predictions at multiple severities.
 
 ## Model Families
 
@@ -177,10 +179,10 @@ python3 -m frequency_alignment.run_experiment \
 - Treats correct-answer `loglik_volatility` as the primary behavioral target. Accuracy drop, erosion, net drop, and relative accuracy drop are still emitted as controls.
 - Treats the `late` filter group as the primary layer-group hypothesis test and the others as controls.
 - Also saves a standardized "comparable bridge" view in parallel with the raw overlap analysis:
-  - prediction uses `zscore(log1p(S_pred))`
+  - prediction uses `zscore(log1p(S_pred_first_order))`
   - observed targets use `zscore(actual)`
   - this is for effect-size comparability and visualization only; the raw overlap metrics remain intact
-- Adds prediction-factor summaries for observed `accuracy_drop`, using `zscore(log1p(S_pred))`, raw `question_complexity_score`, `prompt_complexity_score`, and `option_hardness_score` as predictors. Primary view is marginal-only; wordy/pooled views keep multivariate regressions. This is saved under `prediction_factor_horse_race` and plotted as `exp5_coefficient_plot_prediction_factors*.png`.
+- Adds prediction-factor summaries for observed `accuracy_drop`, using `zscore(log1p(S_pred_first_order))`, raw `question_complexity_score`, `prompt_complexity_score`, and `option_hardness_score` as predictors. Primary view is marginal-only; wordy/pooled views keep multivariate regressions. This is saved under `prediction_factor_horse_race` and plotted as `exp5_coefficient_plot_prediction_factors*.png`.
 - Also tracks whether predicted overlap and calibrated prediction error vary continuously with semantic complexity.
 - Produces level-wise scatter grids and level-by-perturbation predicted-vs-observed plots. These use separate visual scales when prediction and observation magnitudes differ.
 - Produces wordy-control comparison plots for predicted sensitivity and observed behavior.
@@ -263,7 +265,7 @@ nohup python3 -m frequency_alignment.run_experiment \
   --config frequency_alignment/configs/default.yaml \
   -v > frequency_alignment_server.log 2>&1 &
 
-# Theory-refresh rerun (2026-04-24 onward): severities 1..3, suppress_dc=true,
+# Theory-refresh rerun (2026-04-24 onward): severities 1..3, suppress_dc=false,
 # include_frequency=true, exp6 silent
 nohup python3 -m frequency_alignment.run_experiment \
   --experiment all \
@@ -338,35 +340,34 @@ Representative plot families include:
 - `plots/primary_l1_l4/`: duplicate plot suite restricted to the primary `L1-L4` ladder.
 - `exp*_wordy_control_*.png`: matched `L1/L5`, `L2/L6`, `L3/L7`, `L4/L8` comparisons.
 - `exp5_level_perturbation_predicted_vs_observed*.png`: Exp 5 predicted-vs-observed bars by level and perturbation.
-- `exp5_bridge_scatter*.png`: comparable bridge plots using `zscore(log1p(S_pred))` and z-scored observed targets.
+- `exp5_bridge_scatter*.png`: comparable bridge plots using `zscore(log1p(S_pred_first_order))` and z-scored observed targets.
 
 ### Theory-refresh plots (2026-04-24)
 
 These are emitted both to `plots/` and to `plots/primary_l1_l4/` and verify the
-peak-consolidation / prompt-length-prior / overlap-integral predictions:
+downward-concentration / prompt-length-prior / first-order-overlap predictions:
 
-- `exp2_per_level_W_t.png`: 8-panel bar plot of `W_t(ω)` per level (L1–L8) with top-3 and tail-mass annotations. Visual test of peak consolidation.
-- `exp2_shape_curves.png`: top-3 mass, top-2 mass, tail-mass fraction, and normalised centroid vs level, primary + wordy ladders overlaid. Theorem 2 prediction: top-3 ↓, top-2 ↑, tail ↑ as granularity increases; centroid near-flat.
-- `exp2_wordy_convergence.png`: per-layer-group Δ(wordy − base) for all four mirror pairs. Theorem 4 prediction: |Δ| large at `early`, shrinks towards `late`.
-- `exp5_overlap_integral_heatmap_{image_space,vision_feature_space}.png`: heatmap of `⟨W_t, ΔF_p⟩` over (level × perturbation). Verifies the low-freq-perturbations-dominate prediction and the tail-asymmetry on high-freq perturbations.
+- `exp2_per_level_W_t.png`: 8-panel bar plot of `W_t(ω)` per level (L1–L8) with concentration and tail-mass annotations. Visual test of late-layer downward concentration.
+- `exp2_shape_curves.png`: top-3 mass, top-2 mass, tail-mass fraction, and normalised centroid vs level, primary + wordy ladders overlaid. Theorem 2 prediction: late top-2 ↑, late tail ↓, and `G_late` ↓ as granularity increases; top-3 and centroid are informational.
+- `exp2_wordy_divergence.png`: per-layer-group Δ(wordy − base) for all four mirror pairs. Theorem 4 prediction: the absolute wordy/base gap grows from `early` to `late`.
+- `exp5_overlap_integral_heatmap_{image_space,vision_feature_space}.png`: heatmap of `⟨W_t, ΔF_p⟩` over (level × perturbation-family). Verifies the low-freq-perturbations-dominate prediction and the tail-asymmetry on high-freq perturbations.
 - `exp5_first_order_overlap_vs_drift_{source}.png`: scatter of first-order overlap vs mean log-likelihood drift with Pearson r. Primary H1d gate under the revised theory.
 
 ### Theory-refresh gates (2026-04-24)
 
 Added to the existing `hypothesis_tests.json` structure:
 
-- `exp2/hypothesis_tests.json::shape_consolidation.spearman_top3_mass_vs_granularity` — ρ < 0 for peak consolidation.
-- `exp2/hypothesis_tests.json::shape_consolidation.spearman_top2_mass_vs_granularity` — ρ > 0 for peak consolidation.
-- `exp2/hypothesis_tests.json::shape_consolidation.spearman_tail_mass_vs_granularity` — ρ > 0 for tail growth.
-- `exp2/hypothesis_tests.json::shape_consolidation.spearman_centroid_vs_granularity` — informational (prediction: near-zero).
-- `exp2/hypothesis_tests.json::wordy_layerwise_convergence.{top_3_mass,top_2_mass,tail_mass_fraction,centroid_normalised}.passed` — mean |Δ(wordy−base)| shrinks from `early` to `late`.
+- `exp2/hypothesis_tests.json::shape_consolidation.spearman_top2_mass_late_vs_granularity` — ρ > 0 for late-layer downward concentration.
+- `exp2/hypothesis_tests.json::shape_consolidation.spearman_tail_mass_late_vs_granularity` — ρ < 0 for late-layer tail thinning.
+- `exp2/hypothesis_tests.json::shape_consolidation.spearman_top3_mass_vs_granularity` and `spearman_centroid_vs_granularity` — informational, not load-bearing gates.
+- `exp2/hypothesis_tests.json::wordy_layerwise_divergence.{top_3_mass,top_2_mass,tail_mass_fraction,centroid_normalised}.passed` — mean |Δ(wordy−base)| grows from `early` to `late`.
 - `exp1/hypothesis_tests.json::wordy_volatility_reduction.passed` — `Var(loglik_drift | wordy) < Var(loglik_drift | base)` averaged over mirror pairs.
 - `exp5/summary.json::first_order_overlap_tables` — `{levels, perturbations, matrix_first_order, cells}` per source; direct input to the new overlap heatmap plots.
 
 ## Analysis Settings
 
 - `analysis.num_bands_mode: auto` probes the model patch grid and freezes one run-level linear radial bin count. This keeps `W_t`, `delta_f`, `delta_f_vision`, Exp 3 drift spectra, and Exp 5 overlap vectors aligned.
-- `analysis.suppress_dc` controls whether the DC band is included in the actual math. It is `false` in `default.yaml`, `local_test.yaml`, `llava_test.yaml`, and `server_severity1.yaml`; `true` in `server_rerun.yaml` (flipped after Exp 3 DC dominance in the 2026-04-22 run).
+- `analysis.suppress_dc` controls whether the DC band is included in the actual math. It is `false` in `default.yaml`, `local_test.yaml`, `llava_test.yaml`, `server_severity1.yaml`, and `server_rerun.yaml`; `true` should only be used as a diagnostic ablation.
 - `analysis.attention_fft_window` / `experiments.exp2.fft_window` controls optional attention-map windowing before FFT. Current configs set this to `none`.
 - `experiments.exp5.primary_layer_group` defaults to `late`; the code-level Exp 5 primary target is `loglik_volatility`.
 - Complexity scatter plots use `complexity_score_residual` on the x-axis when available and also emit `_csem` copies against raw `complexity_score`.

@@ -69,7 +69,7 @@ _EXP5_TARGET_LABELS = {
     "relative_accuracy_drop": "Relative Accuracy Drop",
 }
 _COEFFICIENT_LABELS = {
-    "predicted_overlap_log1p_z": "Spectral Overlap\nz(log1p S_pred)",
+    "predicted_overlap_log1p_z": "First-Order Overlap\nz(log1p S_pred)",
     "question_complexity_score": "Raw Semantic\nComplexity",
     "complexity_score": "Semantic Complexity",
     "complexity_score_residual": "Residualized\nSemantic Logic",
@@ -230,7 +230,7 @@ def _append_exp5_overlap_aggregation_caption(
         "Grouped r="
         f"{_fmt_r(r_grouped)} (n={_fmt_n(n_grouped)}); "
         f"sample r={_fmt_r(r_sample)} (n={_fmt_n(n_sample)}). "
-        "Points are perturbation families averaged within (image, level)."
+        "Points are perturbation-family means within each (image, level)."
     )
     return metadata_lines
 
@@ -1443,7 +1443,7 @@ def plot_overlap_scatter(
     actuals = np.asarray([item["actual"] for item in scatter_data], dtype=float)
     plot_x = preds
     plot_y = actuals
-    x_label = "Predicted Sensitivity (spectral overlap)"
+    x_label = "Predicted Sensitivity (first-order spectral overlap)"
     displayed_y_label = y_label
     scale_note = None
     scale_mode = str(scale_mode).strip().lower()
@@ -1559,7 +1559,7 @@ def plot_overlap_scatter_grid_by_level(
         actuals = np.asarray([item["actual"] for item in level_points], dtype=float)
         plot_x = preds
         plot_y = actuals
-        x_label = "Predicted Sensitivity (spectral overlap)"
+        x_label = "Predicted Sensitivity (first-order spectral overlap)"
         displayed_y_label = y_label
         if scale_mode == "zscore":
             plot_x = _zscore_for_plot(preds)
@@ -3271,7 +3271,16 @@ def _exp4_sample_cutoffs(
                 correct = mode_data.get("levels", {}).get(level, {}).get("correct_at_cutoff", [])
                 if cutoffs and correct:
                     accuracy = [1.0 if value else 0.0 for value in correct]
-                    row.append(float(compute_critical_cutoff(accuracy, cutoffs, threshold=threshold)))
+                    row.append(
+                        float(
+                            compute_critical_cutoff(
+                                accuracy,
+                                cutoffs,
+                                threshold=threshold,
+                                direction="increasing" if mode == "lowpass" else "decreasing",
+                            )
+                        )
+                    )
                 else:
                     row.append(np.nan)
             if not np.all(np.isnan(row)):
@@ -3286,13 +3295,21 @@ def _select_exp4_samples(records: List[Dict[str, Any]], max_samples: int = 3) ->
     scored: List[Tuple[float, Dict[str, Any]]] = []
     for record in records:
         values = []
-        for mode_data in record.get("modes", {}).values():
+        for mode, mode_data in record.get("modes", {}).items():
             cutoffs = mode_data.get("cutoffs", [])
             for level_data in mode_data.get("levels", {}).values():
                 correct = level_data.get("correct_at_cutoff", [])
                 if cutoffs and correct:
                     accuracy = [1.0 if item else 0.0 for item in correct]
-                    values.append(float(compute_critical_cutoff(accuracy, cutoffs)))
+                    values.append(
+                        float(
+                            compute_critical_cutoff(
+                                accuracy,
+                                cutoffs,
+                                direction="increasing" if mode == "lowpass" else "decreasing",
+                            )
+                        )
+                    )
         if values:
             scored.append((float(np.mean(values)), record))
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -4640,7 +4657,7 @@ def _plot_exp2_shape_curves(summary: Dict[str, Any], out_path: Path) -> None:
     _save_fig(fig, out_path)
 
 
-def _plot_exp2_wordy_convergence(summary: Dict[str, Any], out_path: Path) -> None:
+def _plot_exp2_wordy_divergence(summary: Dict[str, Any], out_path: Path) -> None:
     """Per-layer-group centroid / top-k delta between wordy and base pairs."""
     per_level = (summary or {}).get("per_level", {}) or {}
     if not per_level:
@@ -4806,7 +4823,7 @@ def _generate_theory_refresh_plots(
     if exp2_summary:
         _plot_exp2_per_level_W_t(exp2_summary, plots_dir / "exp2_per_level_W_t.png")
         _plot_exp2_shape_curves(exp2_summary, plots_dir / "exp2_shape_curves.png")
-        _plot_exp2_wordy_convergence(exp2_summary, plots_dir / "exp2_wordy_convergence.png")
+        _plot_exp2_wordy_divergence(exp2_summary, plots_dir / "exp2_wordy_divergence.png")
     if exp5_summary:
         for source_name in ("image_space", "vision_feature_space"):
             _plot_exp5_overlap_integral_heatmap(
@@ -5689,7 +5706,7 @@ def _generate_primary_l1_l4_plots_exp4_exp5(
                 _plot_metadata(
                     experiment="5",
                     what=f"Primary-ladder predicted overlap vs {exp5_primary_target_label}",
-                    aggregation="grouped by level and perturbation",
+                    aggregation="grouped by image, level, and perturbation family",
                     x="predicted spectral overlap S_pred",
                     y=exp5_primary_target_label,
                     note=f"Source={source_label}",
@@ -5708,7 +5725,7 @@ def _generate_primary_l1_l4_plots_exp4_exp5(
                 _plot_metadata(
                     experiment="5",
                     what=f"Primary-ladder comparable bridge for predicted overlap vs {exp5_primary_target_label}",
-                    aggregation="grouped by level and perturbation",
+                    aggregation="grouped by image, level, and perturbation family",
                     x="zscore(log1p(predicted spectral overlap))",
                     y=f"zscore({exp5_primary_target_label.lower()})",
                     profile=profile,
@@ -5724,7 +5741,7 @@ def _generate_primary_l1_l4_plots_exp4_exp5(
                 _plot_metadata(
                     experiment="5",
                     what=f"Primary-ladder predicted overlap vs {exp5_primary_target_label} split by level",
-                    aggregation="grouped by perturbation within each level",
+                    aggregation="grouped by perturbation family within each image and level",
                     x="predicted spectral overlap S_pred",
                     y=exp5_primary_target_label,
                     profile=profile,
@@ -5740,7 +5757,7 @@ def _generate_primary_l1_l4_plots_exp4_exp5(
                 _plot_metadata(
                     experiment="5",
                     what=f"Primary-ladder predicted overlap and observed {exp5_primary_target_label} by level and perturbation",
-                    aggregation="grouped by level and perturbation",
+                    aggregation="grouped by image, level, and perturbation family",
                     x="perturbation type",
                     y=exp5_primary_target_label,
                     profile=profile,
@@ -5830,7 +5847,7 @@ def _generate_primary_l1_l4_plots_exp4_exp5(
                         aggregation="grouped by L1-L4 level and perturbation",
                         x="marginal Pearson r with 95% CI",
                         y="predictor",
-                        note="Predictors are zscore(log1p(S_pred)), raw semantic complexity, prompt load, and option hardness",
+                        note="Predictors are zscore(log1p(S_pred_first_order)), raw semantic complexity, prompt load, and option hardness",
                         profile=profile,
                     )
                 ),
@@ -5947,7 +5964,7 @@ def _generate_primary_l1_l4_plots_exp4_exp5(
                         _plot_metadata(
                             experiment="5",
                             what=f"Primary-ladder predicted overlap vs {target_label}",
-                            aggregation="grouped by level and perturbation",
+                            aggregation="grouped by image, level, and perturbation family",
                             x="predicted spectral overlap S_pred",
                             y=target_label,
                             profile=profile,
@@ -5964,7 +5981,7 @@ def _generate_primary_l1_l4_plots_exp4_exp5(
                         _plot_metadata(
                             experiment="5",
                             what=f"Primary-ladder predicted overlap vs {target_label} split by level",
-                            aggregation="grouped by perturbation within each level",
+                            aggregation="grouped by perturbation family within each image and level",
                             x="predicted spectral overlap S_pred",
                             y=target_label,
                             profile=profile,
@@ -5980,7 +5997,7 @@ def _generate_primary_l1_l4_plots_exp4_exp5(
                         _plot_metadata(
                             experiment="5",
                             what=f"Primary-ladder predicted overlap and observed {target_label} by level and perturbation",
-                            aggregation="grouped by level and perturbation",
+                            aggregation="grouped by image, level, and perturbation family",
                             x="perturbation type",
                             y=target_label,
                             profile=profile,
@@ -7217,7 +7234,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Predicted overlap vs {exp5_primary_target_label}",
-                aggregation="grouped by level and perturbation",
+                aggregation="grouped by image, level, and perturbation family",
                 x="predicted spectral overlap S_pred",
                 y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
@@ -7234,7 +7251,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Comparable-bridge view of predicted overlap vs {exp5_primary_target_label}",
-                aggregation="grouped by level and perturbation",
+                aggregation="grouped by image, level, and perturbation family",
                 x="zscore(log1p(predicted spectral overlap))",
                 y=f"zscore({exp5_primary_target_label.lower()})",
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
@@ -7249,7 +7266,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Predicted overlap vs {exp5_primary_target_label} split by level",
-                aggregation="grouped by perturbation within each level",
+                aggregation="grouped by perturbation family within each image and level",
                 x="predicted spectral overlap S_pred",
                 y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
@@ -7264,7 +7281,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Predicted overlap vs {exp5_primary_target_label} split into primary, wordy, and pooled views",
-                aggregation="grouped by level and perturbation",
+                aggregation="grouped by image, level, and perturbation family",
                 x="predicted spectral overlap S_pred",
                 y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
@@ -7279,7 +7296,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Predicted overlap and observed {exp5_primary_target_label} split by level and perturbation",
-                aggregation="grouped by level and perturbation",
+                aggregation="grouped by image, level, and perturbation family",
                 x="perturbation type",
                 y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('image_space')}; group={exp5_summary.get('primary_group', 'late')}",
@@ -7328,7 +7345,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Predicted overlap vs {exp5_primary_target_label}",
-                aggregation="grouped by level and perturbation",
+                aggregation="grouped by image, level, and perturbation family",
                 x="predicted spectral overlap S_pred",
                 y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
@@ -7345,7 +7362,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Comparable-bridge view of predicted overlap vs {exp5_primary_target_label}",
-                aggregation="grouped by level and perturbation",
+                aggregation="grouped by image, level, and perturbation family",
                 x="zscore(log1p(predicted spectral overlap))",
                 y=f"zscore({exp5_primary_target_label.lower()})",
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}; raw overlap results are still preserved separately",
@@ -7360,7 +7377,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Predicted overlap vs {exp5_primary_target_label} split by level",
-                aggregation="grouped by perturbation within each level",
+                aggregation="grouped by perturbation family within each image and level",
                 x="predicted spectral overlap S_pred",
                 y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
@@ -7375,7 +7392,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Predicted overlap vs {exp5_primary_target_label} split into primary, wordy, and pooled views",
-                aggregation="grouped by level and perturbation",
+                aggregation="grouped by image, level, and perturbation family",
                 x="predicted spectral overlap S_pred",
                 y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
@@ -7390,7 +7407,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
             metadata=_plot_metadata(
                 experiment="5",
                 what=f"Predicted overlap and observed {exp5_primary_target_label} split by level and perturbation",
-                aggregation="grouped by level and perturbation",
+                aggregation="grouped by image, level, and perturbation family",
                 x="perturbation type",
                 y=exp5_primary_target_label,
                 note=f"Source={_exp5_source_label('vision_feature_space')}; group={exp5_summary.get('primary_group', 'late')}",
@@ -7445,10 +7462,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 metadata=_plot_metadata(
                     experiment="5",
                     what="Multivariate horse race predicting observed accuracy drop",
-                    aggregation="grouped by level and perturbation on the primary Exp 5 branch",
+                    aggregation="grouped by image, level, and perturbation family on the primary Exp 5 branch",
                     x="standardized coefficient with 95% CI",
                     y="predictor",
-                    note="Predictors are zscore(log1p(S_pred)), raw semantic complexity, prompt load, and option hardness",
+                    note="Predictors are zscore(log1p(S_pred_first_order)), raw semantic complexity, prompt load, and option hardness",
                     profile=profile,
                 ),
             )
@@ -7466,10 +7483,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 metadata=_plot_metadata(
                     experiment="5",
                     what="Triple-view prediction-factor summary for observed accuracy drop",
-                    aggregation="grouped by level and perturbation on the primary Exp 5 branch",
+                    aggregation="grouped by image, level, and perturbation family on the primary Exp 5 branch",
                     x="primary marginal Pearson r; wordy/pooled standardized coefficient with 95% CI",
                     y="predictor",
-                    note="Predictors are zscore(log1p(S_pred)), raw semantic complexity, prompt load, and option hardness",
+                    note="Predictors are zscore(log1p(S_pred_first_order)), raw semantic complexity, prompt load, and option hardness",
                     profile=profile,
                 ),
             )
@@ -7670,7 +7687,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     metadata=_plot_metadata(
                         experiment="5",
                         what=f"Predicted overlap vs {exp5_primary_target_label}",
-                        aggregation="grouped by level and perturbation",
+                        aggregation="grouped by image, level, and perturbation family",
                         x="predicted spectral overlap S_pred",
                         y=exp5_primary_target_label,
                         note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
@@ -7685,7 +7702,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     metadata=_plot_metadata(
                         experiment="5",
                         what=f"Predicted overlap vs {exp5_primary_target_label} split into primary, wordy, and pooled views",
-                        aggregation="grouped by level and perturbation",
+                        aggregation="grouped by image, level, and perturbation family",
                         x="predicted spectral overlap S_pred",
                         y=exp5_primary_target_label,
                         note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
@@ -7715,7 +7732,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     metadata=_plot_metadata(
                         experiment="5",
                         what=f"Predicted overlap and observed {exp5_primary_target_label} split by level and perturbation",
-                        aggregation="grouped by level and perturbation",
+                        aggregation="grouped by image, level, and perturbation family",
                         x="perturbation type",
                         y=exp5_primary_target_label,
                         note=f"Source={_exp5_source_label(source_name)}; group={group_name}",
@@ -7780,7 +7797,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         metadata=_plot_metadata(
                             experiment="5",
                             what=f"Predicted overlap vs {_exp5_target_label(target_name)}",
-                            aggregation="grouped by level and perturbation",
+                            aggregation="grouped by image, level, and perturbation family",
                             x="predicted spectral overlap S_pred",
                             y=_exp5_target_label(target_name),
                             note=_exp5_target_scale_note(source_name, primary_group, target_name),
@@ -7799,7 +7816,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         metadata=_plot_metadata(
                             experiment="5",
                             what=f"Predicted overlap vs {_exp5_target_label(target_name)} split by level",
-                            aggregation="grouped by perturbation within each level",
+                            aggregation="grouped by perturbation family within each image and level",
                             x="predicted spectral overlap S_pred",
                             y=_exp5_target_label(target_name),
                             note=_exp5_target_scale_note(source_name, primary_group, target_name),
@@ -7817,7 +7834,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         metadata=_plot_metadata(
                             experiment="5",
                             what=f"Predicted overlap vs {_exp5_target_label(target_name)} split into primary, wordy, and pooled views",
-                            aggregation="grouped by level and perturbation",
+                            aggregation="grouped by image, level, and perturbation family",
                             x="predicted spectral overlap S_pred",
                             y=_exp5_target_label(target_name),
                             note=_exp5_target_scale_note(source_name, primary_group, target_name),
@@ -7834,7 +7851,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         metadata=_plot_metadata(
                             experiment="5",
                             what=f"Comparable-bridge view of overlap vs {_exp5_target_label(target_name)}",
-                            aggregation="grouped by level and perturbation",
+                            aggregation="grouped by image, level, and perturbation family",
                             x="zscore(log1p(predicted spectral overlap))",
                             y=f"zscore({_exp5_target_label(target_name).lower()})",
                             note=f"Source={_exp5_source_label(source_name)}; group={primary_group}; raw overlap results are still preserved separately",
@@ -7864,7 +7881,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                         metadata=_plot_metadata(
                             experiment="5",
                             what=f"Predicted overlap and observed {_exp5_target_label(target_name)} split by level and perturbation",
-                            aggregation="grouped by level and perturbation",
+                            aggregation="grouped by image, level, and perturbation family",
                             x="perturbation type",
                             y=_exp5_target_label(target_name),
                             note=f"Source={_exp5_source_label(source_name)}; group={primary_group}",

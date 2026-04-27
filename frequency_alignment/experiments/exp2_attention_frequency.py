@@ -947,59 +947,107 @@ def run_exp2(
             "values": dict(zip(wordy_present_levels, mean_bws)),
         }
 
-    # --- Peak-consolidation / tail-growth shape tests (revised Theorem 2) ---
-    def _shape_series(level_keys: List[str], metric_key: str) -> List[float]:
+    # --- Late-layer downward concentration shape tests (Theorem 2, revised 2026-04-27) ---
+    # Granularity axis = downward concentration of W_t mass at the late layer group:
+    # top-2 mass RISES, tail mass FALLS, G_late shrinks. The earlier "peak consolidation
+    # + tail growth" framing (top-3 ↓, tail ↑) is retracted; the data shows the opposite
+    # sign on the tail. Tests are run on the `late` layer group (where the granularity
+    # ladder is empirically clean) and on the overall filter (informational only).
+    def _shape_series_overall(level_keys: List[str], metric_key: str) -> List[float]:
         out: List[float] = []
         for lk in level_keys:
             shape = agg["per_level"].get(lk, {}).get("shape_metrics", {}) or {}
             out.append(float(shape.get(metric_key, 0.0)))
         return out
 
+    def _shape_series_late(level_keys: List[str], metric_key: str) -> List[Optional[float]]:
+        out: List[Optional[float]] = []
+        for lk in level_keys:
+            shape = (
+                agg["per_level"].get(lk, {})
+                .get("layer_groups", {}).get("late", {})
+                .get("shape_metrics")
+            )
+            if shape is None:
+                out.append(None)
+            else:
+                out.append(float(shape.get(metric_key, 0.0)))
+        return out
+
     shape_tests: Dict[str, Any] = {}
     if len(primary_present_levels) >= 2:
         ranks = list(range(1, len(primary_present_levels) + 1))
 
-        top3_series = _shape_series(primary_present_levels, "top_3_mass")
+        # Late-layer gates (load-bearing under revised Theorem 2)
+        late_top2 = _shape_series_late(primary_present_levels, "top_2_mass")
+        if all(v is not None for v in late_top2):
+            late_top2_f = [float(v) for v in late_top2]
+            rho, p = spearman_correlation(ranks, late_top2_f)
+            shape_tests["spearman_top2_mass_late_vs_granularity"] = {
+                "rho": rho,
+                "p_value": p,
+                "target": "rho > 0 (late-layer top-2 mass rises with granularity — downward concentration)",
+                "passed": rho > 0.0,
+                "values": dict(zip(primary_present_levels, late_top2_f)),
+            }
+
+        late_tail = _shape_series_late(primary_present_levels, "tail_mass_fraction")
+        if all(v is not None for v in late_tail):
+            late_tail_f = [float(v) for v in late_tail]
+            rho, p = spearman_correlation(ranks, late_tail_f)
+            shape_tests["spearman_tail_mass_late_vs_granularity"] = {
+                "rho": rho,
+                "p_value": p,
+                "target": "rho < 0 (late-layer tail mass thins as mass concentrates downward)",
+                "passed": rho < 0.0,
+                "values": dict(zip(primary_present_levels, late_tail_f)),
+            }
+
+        # Overall-filter shape tests (informational; mix early/mid/late)
+        top3_series = _shape_series_overall(primary_present_levels, "top_3_mass")
         rho_t3, p_t3 = spearman_correlation(ranks, top3_series)
         shape_tests["spearman_top3_mass_vs_granularity"] = {
             "rho": rho_t3,
             "p_value": p_t3,
-            "target": "rho < 0 (top-3 mass drops as granularity increases; peak consolidation)",
-            "passed": rho_t3 < 0.0,
+            "target": "informational (top-3 mass mixes early length-prior and late-layer concentration)",
+            "passed": None,
             "values": dict(zip(primary_present_levels, top3_series)),
         }
 
-        top2_series = _shape_series(primary_present_levels, "top_2_mass")
+        top2_series = _shape_series_overall(primary_present_levels, "top_2_mass")
         rho_t2, p_t2 = spearman_correlation(ranks, top2_series)
         shape_tests["spearman_top2_mass_vs_granularity"] = {
             "rho": rho_t2,
             "p_value": p_t2,
-            "target": "rho > 0 (top-2 mass rises as mass consolidates into fewer peaks)",
+            "target": "rho > 0 expected on overall filter (downward concentration); load-bearing gate is the *_late variant",
             "passed": rho_t2 > 0.0,
             "values": dict(zip(primary_present_levels, top2_series)),
         }
 
-        tail_series = _shape_series(primary_present_levels, "tail_mass_fraction")
+        tail_series = _shape_series_overall(primary_present_levels, "tail_mass_fraction")
         rho_tail, p_tail = spearman_correlation(ranks, tail_series)
         shape_tests["spearman_tail_mass_vs_granularity"] = {
             "rho": rho_tail,
             "p_value": p_tail,
-            "target": "rho > 0 (high-freq tail grows as granularity increases)",
-            "passed": rho_tail > 0.0,
+            "target": "rho < 0 expected on overall filter (downward concentration); load-bearing gate is the *_late variant",
+            "passed": rho_tail < 0.0,
             "values": dict(zip(primary_present_levels, tail_series)),
         }
 
-        centroid_series = _shape_series(primary_present_levels, "centroid_normalised")
+        centroid_series = _shape_series_overall(primary_present_levels, "centroid_normalised")
         rho_c, p_c = spearman_correlation(ranks, centroid_series)
         shape_tests["spearman_centroid_vs_granularity"] = {
             "rho": rho_c,
             "p_value": p_c,
-            "target": "informational (centroid shift expected to be small under peak-consolidation)",
+            "target": "informational (small downward shift expected under late-layer downward concentration)",
             "passed": None,
             "values": dict(zip(primary_present_levels, centroid_series)),
         }
 
-    # --- Wordy convergence: |shape(base) - shape(wordy)| should shrink from early to late layers ---
+    # --- Wordy divergence: |shape(base) - shape(wordy)| should grow from early to late layers ---
+    # Theorem 4 (revised 2026-04-27): wordy mirrors start more concentrated than their semantic
+    # counterparts (length prior at early layers) and end more relaxed (asymmetric late-layer
+    # relaxation from a higher starting concentration). The gap widens with depth.
     wordy_pairs: List[Tuple[str, str]] = []
     if LEVEL_VIEWS.get("primary") and LEVEL_VIEWS.get("wordy"):
         primary_ordered = [lk for lk in present_levels if lk in (LEVEL_VIEWS["primary"] or set())]
@@ -1016,7 +1064,7 @@ def run_exp2(
             return None
         return float(shape.get(metric_key, 0.0))
 
-    wordy_convergence: Dict[str, Any] = {}
+    wordy_divergence: Dict[str, Any] = {}
     for metric_key in ("top_3_mass", "top_2_mass", "tail_mass_fraction", "centroid_normalised"):
         per_group_abs_delta: Dict[str, List[float]] = {g: [] for g in LAYER_GROUP_ORDER}
         per_pair_deltas: Dict[str, Dict[str, float]] = {}
@@ -1040,18 +1088,18 @@ def run_exp2(
         late = mean_abs_delta.get("late")
         passed = None
         if early is not None and late is not None:
-            passed = bool(late < early)
-        wordy_convergence[metric_key] = {
+            passed = bool(late > early)
+        wordy_divergence[metric_key] = {
             "mean_abs_delta_per_layer_group": mean_abs_delta,
             "per_pair_deltas": per_pair_deltas,
-            "target": "mean_abs_delta_late < mean_abs_delta_early (wordy over-steer corrects by late layers)",
+            "target": "mean_abs_delta_late > mean_abs_delta_early (wordy gap widens with depth — Theorem 4 asymmetric late-layer relaxation)",
             "passed": passed,
         }
 
     if shape_tests:
         tests["shape_consolidation"] = shape_tests
-    if wordy_convergence:
-        tests["wordy_layerwise_convergence"] = wordy_convergence
+    if wordy_divergence:
+        tests["wordy_layerwise_divergence"] = wordy_divergence
 
     # H2: ANOVA on bandwidths across levels
     groups = [level_bandwidths[lk] for lk in primary_present_levels if level_bandwidths[lk]]

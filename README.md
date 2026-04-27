@@ -12,8 +12,8 @@ Current frequency-alignment details:
 - Wordy (`L5-L8`) and Pooled (`L1-L8`) views keep full multivariate horse-race regressions using raw `question_complexity_score`, `prompt_complexity_score`, and `option_hardness_score`, plus prediction entropy where available.
 - `complexity_score_residual` is still computed for residualized scatter and dual-force diagnostic plots, and matching `_csem` plot copies are emitted against raw semantic complexity.
 - Exp 2 computes `W_t` for `overall`, `early`, `mid`, and `late` layer groups, plus prompt-only controls.
-- Exp 5 treats the `late` layer group and relative-normalized image-space spectra as the main branch, while raw spectra, vision-feature spectra, and other layer groups remain controls.
-- Exp 5 also emits prediction-factor summaries for observed accuracy drop: `zscore(log1p(S_pred))`, raw semantic complexity, prompt load, and option hardness, with the same primary-marginal vs wordy/pooled-regression split.
+- Exp 5 treats the `late` layer group, relative-normalized image-space spectra, and first-order overlap `S_pred = sum W_t * delta_F` as the main branch, while raw spectra, vision-feature spectra, other layer groups, and quadratic/linear overlap variants remain controls.
+- Exp 5 also emits prediction-factor summaries for observed accuracy drop: `zscore(log1p(S_pred_first_order))`, raw semantic complexity, prompt load, and option hardness, with the same primary-marginal vs wordy/pooled-regression split.
 
 For the scientific design, math, experiments, gates, and plot catalogue, see `full_project_explanation.md` at the repo root.
 

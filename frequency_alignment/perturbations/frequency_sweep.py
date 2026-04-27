@@ -80,8 +80,9 @@ def compute_critical_cutoff(
     accuracies: List[float],
     cutoffs: List[float],
     threshold: float = 0.5,
+    direction: str = "auto",
 ) -> float:
-    """Find ω_c* where accuracy drops below *threshold*.
+    """Find ω_c* where accuracy crosses *threshold*.
 
     Uses linear interpolation between measured points.
 
@@ -89,17 +90,47 @@ def compute_critical_cutoff(
         accuracies: Accuracy at each cutoff (same length as cutoffs).
         cutoffs: Normalized cutoff values.
         threshold: Accuracy threshold.
+        direction: ``"increasing"`` for low-pass sweeps where accuracy
+            improves as cutoff grows, ``"decreasing"`` for high-pass sweeps
+            where accuracy drops as cutoff grows, or ``"auto"`` to infer from
+            the endpoints.
 
     Returns:
-        Critical cutoff value, or ``cutoffs[-1]`` if accuracy never drops
-        below threshold.
+        Critical cutoff value. If no interior crossing is observed, returns
+        the lower boundary when the threshold is already crossed at the first
+        point, otherwise the upper boundary.
     """
-    for i in range(len(accuracies) - 1):
-        a0, a1 = accuracies[i], accuracies[i + 1]
-        c0, c1 = cutoffs[i], cutoffs[i + 1]
-        if a0 >= threshold > a1:
-            # Linear interpolation
+    if not accuracies or not cutoffs:
+        return 0.0
+    n = min(len(accuracies), len(cutoffs))
+    acc = [float(value) for value in accuracies[:n]]
+    ctf = [float(value) for value in cutoffs[:n]]
+    if n == 1:
+        return ctf[0]
+
+    mode = str(direction or "auto").strip().lower()
+    if mode == "auto":
+        mode = "increasing" if acc[-1] >= acc[0] else "decreasing"
+    if mode not in {"increasing", "decreasing"}:
+        raise ValueError(
+            "direction must be 'auto', 'increasing', or 'decreasing', "
+            f"got {direction!r}"
+        )
+
+    if mode == "increasing" and acc[0] >= threshold:
+        return ctf[0]
+    if mode == "decreasing" and acc[0] < threshold:
+        return ctf[0]
+
+    for i in range(n - 1):
+        a0, a1 = acc[i], acc[i + 1]
+        c0, c1 = ctf[i], ctf[i + 1]
+        if mode == "increasing":
+            crosses = a0 < threshold <= a1
+        else:
+            crosses = a0 >= threshold > a1
+        if crosses:
             frac = (threshold - a0) / (a1 - a0) if a1 != a0 else 0.5
             return c0 + frac * (c1 - c0)
-    # Never dropped below threshold
-    return cutoffs[-1]
+
+    return ctf[-1]

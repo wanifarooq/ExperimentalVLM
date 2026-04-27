@@ -4,10 +4,13 @@ Sweep a lowpass or highpass cutoff from near-DC to Nyquist, producing
 filtered images at each step.  For each cutoff × granularity level, score
 the MCQ and find the critical frequency ω_c* where accuracy drops to 50%.
 
-The hypothesis gate is that ω_c* decreases with task granularity:
-    ω_c*(L1) > ω_c*(L2) > ω_c*(L3) > ω_c*(L4)
+The primary low-pass hypothesis gate is that ω_c* increases with task
+granularity:
+    ω_c*(L1) < ω_c*(L2) < ω_c*(L3) < ω_c*(L4)
 
-because finer tasks become fragile when less of the required frequency support remains.
+because finer tasks need a larger retained low-pass bandwidth before accuracy
+recovers above threshold. High-pass sweeps are reported as a complementary
+stress test.
 
 Outputs:
     exp4/summary.json             -- critical cutoffs and hypothesis tests
@@ -60,6 +63,10 @@ from ..utils.io import save_json
 logger = logging.getLogger(__name__)
 
 
+def _cutoff_direction(mode: str) -> str:
+    return "increasing" if str(mode).lower() == "lowpass" else "decreasing"
+
+
 def _build_complexity_points(
     per_sample: List[Dict[str, Any]],
     threshold: float,
@@ -96,7 +103,12 @@ def _build_complexity_points(
                             level_data.get("option_hardness_score", 0.0) or 0.0
                         ),
                         "critical_cutoff": float(
-                            compute_critical_cutoff(accuracy, cutoffs, threshold=threshold)
+                            compute_critical_cutoff(
+                                accuracy,
+                                cutoffs,
+                                threshold=threshold,
+                                direction=_cutoff_direction(mode),
+                            )
                         ),
                     }
                 )
@@ -157,6 +169,7 @@ def _cutoff_curve_diagnostic(
     *,
     threshold: float,
     critical_cutoff: float,
+    direction: str,
 ) -> Dict[str, Any]:
     """Summarize whether the cutoff curve is interior or boundary-limited."""
     if not accuracy_curve or not cutoffs:
@@ -174,11 +187,19 @@ def _cutoff_curve_diagnostic(
     max_loss_idx = int(np.argmax(loss))
     last_idx = max(0, len(cutoffs) - 1)
     boundary_idx = {0, last_idx}
-    threshold_crossed = bool(np.any(acc < float(threshold)))
+    threshold_f = float(threshold)
+    if direction == "increasing":
+        threshold_crossed = bool(acc[0] < threshold_f and np.any(acc >= threshold_f))
+        threshold_satisfied_at_lower_boundary = bool(acc[0] >= threshold_f)
+    else:
+        threshold_crossed = bool(acc[0] >= threshold_f and np.any(acc < threshold_f))
+        threshold_satisfied_at_lower_boundary = bool(acc[0] < threshold_f)
 
     return {
         "loss_curve": [float(x) for x in loss.tolist()],
         "threshold_crossed": threshold_crossed,
+        "threshold_direction": direction,
+        "threshold_satisfied_at_lower_boundary": threshold_satisfied_at_lower_boundary,
         "min_accuracy": float(acc[min_acc_idx]),
         "min_accuracy_cutoff": float(ctf[min_acc_idx]),
         "min_accuracy_index": min_acc_idx,
@@ -356,13 +377,17 @@ def run_exp4(
 
             # Find critical cutoff
             omega_c = compute_critical_cutoff(
-                acc_curve, reference_cutoffs, threshold=accuracy_threshold,
+                acc_curve,
+                reference_cutoffs,
+                threshold=accuracy_threshold,
+                direction=_cutoff_direction(mode),
             )
             diagnostic = _cutoff_curve_diagnostic(
                 acc_curve,
                 reference_cutoffs,
                 threshold=accuracy_threshold,
                 critical_cutoff=omega_c,
+                direction=_cutoff_direction(mode),
             )
 
             agg["per_mode"][mode][lk] = {
@@ -417,28 +442,55 @@ def run_exp4(
 
         cutoff_values = [critical_cutoffs[mode][lk] for lk in present_levels]
 
-        # H1: Monotonicity of ω_c* across levels
-        is_mono, tau = monotonicity_test(cutoff_values)
-        is_decreasing = all(
-            cutoff_values[idx] >= cutoff_values[idx + 1]
-            for idx in range(len(cutoff_values) - 1)
+        # H1: Monotonicity of ω_c* across levels.
+        _, tau = monotonicity_test(cutoff_values)
+        expects_increase = _cutoff_direction(mode) == "increasing"
+        directional_mono = (
+            all(
+                cutoff_values[idx] <= cutoff_values[idx + 1]
+                for idx in range(len(cutoff_values) - 1)
+            )
+            if expects_increase
+            else all(
+                cutoff_values[idx] >= cutoff_values[idx + 1]
+                for idx in range(len(cutoff_values) - 1)
+            )
+        )
+        target_op = ">" if expects_increase else "< -"
+        passed_tau = (
+            tau > GATES["monotonicity_kendall_tau_min"]
+            if expects_increase
+            else tau < -GATES["monotonicity_kendall_tau_min"]
+        )
+        target_text = (
+            "critical low-pass cutoff increases with granularity"
+            if expects_increase
+            else "critical high-pass cutoff decreases with granularity"
         )
         tests[f"monotonicity_{mode}"] = {
-            "is_monotonic": is_decreasing,
+            "is_monotonic": directional_mono,
             "kendall_tau": tau,
             "values": dict(zip(present_levels, cutoff_values)),
-            "target": f"kendall_tau < -{GATES['monotonicity_kendall_tau_min']} (critical cutoff decreases with granularity)",
-            "passed": tau < -GATES["monotonicity_kendall_tau_min"],
+            "target": f"kendall_tau {target_op}{GATES['monotonicity_kendall_tau_min']} ({target_text})",
+            "passed": passed_tau,
         }
 
         # H2: Spearman correlation
         ranks = list(range(1, len(present_levels) + 1))
         rho, p = spearman_correlation(ranks, cutoff_values)
+        passed_rho = (
+            rho > GATES["strong_spearman_rho_min"]
+            if expects_increase
+            else rho < -GATES["strong_spearman_rho_min"]
+        )
         tests[f"spearman_cutoff_vs_granularity_{mode}"] = {
             "rho": rho,
             "p_value": p,
-            "target": f"rho < -{GATES['strong_spearman_rho_min']} (critical cutoff decreases with granularity)",
-            "passed": rho < -GATES["strong_spearman_rho_min"],
+            "target": (
+                f"rho {'>' if expects_increase else '< -'}{GATES['strong_spearman_rho_min']} "
+                f"({target_text})"
+            ),
+            "passed": passed_rho,
             "values": dict(zip(present_levels, cutoff_values)),
             "caveat": (
                 "Spearman p-value gating over four level means is underpowered; "
@@ -455,22 +507,43 @@ def run_exp4(
             wordy_values = [critical_cutoffs[mode][level] for level in wordy_present]
             wordy_mono, wordy_tau = monotonicity_test(wordy_values)
             wordy_rho, wordy_p = spearman_correlation(range(1, len(wordy_values) + 1), wordy_values)
-            tests[f"monotonicity_{mode}_wordy"] = {
-                "is_monotonic": all(
+            wordy_directional_mono = (
+                all(
+                    wordy_values[idx] <= wordy_values[idx + 1]
+                    for idx in range(len(wordy_values) - 1)
+                )
+                if expects_increase
+                else all(
                     wordy_values[idx] >= wordy_values[idx + 1]
                     for idx in range(len(wordy_values) - 1)
-                ),
+                )
+            )
+            wordy_tau_passed = (
+                wordy_tau > GATES["monotonicity_kendall_tau_min"]
+                if expects_increase
+                else wordy_tau < -GATES["monotonicity_kendall_tau_min"]
+            )
+            wordy_rho_passed = (
+                wordy_rho > GATES["secondary_spearman_rho_min"]
+                if expects_increase
+                else wordy_rho < -GATES["secondary_spearman_rho_min"]
+            )
+            tests[f"monotonicity_{mode}_wordy"] = {
+                "is_monotonic": wordy_directional_mono,
                 "kendall_tau": wordy_tau,
                 "values": dict(zip(wordy_present, wordy_values)),
-                "target": f"kendall_tau < -{GATES['monotonicity_kendall_tau_min']}",
-                "passed": wordy_tau < -GATES["monotonicity_kendall_tau_min"],
+                "target": f"kendall_tau {target_op}{GATES['monotonicity_kendall_tau_min']}",
+                "passed": wordy_tau_passed,
             }
             tests[f"spearman_cutoff_vs_granularity_{mode}_wordy"] = {
                 "rho": wordy_rho,
                 "p_value": wordy_p,
-                "passed": wordy_rho < -GATES["secondary_spearman_rho_min"],
+                "passed": wordy_rho_passed,
                 "values": dict(zip(wordy_present, wordy_values)),
-                "target": f"rho < -{GATES['secondary_spearman_rho_min']} (secondary wordy-ladder monotonicity only; no pooled monotonicity is run)",
+                "target": (
+                    f"rho {'>' if expects_increase else '< -'}{GATES['secondary_spearman_rho_min']} "
+                    "(secondary wordy-ladder monotonicity only; no pooled monotonicity is run)"
+                ),
             }
 
     tests["continuous_complexity"] = {}

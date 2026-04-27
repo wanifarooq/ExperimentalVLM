@@ -11,19 +11,29 @@ from scipy import stats
 def spearman_correlation(x, y) -> Tuple[float, float]:
     """Spearman rank correlation coefficient and p-value."""
     x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
-    if len(x) < 3:
+    if len(x) < 3 or len(y) < 3:
+        return 0.0, 1.0
+    if np.unique(x).size < 2 or np.unique(y).size < 2:
         return 0.0, 1.0
     rho, p = stats.spearmanr(x, y)
-    return float(rho), float(p)
+    return (
+        float(np.nan_to_num(rho, nan=0.0)),
+        float(np.nan_to_num(p, nan=1.0)),
+    )
 
 
 def pearson_correlation(x, y) -> Tuple[float, float]:
     """Pearson linear correlation coefficient and p-value."""
     x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
-    if len(x) < 3:
+    if len(x) < 3 or len(y) < 3:
+        return 0.0, 1.0
+    if np.unique(x).size < 2 or np.unique(y).size < 2:
         return 0.0, 1.0
     r, p = stats.pearsonr(x, y)
-    return float(r), float(p)
+    return (
+        float(np.nan_to_num(r, nan=0.0)),
+        float(np.nan_to_num(p, nan=1.0)),
+    )
 
 
 def one_way_anova(*groups) -> Tuple[float, float]:

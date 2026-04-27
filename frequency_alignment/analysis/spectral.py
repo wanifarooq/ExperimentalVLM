@@ -5,7 +5,7 @@ of VLM cross-attention maps to derive the task-specific frequency filter W_t(ome
 
 Key functions:
     - ``attention_to_spatial_grid``: reshape flattened attention to 2D spatial map
-    - ``compute_attention_power_spectrum``: 2D FFT + radial averaging
+    - ``compute_attention_power_spectrum``: 2D FFT + radial band energies
     - ``compute_effective_bandwidth``: inverse participation ratio G(t)
     - ``compute_filter_W_t``: averaged normalized attention spectrum per task
 """
@@ -26,10 +26,7 @@ def spectral_vector_length(
     num_bands: int,
     suppress_dc: bool = False,
 ) -> int:
-    bands = max(0, int(num_bands))
-    if suppress_dc:
-        bands = max(0, bands - 1)
-    return bands
+    return max(0, int(num_bands))
 
 
 def spectral_band_centers(
@@ -40,10 +37,7 @@ def spectral_band_centers(
     if total_bands == 0:
         return np.zeros(0, dtype=np.float64)
     edges = np.linspace(0.0, 1.0, total_bands + 1, dtype=np.float64)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    if suppress_dc:
-        centers = centers[1:]
-    return centers
+    return 0.5 * (edges[:-1] + edges[1:])
 
 
 def _normalize_window_name(window: Optional[str]) -> str:
@@ -101,21 +95,31 @@ def _radially_bin_power(
     num_bands: int,
     suppress_dc: bool = False,
 ) -> np.ndarray:
+    power = np.asarray(power_2d, dtype=np.float64)
     h, w = power_2d.shape
     cy, cx = h // 2, w // 2
+    if suppress_dc and h > 0 and w > 0:
+        power = power.copy()
+        power[cy, cx] = 0.0
     y_grid, x_grid = np.ogrid[:h, :w]
     dist = np.sqrt((y_grid - cy) ** 2 + (x_grid - cx) ** 2)
     max_dist = np.sqrt(cy ** 2 + cx ** 2)
+    if max_dist <= _EPS:
+        radial_power = np.zeros(num_bands, dtype=np.float64)
+        if num_bands > 0:
+            radial_power[0] = float(power.sum())
+        return radial_power
 
     edges = np.linspace(0, max_dist, num_bands + 1)
     radial_power = np.zeros(num_bands, dtype=np.float64)
     for band_idx in range(num_bands):
-        mask = (dist >= edges[band_idx]) & (dist < edges[band_idx + 1])
+        if band_idx == num_bands - 1:
+            mask = (dist >= edges[band_idx]) & (dist <= edges[band_idx + 1])
+        else:
+            mask = (dist >= edges[band_idx]) & (dist < edges[band_idx + 1])
         count = mask.sum()
         if count > 0:
-            radial_power[band_idx] = power_2d[mask].mean()
-    if suppress_dc:
-        radial_power = radial_power[1:]
+            radial_power[band_idx] = power[mask].sum()
     return radial_power
 
 
@@ -299,7 +303,7 @@ def compute_attention_power_spectrum(
 
     Returns:
         ``(radial_power, full_power_2d)`` where ``radial_power`` has shape
-        ``(num_bands,)`` (radially averaged power) and ``full_power_2d``
+        ``(num_bands,)`` (summed band energy) and ``full_power_2d``
         is the full 2D power spectrum ``(H, W)``.
     """
     h, w = attention_2d.shape
@@ -543,15 +547,16 @@ def compute_filter_W_t(
     """Normalize radial power spectrum to get the task-specific filter W_t(omega).
 
     W_t(omega) represents the fraction of attention energy at each frequency
-    band.  It integrates to 1 and serves as the task's frequency sensitivity
-    profile.
+    band. Under the default L1 normalization it integrates to 1 and serves as
+    the task's frequency sensitivity profile. The L2 variant is a robustness
+    check and has unit Euclidean norm instead.
 
     Args:
         radial_power: Raw radial power spectrum, shape ``(num_bands,)``.
         norm: Normalization mode, ``"l1"`` or ``"l2"``.
 
     Returns:
-        Normalized filter W_t(omega), shape ``(num_bands,)``, sums to 1.
+        Normalized filter W_t(omega), shape ``(num_bands,)``.
     """
     rp = np.asarray(radial_power, dtype=np.float64)
     if rp.size == 0:
@@ -579,9 +584,10 @@ def compute_spectral_overlap(
 
         S_{\\text{pred}} = \\sum_\\omega |W_t(\\omega)|^2 \\cdot |\\Delta F(\\omega)|^2
 
-    This is the default quadratic matched-filter energy overlap.  A linear
-    probability-weighted variant is available as
-    :func:`compute_spectral_overlap_linear`.
+    This is the quadratic matched-filter energy overlap retained as a legacy
+    robustness variant. The primary Exp 5 overlap uses
+    :func:`compute_overlap_integral`; a probability-weighted power variant is
+    available as :func:`compute_spectral_overlap_linear`.
 
     Args:
         W_t: Task-specific frequency filter, shape ``(num_bands,)``.
