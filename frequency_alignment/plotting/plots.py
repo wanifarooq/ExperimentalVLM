@@ -75,6 +75,7 @@ _COEFFICIENT_LABELS = {
     "complexity_score_residual": "Residualized\nSemantic Logic",
     "prompt_complexity_score": "Prompt Load",
     "option_hardness_score": "Option Hardness",
+    "is_binary": "Binary Format\n(2-option)",
     "prediction_entropy": "Prediction Entropy\n(Clean Confusion)",
     "clean_accuracy": "Clean Accuracy\n(Baseline)",
 }
@@ -85,6 +86,7 @@ _COEFFICIENT_COLORS = {
     "complexity_score_residual": "#2ca02c",
     "prompt_complexity_score": "#7f7f7f",
     "option_hardness_score": "#ff7f0e",
+    "is_binary": "#8c564b",
     "prediction_entropy": "#17becf",
     "clean_accuracy": "#1f77b4",
 }
@@ -4818,7 +4820,7 @@ def _generate_theory_refresh_plots(
     exp2_summary: Optional[Dict[str, Any]],
     exp5_summary: Optional[Dict[str, Any]],
 ) -> None:
-    """Dispatcher for the five peak-consolidation / overlap plots."""
+    """Dispatcher for the five theory-refresh plots (downward concentration, wordy divergence, first-order overlap)."""
     plots_dir.mkdir(parents=True, exist_ok=True)
     if exp2_summary:
         _plot_exp2_per_level_W_t(exp2_summary, plots_dir / "exp2_per_level_W_t.png")

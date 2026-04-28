@@ -124,6 +124,7 @@ python3 -m frequency_alignment.run_experiment \
 - Scores MCQ options with the parent repository’s assistant-continuation log-likelihood routine.
 - Stores raw and relative image-space perturbation spectra: `delta_f`, `delta_f_relative`.
 - When vision-token extraction is enabled, also stores raw and relative feature-space perturbation spectra: `delta_f_vision`, `delta_f_vision_relative`.
+- Stores `is_binary` and `num_options` so binary yes/no tasks and 4-way MCQ tasks can be separated from semantic complexity. Horse-race regressions include `is_binary` whenever the analyzed slice mixes both formats.
 - Stores the correct-option score change used downstream as `loglik_drift`, plus directional summaries:
   - `loglik_erosion`
   - `loglik_recovery`
@@ -182,7 +183,7 @@ python3 -m frequency_alignment.run_experiment \
   - prediction uses `zscore(log1p(S_pred_first_order))`
   - observed targets use `zscore(actual)`
   - this is for effect-size comparability and visualization only; the raw overlap metrics remain intact
-- Adds prediction-factor summaries for observed `accuracy_drop`, using `zscore(log1p(S_pred_first_order))`, raw `question_complexity_score`, `prompt_complexity_score`, and `option_hardness_score` as predictors. Primary view is marginal-only; wordy/pooled views keep multivariate regressions. This is saved under `prediction_factor_horse_race` and plotted as `exp5_coefficient_plot_prediction_factors*.png`.
+- Adds prediction-factor summaries for observed `accuracy_drop`, using `zscore(log1p(S_pred_first_order))`, raw `question_complexity_score`, `prompt_complexity_score`, `option_hardness_score`, and `is_binary` when applicable as predictors. Primary view is marginal-only; wordy/pooled views keep multivariate regressions. This is saved under `prediction_factor_horse_race` and plotted as `exp5_coefficient_plot_prediction_factors*.png`.
 - Also tracks whether predicted overlap and calibrated prediction error vary continuously with semantic complexity.
 - Produces level-wise scatter grids and level-by-perturbation predicted-vs-observed plots. These use separate visual scales when prediction and observation magnitudes differ.
 - Produces wordy-control comparison plots for predicted sensitivity and observed behavior.
@@ -196,6 +197,7 @@ Across the continuous analyses, the intended interpretation is:
 - `complexity_score_residual` measures **residualized compositional precision (Cres)** for scatter/diagnostic plots
 - `prompt load` measures potential **linguistic anchoring**
 - `option hardness` controls for MCQ discrimination difficulty
+- `is_binary` controls for the binary yes/no vs 4-way MCQ answer-format confound when both formats appear in the regression slice
 - `prediction entropy` controls for clean-answer uncertainty in Exp 1
 
 Primary marginal summaries, wordy/pooled horse-race regressions, and fixed-effects diagnostics are therefore the main evidence for whether semantic complexity is the real driver of frequency-based fragility after controlling for prompt length, answer-set difficulty, and clean-model uncertainty where available. The `L5-L8` wordy controls test the same idea experimentally by increasing prompt load while holding the semantic program fixed.

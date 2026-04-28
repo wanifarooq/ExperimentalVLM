@@ -123,13 +123,24 @@ def _optional_float(value: Any) -> Optional[float]:
 
 
 def _horse_race_predictors(points: List[Dict[str, Any]]) -> List[str]:
-    """Use entropy control when available, while preserving old-result compatibility."""
+    """Use entropy + task-format controls when available.
+
+    ``is_binary`` is included whenever the point set spans both 2-option and
+    4-option items (i.e. mixes binary L1/L3/L5/L7 with MCQ L2/L4/L6/L8) so the
+    regression can absorb the task-format baseline shift in loglik metrics
+    that ``option_hardness_score`` is degenerate on. If the slice is
+    single-format the indicator is constant and would be dropped by the
+    regression — we omit it to keep the design matrix full rank.
+    """
 
     predictors = [
         "question_complexity_score",
         "prompt_complexity_score",
         "option_hardness_score",
     ]
+    binary_vals = {float(point.get("is_binary", 0.0) or 0.0) for point in points}
+    if len(binary_vals - {0.0, 1.0}) == 0 and len(binary_vals & {0.0, 1.0}) == 2:
+        predictors.append("is_binary")
     if any(_optional_float(point.get("prediction_entropy")) is not None for point in points):
         predictors.append("prediction_entropy")
     return predictors
@@ -195,6 +206,8 @@ def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str,
                 "option_hardness_score": float(
                     level_data.get("option_hardness_score", 0.0) or 0.0
                 ),
+                "is_binary": float(level_data.get("is_binary", 0.0) or 0.0),
+                "num_options": int(level_data.get("num_options", 0) or 0),
                 "prediction_entropy": _optional_float(level_data.get("prediction_entropy")),
                 "clean_accuracy": 1.0 if level_data.get("clean", {}).get("correct", False) else 0.0,
                 "mean_accuracy_drop": float(np.mean(drops)) if drops else 0.0,
@@ -228,6 +241,8 @@ def _build_perturbation_complexity_points(per_sample: List[Dict[str, Any]]) -> D
                 "option_hardness_score": float(
                     level_data.get("option_hardness_score", 0.0) or 0.0
                 ),
+                "is_binary": float(level_data.get("is_binary", 0.0) or 0.0),
+                "num_options": int(level_data.get("num_options", 0) or 0),
                 "prediction_entropy": _optional_float(level_data.get("prediction_entropy")),
                 "clean_accuracy": clean_accuracy,
             }
@@ -283,6 +298,8 @@ def _build_long_format_rows(
                 "option_hardness_score": float(
                     level_data.get("option_hardness_score", 0.0) or 0.0
                 ),
+                "is_binary": float(level_data.get("is_binary", 0.0) or 0.0),
+                "num_options": int(level_data.get("num_options", 0) or 0),
                 "prediction_entropy": _optional_float(
                     level_data.get("prediction_entropy")
                 ),
@@ -627,6 +644,7 @@ def _evaluate_sample(
 
         level_key = level.name  # e.g. "L1_COARSE"
         complexity = ensure_level_complexity(level_data)
+        num_options = int(len(level_data.options or {}))
         level_record: Dict[str, Any] = {
             "question": level_data.question,
             "question_type": level_data.question_type,
@@ -635,6 +653,13 @@ def _evaluate_sample(
             "question_complexity_score": complexity["question_complexity_score"],
             "prompt_complexity_score": complexity["prompt_complexity_score"],
             "option_hardness_score": float(getattr(level_data, "option_hardness_score", 0.0) or 0.0),
+            # Task-format covariate to disentangle binary (yes/no, 2 options) from
+            # MCQ (4+ options): the scoring topology of loglik_drift differs
+            # mechanically between the two regimes and option_hardness is degenerate
+            # on binary items (always ~0). Reported as both an indicator and a
+            # raw count so downstream regressions can pick whichever is cleaner.
+            "is_binary": 1.0 if num_options == 2 else 0.0,
+            "num_options": num_options,
             "semantic_atoms": complexity["semantic_atoms"],
             "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],
             "semantic_atom_counts": complexity["semantic_atom_counts"],
@@ -906,10 +931,11 @@ def _run_hypothesis_tests(
             "passed": wordy_tau > GATES["monotonicity_kendall_tau_min"],
         }
 
-    # Wordy-vs-base drift volatility split (revised Theorem 4 prediction).
-    # Under the peak-consolidation / prompt-length-prior story, wordy prompts
-    # relocate filter mass off-DC, reducing overlap with low-freq-dominated
-    # perturbations and therefore shrinking per-sample drift volatility.
+    # Wordy-vs-base drift volatility split (Theorem 4, revised 2026-04-27).
+    # Under the three-stage trajectory + asymmetric late-layer relaxation,
+    # wordy prompts land on a broader late-layer filter than their semantic
+    # counterparts, which lowers <W_t, dF> linearly and therefore shrinks
+    # per-sample drift volatility.
     primary_present_levels = [
         lk for lk in ALL_VQA_LEVEL_NAMES
         if lk in (LEVEL_VIEWS["primary"] or set()) and lk in per_level

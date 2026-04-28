@@ -626,8 +626,8 @@ def compute_overlap_integral(
 
     Both factors appear linearly. ``delta_f`` is the radially binned
     perturbation signature as stored by the pipeline (already non-negative).
-    This is the quantity predicted to drive drift under the
-    peak-consolidation / relocation story.
+    This is the quantity predicted to drive drift under the late-layer
+    downward-concentration / overlap-law story (Theorem 1, revised 2026-04-27).
     """
     w = np.asarray(W_t, dtype=np.float64)
     d = np.asarray(delta_f, dtype=np.float64)
@@ -705,9 +705,9 @@ def compute_filter_shape_metrics(
     Returns peak concentration (``top_k_mass``), high-frequency tail mass
     (``tail_mass_fraction``), spectral centroid (``centroid_index``), and the
     normalised centroid (``centroid_normalised``, in [0, 1] by dividing by
-    ``num_bands-1``). These three together let us discriminate pure
-    narrowing, relocation, and peak-consolidation scenarios without having
-    to inspect the full W_t vector.
+    ``num_bands-1``). These together let us discriminate downward
+    concentration (top-2 ↑, tail ↓) from pure narrowing and from upward
+    relocation without having to inspect the full W_t vector.
     """
     w = np.asarray(W_t, dtype=np.float64)
     num_bands = int(w.size)

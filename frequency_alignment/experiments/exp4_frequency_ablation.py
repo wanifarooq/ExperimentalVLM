@@ -67,6 +67,20 @@ def _cutoff_direction(mode: str) -> str:
     return "increasing" if str(mode).lower() == "lowpass" else "decreasing"
 
 
+def _exp4_horse_race_predictors(points: List[Dict[str, Any]]) -> List[str]:
+    """Predictor list for Exp 4 horse races, with optional task-format control."""
+
+    predictors = [
+        "question_complexity_score",
+        "prompt_complexity_score",
+        "option_hardness_score",
+    ]
+    binary_vals = {float(point.get("is_binary", 0.0) or 0.0) for point in points}
+    if len(binary_vals - {0.0, 1.0}) == 0 and len(binary_vals & {0.0, 1.0}) == 2:
+        predictors.append("is_binary")
+    return predictors
+
+
 def _build_complexity_points(
     per_sample: List[Dict[str, Any]],
     threshold: float,
@@ -102,6 +116,8 @@ def _build_complexity_points(
                         "option_hardness_score": float(
                             level_data.get("option_hardness_score", 0.0) or 0.0
                         ),
+                        "is_binary": float(level_data.get("is_binary", 0.0) or 0.0),
+                        "num_options": int(level_data.get("num_options", 0) or 0),
                         "critical_cutoff": float(
                             compute_critical_cutoff(
                                 accuracy,
@@ -327,6 +343,7 @@ def run_exp4(
                     accuracies_at_cutoff.append(correct)
                     accuracy_data[mode][level_key][ci].append(correct)
 
+                num_options_e4 = int(len(level_data.options or {}))
                 mode_record["levels"][level_key] = {
                     "question": level_data.question,
                     "question_type": level_data.question_type,
@@ -334,6 +351,8 @@ def run_exp4(
                     "question_complexity_score": complexity["question_complexity_score"],
                     "prompt_complexity_score": complexity["prompt_complexity_score"],
                     "option_hardness_score": float(getattr(level_data, "option_hardness_score", 0.0) or 0.0),
+                    "is_binary": 1.0 if num_options_e4 == 2 else 0.0,
+                    "num_options": num_options_e4,
                     "semantic_atoms": complexity["semantic_atoms"],
                     "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],
                     "semantic_atom_counts": complexity["semantic_atom_counts"],
@@ -574,20 +593,12 @@ def run_exp4(
             "horse_race_critical_cutoff": summarize_multivariate_regression(
                 mode_points,
                 y_key="critical_cutoff",
-                x_keys=[
-                    "question_complexity_score",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=_exp4_horse_race_predictors(mode_points),
             ),
             "horse_race_critical_cutoff_within_image": summarize_multivariate_regression(
                 mode_points,
                 y_key="critical_cutoff",
-                x_keys=[
-                    "question_complexity_score",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=_exp4_horse_race_predictors(mode_points),
                 group_key="image_id",
                 demean_by_group=True,
             ),
@@ -603,11 +614,7 @@ def run_exp4(
             view_entry = summarize_horse_race_view(
                 view_points,
                 y_key="critical_cutoff",
-                x_keys=[
-                    "question_complexity_score",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=_exp4_horse_race_predictors(view_points),
                 view_name=view_name,
                 level_filter=None,
             )

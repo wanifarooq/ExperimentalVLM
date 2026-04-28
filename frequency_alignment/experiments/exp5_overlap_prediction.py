@@ -146,6 +146,8 @@ def _build_overlap_pairs(
             "question_complexity_score": [],
             "prompt_complexity_score": [],
             "option_hardness_score": [],
+            "is_binary": [],
+            "num_options": [],
             "accuracy_drop": [],
             "loglik_drift": [],
             "loglik_erosion": [],
@@ -171,6 +173,8 @@ def _build_overlap_pairs(
             )
             prompt_complexity_score = float(level_data.get("prompt_complexity_score", 0.0) or 0.0)
             option_hardness_score = float(level_data.get("option_hardness_score", 0.0) or 0.0)
+            is_binary_flag = float(level_data.get("is_binary", 0.0) or 0.0)
+            num_options_e5 = int(level_data.get("num_options", 0) or 0)
 
             clean_correct = float(bool(level_data.get("clean", {}).get("correct", False)))
             for perturbation in level_data.get("perturbations", []):
@@ -217,6 +221,8 @@ def _build_overlap_pairs(
                     "question_complexity_score": question_complexity_score,
                     "prompt_complexity_score": prompt_complexity_score,
                     "option_hardness_score": option_hardness_score,
+                    "is_binary": is_binary_flag,
+                    "num_options": num_options_e5,
                 }
                 sample_pairs.append(pair)
 
@@ -229,6 +235,8 @@ def _build_overlap_pairs(
                 grouped[key]["question_complexity_score"].append(question_complexity_score)
                 grouped[key]["prompt_complexity_score"].append(prompt_complexity_score)
                 grouped[key]["option_hardness_score"].append(option_hardness_score)
+                grouped[key]["is_binary"].append(is_binary_flag)
+                grouped[key]["num_options"].append(num_options_e5)
                 grouped[key]["accuracy_drop"].append(accuracy_drop)
                 grouped[key]["loglik_drift"].append(loglik_drift)
                 grouped[key]["loglik_erosion"].append(loglik_erosion)
@@ -264,6 +272,8 @@ def _build_overlap_pairs(
                 "question_complexity_score": float(np.mean(values["question_complexity_score"])),
                 "prompt_complexity_score": float(np.mean(values["prompt_complexity_score"])),
                 "option_hardness_score": float(np.mean(values["option_hardness_score"])),
+                "is_binary": float(np.mean(values["is_binary"])) if values["is_binary"] else 0.0,
+                "num_options": int(round(float(np.mean(values["num_options"])))) if values["num_options"] else 0,
                 "actual": float(np.mean(values["accuracy_drop"])),
                 "accuracy_drop": float(np.mean(values["accuracy_drop"])),
                 "loglik_erosion": float(np.mean(values["loglik_erosion"])),
@@ -541,6 +551,7 @@ def _summarize_prediction_factor_horse_race(
             question_complexity_float = float(question_complexity)
             prompt_float = float(prompt)
             hardness_float = float(hardness)
+            is_binary_float = float(pair.get("is_binary", 0.0) or 0.0)
         except (TypeError, ValueError):
             continue
         if not all(
@@ -557,6 +568,7 @@ def _summarize_prediction_factor_horse_race(
                 "question_complexity_score": question_complexity_float,
                 "prompt_complexity_score": prompt_float,
                 "option_hardness_score": hardness_float,
+                "is_binary": is_binary_float,
             }
         )
         raw_predicted.append(pred_float)
@@ -570,29 +582,42 @@ def _summarize_prediction_factor_horse_race(
     else:
         pred_mean = pred_std = 0.0
 
-    regression = summarize_multivariate_regression(
-        rows,
-        y_key=y_key,
-        x_keys=[
-            "predicted_overlap_log1p_z",
-            "question_complexity_score",
-            "prompt_complexity_score",
-            "option_hardness_score",
-        ],
-    )
-    view_payload: Dict[str, Any] = {}
     predictors = [
         "predicted_overlap_log1p_z",
         "question_complexity_score",
         "prompt_complexity_score",
         "option_hardness_score",
     ]
+    binary_vals_e5 = {float(row.get("is_binary", 0.0) or 0.0) for row in rows}
+    if len(binary_vals_e5 - {0.0, 1.0}) == 0 and len(binary_vals_e5 & {0.0, 1.0}) == 2:
+        predictors.append("is_binary")
+
+    regression = summarize_multivariate_regression(
+        rows,
+        y_key=y_key,
+        x_keys=predictors,
+    )
+    view_payload: Dict[str, Any] = {}
     for view_name in LEVEL_VIEW_ORDER:
         level_filter = LEVEL_VIEWS[view_name]
+        view_rows = (
+            rows
+            if level_filter is None
+            else [row for row in rows if str(row.get("level")) in level_filter]
+        )
+        view_predictors = [
+            "predicted_overlap_log1p_z",
+            "question_complexity_score",
+            "prompt_complexity_score",
+            "option_hardness_score",
+        ]
+        view_binary = {float(row.get("is_binary", 0.0) or 0.0) for row in view_rows}
+        if len(view_binary - {0.0, 1.0}) == 0 and len(view_binary & {0.0, 1.0}) == 2:
+            view_predictors.append("is_binary")
         view_payload[view_name] = summarize_horse_race_view(
             rows,
             y_key=y_key,
-            x_keys=predictors,
+            x_keys=view_predictors,
             view_name=view_name,
             level_filter=level_filter,
         )

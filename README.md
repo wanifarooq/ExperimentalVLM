@@ -9,7 +9,7 @@ The active research pipeline lives in `frequency_alignment/`. It tests the hypot
 Current frequency-alignment details:
 - `L5-L8` are longer-than-base wordy mirrors of `L1-L4`; they are not padded to a fixed 60-word target.
 - Primary (`L1-L4`) view reports marginal Pearson/Spearman, Kendall monotonicity, and VIF diagnostics instead of multivariate betas because raw semantic complexity and prompt load are highly collinear on the terse ladder.
-- Wordy (`L5-L8`) and Pooled (`L1-L8`) views keep full multivariate horse-race regressions using raw `question_complexity_score`, `prompt_complexity_score`, and `option_hardness_score`, plus prediction entropy where available.
+- Wordy (`L5-L8`) and Pooled (`L1-L8`) views keep full multivariate horse-race regressions using raw `question_complexity_score`, `prompt_complexity_score`, `option_hardness_score`, and an `is_binary` task-format control when the slice mixes yes/no and 4-way MCQ items, plus prediction entropy where available.
 - `complexity_score_residual` is still computed for residualized scatter and dual-force diagnostic plots, and matching `_csem` plot copies are emitted against raw semantic complexity.
 - Exp 2 computes `W_t` for `overall`, `early`, `mid`, and `late` layer groups, plus prompt-only controls.
 - Exp 5 treats the `late` layer group, relative-normalized image-space spectra, and first-order overlap `S_pred = sum W_t * delta_F` as the main branch, while raw spectra, vision-feature spectra, other layer groups, and quadratic/linear overlap variants remain controls.

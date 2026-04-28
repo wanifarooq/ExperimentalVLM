@@ -4,10 +4,10 @@ Extract cross-attention maps from the VLM for each granularity level and
 decompose them into frequency bands via 2D FFT.  Measure how the effective
 bandwidth G(t) of the attention filter varies with task granularity.
 
-The hypothesis is that coarse tasks produce narrow (low-frequency) attention
-filters, while fine-grained tasks produce broad (high-frequency) filters.
-This is quantified by the effective bandwidth G(t) via inverse participation
-ratio.
+The current hypothesis is that late-layer task filters concentrate downward
+with semantic granularity: top-2 low-frequency mass rises, high-frequency tail
+mass falls, and effective bandwidth G(t) decreases. Early layers are treated
+as prompt-format controls rather than the load-bearing granularity test.
 
 Outputs:
     exp2/summary.json              -- aggregate metrics and hypothesis tests
@@ -70,6 +70,26 @@ logger = logging.getLogger(__name__)
 CONTROL_ORDER = ("empty_language", "random_language")
 
 
+def _bandwidth_horse_race_predictors(points: List[Dict[str, Any]]) -> List[str]:
+    """Predictor list for bandwidth horse races, with optional task-format control.
+
+    Adds ``is_binary`` whenever the slice mixes 2-option and 4-option items so
+    the regression can absorb the task-format baseline shift; omitted on
+    single-format slices (e.g. binary-only or MCQ-only views) to keep the
+    design matrix full rank.
+    """
+
+    predictors = [
+        "question_complexity_score",
+        "prompt_complexity_score",
+        "option_hardness_score",
+    ]
+    binary_vals = {float(point.get("is_binary", 0.0) or 0.0) for point in points}
+    if len(binary_vals - {0.0, 1.0}) == 0 and len(binary_vals & {0.0, 1.0}) == 2:
+        predictors.append("is_binary")
+    return predictors
+
+
 def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     points: List[Dict[str, Any]] = []
     for record in per_sample:
@@ -90,6 +110,8 @@ def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str,
                 "option_hardness_score": float(
                     level_data.get("option_hardness_score", 0.0) or 0.0
                 ),
+                "is_binary": float(level_data.get("is_binary", 0.0) or 0.0),
+                "num_options": int(level_data.get("num_options", 0) or 0),
                 "bandwidth": float(level_data.get("bandwidth", 0.0) or 0.0),
             }
             for group_name in LAYER_GROUP_ORDER:
@@ -458,6 +480,7 @@ def run_exp2(
                 continue
 
             # Store per-sample result
+            num_options = int(len(level_data.options or {}))
             sample_record["levels"][level_key] = {
                 "question": level_data.question,
                 "question_type": level_data.question_type,
@@ -465,6 +488,8 @@ def run_exp2(
                 "question_complexity_score": complexity["question_complexity_score"],
                 "prompt_complexity_score": complexity["prompt_complexity_score"],
                 "option_hardness_score": float(getattr(level_data, "option_hardness_score", 0.0) or 0.0),
+                "is_binary": 1.0 if num_options == 2 else 0.0,
+                "num_options": num_options,
                 "semantic_atoms": complexity["semantic_atoms"],
                 "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],
                 "semantic_atom_counts": complexity["semantic_atom_counts"],
@@ -1170,20 +1195,12 @@ def run_exp2(
         "horse_race_bandwidth": summarize_multivariate_regression(
             complexity_points,
             y_key="bandwidth",
-            x_keys=[
-                "question_complexity_score",
-                "prompt_complexity_score",
-                "option_hardness_score",
-            ],
+            x_keys=_bandwidth_horse_race_predictors(complexity_points),
         ),
         "horse_race_bandwidth_within_image": summarize_multivariate_regression(
             complexity_points,
             y_key="bandwidth",
-            x_keys=[
-                "question_complexity_score",
-                "prompt_complexity_score",
-                "option_hardness_score",
-            ],
+            x_keys=_bandwidth_horse_race_predictors(complexity_points),
             group_key="image_id",
             demean_by_group=True,
         ),
@@ -1201,11 +1218,7 @@ def run_exp2(
             view_entry = summarize_horse_race_view(
                 view_points,
                 y_key=value_key,
-                x_keys=[
-                    "question_complexity_score",
-                    "prompt_complexity_score",
-                    "option_hardness_score",
-                ],
+                x_keys=_bandwidth_horse_race_predictors(view_points),
                 view_name=view_name,
                 level_filter=None,
             )
@@ -1258,22 +1271,14 @@ def run_exp2(
                 summarize_multivariate_regression(
                     complexity_points,
                     y_key=value_key,
-                    x_keys=[
-                        "question_complexity_score",
-                        "prompt_complexity_score",
-                        "option_hardness_score",
-                    ],
+                    x_keys=_bandwidth_horse_race_predictors(complexity_points),
                 )
             )
             tests["continuous_complexity"][f"horse_race_bandwidth_within_image_{group_name}"] = (
                 summarize_multivariate_regression(
                     complexity_points,
                     y_key=value_key,
-                    x_keys=[
-                        "question_complexity_score",
-                        "prompt_complexity_score",
-                        "option_hardness_score",
-                    ],
+                    x_keys=_bandwidth_horse_race_predictors(complexity_points),
                     group_key="image_id",
                     demean_by_group=True,
                 )
