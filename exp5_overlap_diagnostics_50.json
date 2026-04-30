@@ -1,0 +1,2084 @@
+{
+  "description": "Offline Exp5 overlap-law diagnostics. No model inference. Rows are restricted to the first N image IDs per output directory.",
+  "max_images": 50,
+  "predictors": [
+    "predicted_first_order",
+    "predicted_linear",
+    "predicted_quadratic"
+  ],
+  "targets": [
+    "loglik_volatility",
+    "loglik_erosion",
+    "accuracy_drop"
+  ],
+  "results": [
+    {
+      "output_dir": "frequency_alignment_outputs_local_200samples_20260428_125813",
+      "suppress_dc": false,
+      "num_bands": 12,
+      "num_bands_resolution": {
+        "mode": "auto",
+        "requested_num_bands": 20,
+        "resolved_num_bands": 12,
+        "status": "resolved_from_patch_grid",
+        "coefficient": 0.6,
+        "rounding": "ceil",
+        "statistic": "median",
+        "min_bands": 12,
+        "max_bands": 30,
+        "probe_samples": 8,
+        "probed_patch_grids": [
+          [
+            12,
+            16
+          ],
+          [
+            12,
+            16
+          ],
+          [
+            16,
+            10
+          ],
+          [
+            16,
+            8
+          ],
+          [
+            12,
+            16
+          ],
+          [
+            13,
+            16
+          ],
+          [
+            10,
+            16
+          ],
+          [
+            12,
+            16
+          ]
+        ],
+        "probed_sample_ids": [
+          "2335833",
+          "2373660",
+          "2345033",
+          "2356008",
+          "2395343",
+          "2365281",
+          "2390442",
+          "2400329"
+        ],
+        "probe_failures": [],
+        "token_counts": [
+          192,
+          192,
+          160,
+          128,
+          192,
+          208,
+          160,
+          192
+        ],
+        "representative_token_count": 192.0
+      },
+      "max_images_requested": 50,
+      "num_images_used": 50,
+      "num_sample_rows": 28800,
+      "num_image_level_family_rows": 7600,
+      "num_level_family_rows": 152,
+      "num_level_exact_perturbation_rows": 576,
+      "sample_exact_correlations": {
+        "loglik_volatility": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.14749132889368916,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.11055983165982637,
+              "n": 28800
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.114994290371268,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.09925936736420868,
+              "n": 28800
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.10886761024963505,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.10375405062688886,
+              "n": 28800
+            }
+          }
+        },
+        "loglik_erosion": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.15458156844910742,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.10921612912628771,
+              "n": 28800
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.12255718169938427,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.0976592472961036,
+              "n": 28800
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.11688016345796443,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.10184573392038905,
+              "n": 28800
+            }
+          }
+        },
+        "accuracy_drop": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.04187473743703702,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.05172702465678645,
+              "n": 28800
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.017686151690882543,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.04709283309505593,
+              "n": 28800
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.014671471766454431,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.04657685586767273,
+              "n": 28800
+            }
+          }
+        }
+      },
+      "image_level_family_correlations": {
+        "loglik_volatility": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.09797847631349321,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.11310137787944133,
+              "n": 7600
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.09056531811530427,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.10002343699554625,
+              "n": 7600
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.08797061129597931,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.1048573253415418,
+              "n": 7600
+            }
+          }
+        },
+        "loglik_erosion": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.1050906549578102,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.1531659067185164,
+              "n": 7600
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.09760784712099982,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.14039245721561985,
+              "n": 7600
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.09521785168449441,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.14563929618371949,
+              "n": 7600
+            }
+          }
+        },
+        "accuracy_drop": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.04233833319327206,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.08926572746172402,
+              "n": 7600
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.019264852963261886,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.08301919119468833,
+              "n": 7600
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.01483564293651074,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.08237180222651737,
+              "n": 7600
+            }
+          }
+        }
+      },
+      "level_family_macro_correlations": {
+        "loglik_volatility": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.1560819503845392,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.24466747312379117,
+              "n": 152
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.209758991728088,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.2214715792207437,
+              "n": 152
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.2290169379614596,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.23658923311394967,
+              "n": 152
+            }
+          }
+        },
+        "loglik_erosion": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.1634844847001615,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.29007510986269724,
+              "n": 152
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.21812982180145288,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.2652799704754679,
+              "n": 152
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.2376970715182438,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.28205154491214396,
+              "n": 152
+            }
+          }
+        },
+        "accuracy_drop": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.2053236953030325,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.3147468896569962,
+              "n": 152
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.16436612141201634,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.30911991587555904,
+              "n": 152
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.16876776063110213,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.3086235702556344,
+              "n": 152
+            }
+          }
+        }
+      },
+      "level_exact_perturbation_macro_correlations": {
+        "loglik_volatility": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.2586836687251324,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.2789580080463355,
+              "n": 576
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.2978971115793823,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.2597574011591284,
+              "n": 576
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.3177548009059811,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.26981677262792264,
+              "n": 576
+            }
+          }
+        },
+        "loglik_erosion": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.2620655758161908,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.29615659922884174,
+              "n": 576
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.303375681000027,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.2781703256186787,
+              "n": 576
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.32421780846028625,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.2886236952852036,
+              "n": 576
+            }
+          }
+        },
+        "accuracy_drop": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.23577687900893085,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.2682648502722755,
+              "n": 576
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.2031712121970556,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.2578799276388595,
+              "n": 576
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.2080657524503162,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.25538495496512376,
+              "n": 576
+            }
+          }
+        }
+      },
+      "within_family_loglik_volatility_first_order": {
+        "AllBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.04105581877060658,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.009307318188468952,
+            "n": 1200
+          }
+        },
+        "BoxOverlay": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.013937433957981017,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.041531432944397234,
+            "n": 1200
+          }
+        },
+        "Brightness": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.078806793615434,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.15147140704378106,
+            "n": 2400
+          }
+        },
+        "Contrast": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.1013592151935924,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.14104823474447953,
+            "n": 2400
+          }
+        },
+        "GaussianBlur": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.11639073324170975,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.10118593416793206,
+            "n": 1200
+          }
+        },
+        "GaussianNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.14077634905974826,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.13317046652570594,
+            "n": 1200
+          }
+        },
+        "HighBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.010262003345118804,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.029432331065540197,
+            "n": 1200
+          }
+        },
+        "JPEG": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.03257515160046835,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.005602136963025587,
+            "n": 1200
+          }
+        },
+        "LowBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.057609453794083366,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.06667665546791687,
+            "n": 1200
+          }
+        },
+        "MotionBlur": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.05846064078088752,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.003769933477823086,
+            "n": 1200
+          }
+        },
+        "Occlusion": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.06689376520159696,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.11709728937608865,
+            "n": 1200
+          }
+        },
+        "PadCrop": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.08276995547875265,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.09812032591095847,
+            "n": 2400
+          }
+        },
+        "RandomText": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.004019211883155074,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.022982209992997344,
+            "n": 1200
+          }
+        },
+        "Rotation": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.10152281950822913,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.11892864517309924,
+            "n": 2400
+          }
+        },
+        "Scale": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.09476996810731178,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.1603548888086253,
+            "n": 1200
+          }
+        },
+        "ScalePadBlack": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.11787968519563746,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.15102043526816847,
+            "n": 1200
+          }
+        },
+        "ScalePadWhite": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.0914024411737908,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.06193354453052191,
+            "n": 1200
+          }
+        },
+        "TextOverlay": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.022225743987334037,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.014815707667328598,
+            "n": 1200
+          }
+        },
+        "Translation": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.13595491395542386,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.12680903564905738,
+            "n": 2400
+          }
+        }
+      },
+      "within_family_loglik_erosion_first_order": {
+        "AllBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.07271925503369589,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.04176805119742599,
+            "n": 1200
+          }
+        },
+        "BoxOverlay": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.03071804928949317,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.030371102980955515,
+            "n": 1200
+          }
+        },
+        "Brightness": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.04663511605735651,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.04643987994554508,
+            "n": 2400
+          }
+        },
+        "Contrast": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.044489790841091996,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.06067706936938123,
+            "n": 2400
+          }
+        },
+        "GaussianBlur": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.12619288415894925,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.12360996987384532,
+            "n": 1200
+          }
+        },
+        "GaussianNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.17337494957253818,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.14938656709291984,
+            "n": 1200
+          }
+        },
+        "HighBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.042155908707966414,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.06546123909453326,
+            "n": 1200
+          }
+        },
+        "JPEG": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.03557809286020306,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.029753996338135573,
+            "n": 1200
+          }
+        },
+        "LowBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.002054060659725443,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.0007978347191692005,
+            "n": 1200
+          }
+        },
+        "MotionBlur": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.07487917673299016,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.03506183504118138,
+            "n": 1200
+          }
+        },
+        "Occlusion": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.04530930221451071,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.02840841292985806,
+            "n": 1200
+          }
+        },
+        "PadCrop": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.04226372132643098,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.00860708676792712,
+            "n": 2400
+          }
+        },
+        "RandomText": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.006747397716551645,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.040900435215106216,
+            "n": 1200
+          }
+        },
+        "Rotation": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.10890674437970486,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.14049798124187096,
+            "n": 2400
+          }
+        },
+        "Scale": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.09872288699665568,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.1817920754165468,
+            "n": 1200
+          }
+        },
+        "ScalePadBlack": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.11897016791860372,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.1211430077249881,
+            "n": 1200
+          }
+        },
+        "ScalePadWhite": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.09367960769725032,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.051499702169212645,
+            "n": 1200
+          }
+        },
+        "TextOverlay": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.023054522826011226,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.007050966345273668,
+            "n": 1200
+          }
+        },
+        "Translation": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.10273388696410672,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.04380134861641039,
+            "n": 2400
+          }
+        }
+      },
+      "residualized_loglik_volatility_first_order": {
+        "n": 28800,
+        "num_controls_used": 7,
+        "target": "loglik_volatility",
+        "predicted": "predicted_first_order",
+        "controls_requested": [
+          "clean_answer_prob",
+          "clean_margin",
+          "clean_prediction_entropy",
+          "perturbation_prediction_entropy",
+          "is_binary",
+          "option_hardness_score",
+          "prompt_complexity_score"
+        ],
+        "pearson_predicted_vs_target_residual": {
+          "r": 0.14324889680921804,
+          "n": 28800
+        },
+        "spearman_predicted_vs_target_residual": {
+          "r": 0.11158253982896908,
+          "n": 28800
+        }
+      },
+      "family_fe_horse_race_loglik_volatility": {
+        "predicted_first_order": {
+          "n": 28800,
+          "p": 27,
+          "target": "loglik_volatility",
+          "predicted": "predicted_first_order",
+          "family_fixed_effects": true,
+          "predicted_beta_std": 0.047261107083003684,
+          "r2": 0.3513923263095079,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 18
+        },
+        "predicted_linear": {
+          "n": 28800,
+          "p": 27,
+          "target": "loglik_volatility",
+          "predicted": "predicted_linear",
+          "family_fixed_effects": true,
+          "predicted_beta_std": 0.03031692314407175,
+          "r2": 0.3510208211988336,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 18
+        },
+        "predicted_quadratic": {
+          "n": 28800,
+          "p": 27,
+          "target": "loglik_volatility",
+          "predicted": "predicted_quadratic",
+          "family_fixed_effects": true,
+          "predicted_beta_std": 0.029123793812385612,
+          "r2": 0.35104141534848543,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 18
+        }
+      },
+      "no_family_fe_horse_race_loglik_volatility": {
+        "predicted_first_order": {
+          "n": 28800,
+          "p": 9,
+          "target": "loglik_volatility",
+          "predicted": "predicted_first_order",
+          "family_fixed_effects": false,
+          "predicted_beta_std": 0.13466352802565884,
+          "r2": 0.15302094298155222,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 0
+        },
+        "predicted_linear": {
+          "n": 28800,
+          "p": 9,
+          "target": "loglik_volatility",
+          "predicted": "predicted_linear",
+          "family_fixed_effects": false,
+          "predicted_beta_std": 0.11899330698685984,
+          "r2": 0.14907441545394773,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 0
+        },
+        "predicted_quadratic": {
+          "n": 28800,
+          "p": 9,
+          "target": "loglik_volatility",
+          "predicted": "predicted_quadratic",
+          "family_fixed_effects": false,
+          "predicted_beta_std": 0.10288939856221507,
+          "r2": 0.14549675570896592,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 0
+        }
+      }
+    },
+    {
+      "output_dir": "frequency_alignment_outputs_local_200samples_20260428_131910",
+      "suppress_dc": true,
+      "num_bands": 12,
+      "num_bands_resolution": {
+        "mode": "auto",
+        "requested_num_bands": 20,
+        "resolved_num_bands": 12,
+        "status": "resolved_from_patch_grid",
+        "coefficient": 0.6,
+        "rounding": "ceil",
+        "statistic": "median",
+        "min_bands": 12,
+        "max_bands": 30,
+        "probe_samples": 8,
+        "probed_patch_grids": [
+          [
+            12,
+            16
+          ],
+          [
+            12,
+            16
+          ],
+          [
+            16,
+            10
+          ],
+          [
+            16,
+            8
+          ],
+          [
+            12,
+            16
+          ],
+          [
+            13,
+            16
+          ],
+          [
+            10,
+            16
+          ],
+          [
+            12,
+            16
+          ]
+        ],
+        "probed_sample_ids": [
+          "2335833",
+          "2373660",
+          "2345033",
+          "2356008",
+          "2395343",
+          "2365281",
+          "2390442",
+          "2400329"
+        ],
+        "probe_failures": [],
+        "token_counts": [
+          192,
+          192,
+          160,
+          128,
+          192,
+          208,
+          160,
+          192
+        ],
+        "representative_token_count": 192.0
+      },
+      "max_images_requested": 50,
+      "num_images_used": 50,
+      "num_sample_rows": 28800,
+      "num_image_level_family_rows": 7600,
+      "num_level_family_rows": 152,
+      "num_level_exact_perturbation_rows": 576,
+      "sample_exact_correlations": {
+        "loglik_volatility": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.05798156499235944,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.13403435858717128,
+              "n": 28800
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.043006586218692335,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.13270880803137816,
+              "n": 28800
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.04598887711698123,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.13770445288061858,
+              "n": 28800
+            }
+          }
+        },
+        "loglik_erosion": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.05855476308194401,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.14136921930802834,
+              "n": 28800
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.04456064836502199,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.1336961788974391,
+              "n": 28800
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.048094792917770815,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.14167193642299553,
+              "n": 28800
+            }
+          }
+        },
+        "accuracy_drop": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.03717293288234065,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.06065889567353848,
+              "n": 28800
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.0011902887363760702,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.05416703003660174,
+              "n": 28800
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.0065361909897577895,
+              "n": 28800
+            },
+            "spearman": {
+              "r": 0.057220458002801775,
+              "n": 28800
+            }
+          }
+        }
+      },
+      "image_level_family_correlations": {
+        "loglik_volatility": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.034035455405796555,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.14906871061547203,
+              "n": 7600
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.03422307580889342,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.1443014567809046,
+              "n": 7600
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.03312045151652951,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.14970420511486196,
+              "n": 7600
+            }
+          }
+        },
+        "loglik_erosion": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.036051616224556396,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.18283406583911105,
+              "n": 7600
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.03533254973587343,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.17153763449198958,
+              "n": 7600
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.03507710197769804,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.1810589034669924,
+              "n": 7600
+            }
+          }
+        },
+        "accuracy_drop": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.039179272587296546,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.0964517906317479,
+              "n": 7600
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": -0.0010268558196422834,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.08783690883638091,
+              "n": 7600
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.004822343213230042,
+              "n": 7600
+            },
+            "spearman": {
+              "r": 0.09161783562818974,
+              "n": 7600
+            }
+          }
+        }
+      },
+      "level_family_macro_correlations": {
+        "loglik_volatility": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.04480445677698408,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.383777909909171,
+              "n": 152
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.10131602962189451,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.3039044826714234,
+              "n": 152
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.07288155129834052,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.354116690245286,
+              "n": 152
+            }
+          }
+        },
+        "loglik_erosion": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.050014727792085774,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.4223614158106602,
+              "n": 152
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.10976250881116881,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.33121809197711843,
+              "n": 152
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.08247905060660563,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.38361730192251176,
+              "n": 152
+            }
+          }
+        },
+        "accuracy_drop": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.1451820079242657,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.3975245857354678,
+              "n": 152
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.15161454422211507,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.395925249849044,
+              "n": 152
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.11661270102178846,
+              "n": 152
+            },
+            "spearman": {
+              "r": 0.3982398059864008,
+              "n": 152
+            }
+          }
+        }
+      },
+      "level_exact_perturbation_macro_correlations": {
+        "loglik_volatility": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.08683738420598787,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.37301861786694396,
+              "n": 576
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.18546211686280506,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.3684032911423922,
+              "n": 576
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.1436225717687519,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.38183351514947256,
+              "n": 576
+            }
+          }
+        },
+        "loglik_erosion": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.0897173590054918,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.3963118578779523,
+              "n": 576
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.19155460948410294,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.395312937911501,
+              "n": 576
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.15151921966132784,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.4085815626896611,
+              "n": 576
+            }
+          }
+        },
+        "accuracy_drop": {
+          "predicted_first_order": {
+            "pearson": {
+              "r": 0.15374443969146864,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.305768762057769,
+              "n": 576
+            }
+          },
+          "predicted_linear": {
+            "pearson": {
+              "r": 0.17805073142880543,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.3243589491904066,
+              "n": 576
+            }
+          },
+          "predicted_quadratic": {
+            "pearson": {
+              "r": 0.13982415534654147,
+              "n": 576
+            },
+            "spearman": {
+              "r": 0.31592039939791067,
+              "n": 576
+            }
+          }
+        }
+      },
+      "within_family_loglik_volatility_first_order": {
+        "AllBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.029150422553409855,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.0016018362184071898,
+            "n": 1200
+          }
+        },
+        "BoxOverlay": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.04850308110691126,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.03618083613918132,
+            "n": 1200
+          }
+        },
+        "Brightness": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.07125702566364679,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.1090662039974489,
+            "n": 2400
+          }
+        },
+        "Contrast": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.0806963605665925,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.09641737251437807,
+            "n": 2400
+          }
+        },
+        "GaussianBlur": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.12275009114531686,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.10909768163554188,
+            "n": 1200
+          }
+        },
+        "GaussianNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.13615279879231143,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.1344239225671856,
+            "n": 1200
+          }
+        },
+        "HighBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.0016050158814601004,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.022230042314831732,
+            "n": 1200
+          }
+        },
+        "JPEG": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.020310083808499985,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.009235036050831093,
+            "n": 1200
+          }
+        },
+        "LowBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.06158568690536819,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.061716330808433584,
+            "n": 1200
+          }
+        },
+        "MotionBlur": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.042101870791539174,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.011247644078040825,
+            "n": 1200
+          }
+        },
+        "Occlusion": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.013559812128387895,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.025006628311472788,
+            "n": 1200
+          }
+        },
+        "PadCrop": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.06332674705923523,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.038027690017083324,
+            "n": 2400
+          }
+        },
+        "RandomText": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.09046095262366377,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.06720859066725646,
+            "n": 1200
+          }
+        },
+        "Rotation": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.02148956200299196,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.022363202537358743,
+            "n": 2400
+          }
+        },
+        "Scale": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.0017194286438472928,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.03624764634486995,
+            "n": 1200
+          }
+        },
+        "ScalePadBlack": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.037386547638907516,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.0009433183223310237,
+            "n": 1200
+          }
+        },
+        "ScalePadWhite": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.04576733760555706,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.01815732855342905,
+            "n": 1200
+          }
+        },
+        "TextOverlay": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.08868353849533593,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.04454839413930863,
+            "n": 1200
+          }
+        },
+        "Translation": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.0848421859585717,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.07315891773498012,
+            "n": 2400
+          }
+        }
+      },
+      "within_family_loglik_erosion_first_order": {
+        "AllBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.08187296618852698,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.07366096390766882,
+            "n": 1200
+          }
+        },
+        "BoxOverlay": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.06078910468388291,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.023076711299874462,
+            "n": 1200
+          }
+        },
+        "Brightness": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.05680624609741321,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.05860432048757237,
+            "n": 2400
+          }
+        },
+        "Contrast": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.021377712346133393,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.03589124135089334,
+            "n": 2400
+          }
+        },
+        "GaussianBlur": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.13455627340341636,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.13136554785971208,
+            "n": 1200
+          }
+        },
+        "GaussianNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.18087105868500666,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.15684456190946114,
+            "n": 1200
+          }
+        },
+        "HighBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.05490194955083165,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.1032231601239175,
+            "n": 1200
+          }
+        },
+        "JPEG": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.023218318138577734,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.017486941997227078,
+            "n": 1200
+          }
+        },
+        "LowBandNoise": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.008954384365606204,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.014133015567631902,
+            "n": 1200
+          }
+        },
+        "MotionBlur": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.056119318936541,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.016141463871556155,
+            "n": 1200
+          }
+        },
+        "Occlusion": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.010020563638443352,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.04476410993053903,
+            "n": 1200
+          }
+        },
+        "PadCrop": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.029330312354532727,
+            "n": 2400
+          },
+          "spearman": {
+            "r": -0.013745881079639298,
+            "n": 2400
+          }
+        },
+        "RandomText": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.08922486768799433,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.05749781773877065,
+            "n": 1200
+          }
+        },
+        "Rotation": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.022734372492438426,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.03468342162981709,
+            "n": 2400
+          }
+        },
+        "Scale": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.014174192568053506,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.07628486766524738,
+            "n": 1200
+          }
+        },
+        "ScalePadBlack": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.05543204555508434,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.03681638637084696,
+            "n": 1200
+          }
+        },
+        "ScalePadWhite": {
+          "n": 1200,
+          "pearson": {
+            "r": 0.041033422556513245,
+            "n": 1200
+          },
+          "spearman": {
+            "r": 0.011913707062285176,
+            "n": 1200
+          }
+        },
+        "TextOverlay": {
+          "n": 1200,
+          "pearson": {
+            "r": -0.08961769941490258,
+            "n": 1200
+          },
+          "spearman": {
+            "r": -0.019011357659899183,
+            "n": 1200
+          }
+        },
+        "Translation": {
+          "n": 2400,
+          "pearson": {
+            "r": 0.06523585087745735,
+            "n": 2400
+          },
+          "spearman": {
+            "r": 0.04095104439328247,
+            "n": 2400
+          }
+        }
+      },
+      "residualized_loglik_volatility_first_order": {
+        "n": 28800,
+        "num_controls_used": 7,
+        "target": "loglik_volatility",
+        "predicted": "predicted_first_order",
+        "controls_requested": [
+          "clean_answer_prob",
+          "clean_margin",
+          "clean_prediction_entropy",
+          "perturbation_prediction_entropy",
+          "is_binary",
+          "option_hardness_score",
+          "prompt_complexity_score"
+        ],
+        "pearson_predicted_vs_target_residual": {
+          "r": 0.055838743602432246,
+          "n": 28800
+        },
+        "spearman_predicted_vs_target_residual": {
+          "r": 0.16284550760451466,
+          "n": 28800
+        }
+      },
+      "family_fe_horse_race_loglik_volatility": {
+        "predicted_first_order": {
+          "n": 28800,
+          "p": 27,
+          "target": "loglik_volatility",
+          "predicted": "predicted_first_order",
+          "family_fixed_effects": true,
+          "predicted_beta_std": 0.020030452558824186,
+          "r2": 0.35049377409880644,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 18
+        },
+        "predicted_linear": {
+          "n": 28800,
+          "p": 27,
+          "target": "loglik_volatility",
+          "predicted": "predicted_linear",
+          "family_fixed_effects": true,
+          "predicted_beta_std": 0.012135299393676968,
+          "r2": 0.3504718649834785,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 18
+        },
+        "predicted_quadratic": {
+          "n": 28800,
+          "p": 27,
+          "target": "loglik_volatility",
+          "predicted": "predicted_quadratic",
+          "family_fixed_effects": true,
+          "predicted_beta_std": 0.012833029425400877,
+          "r2": 0.35048003054065946,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 18
+        }
+      },
+      "no_family_fe_horse_race_loglik_volatility": {
+        "predicted_first_order": {
+          "n": 28800,
+          "p": 9,
+          "target": "loglik_volatility",
+          "predicted": "predicted_first_order",
+          "family_fixed_effects": false,
+          "predicted_beta_std": 0.052047966943589485,
+          "r2": 0.13763330882266012,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 0
+        },
+        "predicted_linear": {
+          "n": 28800,
+          "p": 9,
+          "target": "loglik_volatility",
+          "predicted": "predicted_linear",
+          "family_fixed_effects": false,
+          "predicted_beta_std": 0.04328392783271126,
+          "r2": 0.13679924145897915,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 0
+        },
+        "predicted_quadratic": {
+          "n": 28800,
+          "p": 9,
+          "target": "loglik_volatility",
+          "predicted": "predicted_quadratic",
+          "family_fixed_effects": false,
+          "predicted_beta_std": 0.04193443417566092,
+          "r2": 0.13668413637548538,
+          "controls_used": [
+            "clean_answer_prob",
+            "clean_margin",
+            "clean_prediction_entropy",
+            "perturbation_prediction_entropy",
+            "is_binary",
+            "option_hardness_score",
+            "prompt_complexity_score"
+          ],
+          "num_family_fixed_effects": 0
+        }
+      }
+    }
+  ]
+}

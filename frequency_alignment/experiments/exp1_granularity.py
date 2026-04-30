@@ -1295,42 +1295,50 @@ def _run_hypothesis_tests(
                 )
 
             # --- Gate: cluster-robust long-format β_Csem > 0 with p <= 0.05 ---
-            drift_lf = cc.get("long_format_loglik_drift", {})
-            fe_fit = drift_lf.get("pooled_with_perturbation_fe", {}) or {}
-            fe_preds = fe_fit.get("predictors", {}) or {}
-            csem_info = fe_preds.get("question_complexity_score", {}) or {}
-            cprompt_info = fe_preds.get("prompt_complexity_score", {}) or {}
-            csem_beta = csem_info.get("beta")
-            cprompt_beta = cprompt_info.get("beta")
-            csem_p = csem_info.get("p_value")
-            cprompt_p = cprompt_info.get("p_value")
             p_max = GATES.get("long_format_dual_force_beta_p_max", GATES["dual_force_beta_p_max"])
-            csem_pass = (
-                csem_beta is not None
-                and csem_p is not None
-                and float(csem_beta) > 0.0
-                and float(csem_p) <= p_max
+
+            def _dual_force_gate(outcome_key: str) -> Dict[str, Any]:
+                lf_summary = cc.get(f"long_format_{outcome_key}", {}) or {}
+                fe_fit = lf_summary.get("pooled_with_perturbation_fe", {}) or {}
+                fe_preds = fe_fit.get("predictors", {}) or {}
+                csem_info = fe_preds.get("question_complexity_score", {}) or {}
+                cprompt_info = fe_preds.get("prompt_complexity_score", {}) or {}
+                csem_beta = csem_info.get("beta")
+                cprompt_beta = cprompt_info.get("beta")
+                csem_p = csem_info.get("p_value")
+                cprompt_p = cprompt_info.get("p_value")
+                csem_pass = (
+                    csem_beta is not None
+                    and csem_p is not None
+                    and float(csem_beta) > 0.0
+                    and float(csem_p) <= p_max
+                )
+                cprompt_pass = (
+                    cprompt_beta is not None
+                    and cprompt_p is not None
+                    and float(cprompt_beta) < 0.0
+                    and float(cprompt_p) <= p_max
+                )
+                return {
+                    "outcome": outcome_key,
+                    "csem_beta": csem_beta,
+                    "csem_p_value": csem_p,
+                    "cprompt_beta": cprompt_beta,
+                    "cprompt_p_value": cprompt_p,
+                    "inference_mode": fe_fit.get("inference_mode"),
+                    "n_rows": fe_fit.get("n"),
+                    "n_clusters": fe_fit.get("n_clusters"),
+                    "target": (
+                        f"cluster-robust β_Csem > 0 AND β_Cprompt < 0 with p <= {p_max} "
+                        f"for {outcome_key} in long-format regression with perturbation FE"
+                    ),
+                    "passed": bool(csem_pass and cprompt_pass),
+                }
+
+            tests["long_format_dual_force_loglik_drift"] = _dual_force_gate("loglik_drift")
+            tests["long_format_dual_force_loglik_volatility"] = _dual_force_gate(
+                "loglik_volatility"
             )
-            cprompt_pass = (
-                cprompt_beta is not None
-                and cprompt_p is not None
-                and float(cprompt_beta) < 0.0
-                and float(cprompt_p) <= p_max
-            )
-            tests["long_format_dual_force_loglik_drift"] = {
-                "csem_beta": csem_beta,
-                "csem_p_value": csem_p,
-                "cprompt_beta": cprompt_beta,
-                "cprompt_p_value": cprompt_p,
-                "inference_mode": fe_fit.get("inference_mode"),
-                "n_rows": fe_fit.get("n"),
-                "n_clusters": fe_fit.get("n_clusters"),
-                "target": (
-                    f"cluster-robust β_Csem > 0 AND β_Cprompt < 0 with p <= {p_max} "
-                    "in long-format regression with perturbation FE"
-                ),
-                "passed": bool(csem_pass and cprompt_pass),
-            }
 
             # --- Gate: β_Csem sign stability across perturbation families ---
             per_pert_drift = cc.get("per_perturbation_loglik_drift", {}) or {}
@@ -1448,13 +1456,21 @@ def _run_hypothesis_tests(
     ]
     composite_labels = ["spearman_drop_vs_granularity", "monotonicity_accuracy_drop"]
     for name in (
-        "long_format_dual_force_loglik_drift",
+        "long_format_dual_force_loglik_volatility",
         "per_perturbation_csem_sign_stability",
         "delta_f_family_falsifiable_prediction",
     ):
         if name in tests:
             composite_tests.append(bool(tests[name].get("passed", False)))
             composite_labels.append(name)
+    if (
+        "long_format_dual_force_loglik_volatility" not in tests
+        and "long_format_dual_force_loglik_drift" in tests
+    ):
+        composite_tests.append(
+            bool(tests["long_format_dual_force_loglik_drift"].get("passed", False))
+        )
+        composite_labels.append("long_format_dual_force_loglik_drift")
     tests["hypothesis_supported"] = all(composite_tests)
     tests["num_criteria_passed"] = sum(1 for t in composite_tests if t)
     tests["num_criteria_total"] = len(composite_tests)
