@@ -77,6 +77,8 @@ analysis:
     min_bands: 12
     max_bands: 25
   suppress_dc: false
+  overlap_2d:
+    enabled: false
   attention_layers: all
   attention_fft_window: none
   significance_level: 0.05

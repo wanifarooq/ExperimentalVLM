@@ -13,6 +13,7 @@ Outputs:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -74,6 +75,7 @@ from ..utils.io import save_json
 from ..utils.parent_bridge import dirichlet_energy_from_tokens
 
 logger = logging.getLogger(__name__)
+_EPS = 1e-8
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +112,78 @@ def _prediction_entropy(scores: Dict[str, float]) -> Optional[float]:
     probs = weights / total
     entropy = -float(np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0))))
     return entropy
+
+
+def _overlap_2d_enabled(cfg: Dict[str, Any]) -> bool:
+    """Single grouped switch for the optional 2D overlap diagnostic path."""
+    overlap_cfg = cfg.get("analysis", {}).get("overlap_2d", {})
+    if isinstance(overlap_cfg, dict):
+        return bool(overlap_cfg.get("enabled", False))
+    return bool(overlap_cfg)
+
+
+def _delta_f_2d_filename(image_id: Any, perturbation_name: str) -> str:
+    digest = hashlib.sha1(
+        f"{image_id}|{perturbation_name}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{image_id}__{digest}.npz"
+
+
+def _save_delta_f_2d_suite(
+    *,
+    image_id: Any,
+    perturbations: List[PerturbationResult],
+    out_dir: Path,
+    suppress_dc: bool,
+) -> Dict[str, Dict[str, Any]]:
+    """Save image-space 2D perturbation spectra once per image perturbation."""
+    delta_dir = out_dir / "delta_f_2d"
+    delta_dir.mkdir(parents=True, exist_ok=True)
+    manifest: Dict[str, Any] = {
+        "image_id": str(image_id),
+        "spectral_alignment": "fftshifted_image_space_delta_power",
+        "suppress_dc": bool(suppress_dc),
+        "perturbations": [],
+    }
+    saved: Dict[str, Dict[str, Any]] = {}
+    for perturbation in perturbations:
+        if perturbation.delta_f_2d is None:
+            continue
+        delta = np.asarray(perturbation.delta_f_2d, dtype=np.float64)
+        if delta.ndim != 2 or delta.size == 0:
+            continue
+        delta_shifted = np.fft.fftshift(delta)
+        if suppress_dc and delta_shifted.size:
+            cy, cx = delta_shifted.shape[0] // 2, delta_shifted.shape[1] // 2
+            delta_shifted = delta_shifted.copy()
+            delta_shifted[cy, cx] = 0.0
+        clean_energy = float(perturbation.clean_spectral_energy or 0.0)
+        delta_relative = delta_shifted / max(clean_energy, _EPS)
+        filename = _delta_f_2d_filename(image_id, perturbation.name)
+        np.savez_compressed(
+            delta_dir / filename,
+            delta_power_2d=delta_shifted.astype(np.float32),
+            delta_power_2d_relative=delta_relative.astype(np.float32),
+            clean_spectral_energy=np.asarray(clean_energy, dtype=np.float64),
+            image_id=np.asarray(str(image_id)),
+            perturbation_name=np.asarray(str(perturbation.name)),
+            perturbation_family=np.asarray(str(perturbation.family)),
+            severity=np.asarray(int(perturbation.severity), dtype=np.int32),
+            suppress_dc=np.asarray(bool(suppress_dc)),
+        )
+        entry = {
+            "name": perturbation.name,
+            "family": perturbation.family,
+            "severity": int(perturbation.severity),
+            "filename": filename,
+            "shape": [int(delta_shifted.shape[0]), int(delta_shifted.shape[1])],
+            "clean_spectral_energy": clean_energy,
+        }
+        saved[perturbation.name] = entry
+        manifest["perturbations"].append(entry)
+
+    save_json(manifest, delta_dir / f"{image_id}__manifest.json")
+    return saved
 
 
 def _optional_float(value: Any) -> Optional[float]:
@@ -556,6 +630,7 @@ def _evaluate_sample(
     store_feature_delta_f: bool = True,
     num_bands: int = 10,
     suppress_dc: bool = True,
+    perturbation_2d_files: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Evaluate one sample across all levels and perturbations.
 
@@ -744,6 +819,10 @@ def _evaluate_sample(
             pert_record["delta_f_peak_band"] = int(np.argmax(pr.delta_f))
             if pr.clean_spectral_energy is not None:
                 pert_record["clean_spectral_energy"] = float(pr.clean_spectral_energy)
+            two_d_entry = (perturbation_2d_files or {}).get(pr.name)
+            if two_d_entry:
+                pert_record["delta_f_2d_file"] = two_d_entry["filename"]
+                pert_record["delta_f_2d_shape"] = two_d_entry.get("shape")
             vision_metrics = perturbation_vision_metrics.get(pr.name)
             if vision_metrics:
                 pert_record.update(vision_metrics)
@@ -1545,6 +1624,7 @@ def run_exp1(
     severity_levels = pert_cfg.get("severity_levels", [1, 2, 3])
     num_bands = cfg.get("analysis", {}).get("num_bands", 10)
     suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
+    overlap_2d_enabled = _overlap_2d_enabled(cfg)
     export_num_images = max(0, int(pert_cfg.get("export_num_images", 1) or 0))
     exported_examples = 0
 
@@ -1591,6 +1671,22 @@ def run_exp1(
             logger.warning("No perturbations for sample %s", sample.image_id)
             continue
 
+        perturbation_2d_files: Dict[str, Dict[str, Any]] = {}
+        if overlap_2d_enabled:
+            try:
+                perturbation_2d_files = _save_delta_f_2d_suite(
+                    image_id=sample.image_id,
+                    perturbations=perturbations,
+                    out_dir=out_dir,
+                    suppress_dc=suppress_dc,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not save 2D perturbation spectra for %s: %s",
+                    sample.image_id,
+                    exc,
+                )
+
         if exported_examples < export_num_images:
             try:
                 export_dir = out_dir / "perturbation_examples"
@@ -1615,6 +1711,7 @@ def run_exp1(
             store_feature_delta_f=store_feature_delta_f,
             num_bands=num_bands,
             suppress_dc=suppress_dc,
+            perturbation_2d_files=perturbation_2d_files,
         )
         per_sample_results.append(record)
 
@@ -1637,6 +1734,17 @@ def run_exp1(
 
     # --- Aggregate results ---
     agg = _aggregate_results(per_sample_results)
+    delta_2d_dir = out_dir / "delta_f_2d"
+    agg["overlap_2d"] = {
+        "enabled": bool(overlap_2d_enabled),
+        "domain": "image_space",
+        "storage": "npz_sidecars",
+        "delta_f_2d_dir": "delta_f_2d",
+        "num_delta_f_2d_files": len(list(delta_2d_dir.glob("*.npz")))
+        if overlap_2d_enabled and delta_2d_dir.exists()
+        else 0,
+        "keying": "image_id x perturbation",
+    }
     complexity_points = _build_complexity_points(per_sample_results)
     perturbation_complexity_points = _build_perturbation_complexity_points(per_sample_results)
     long_format_rows = _build_long_format_rows(per_sample_results)

@@ -37,7 +37,9 @@ from ..analysis.continuous import (
 from ..analysis.gate_thresholds import GATES
 from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.spectral import (
+    attention_to_spatial_grid,
     compare_spectral_filters,
+    compute_attention_power_spectrum,
     compute_attention_power_spectrum_by_layer,
     compute_attention_power_spectrum_multi,
     compute_effective_bandwidth,
@@ -68,6 +70,101 @@ from ..utils.io import save_json
 
 logger = logging.getLogger(__name__)
 CONTROL_ORDER = ("empty_language", "random_language")
+_EPS = 1e-8
+
+
+def _overlap_2d_enabled(cfg: Dict[str, Any]) -> bool:
+    """Single grouped switch for the optional 2D overlap diagnostic path."""
+    overlap_cfg = cfg.get("analysis", {}).get("overlap_2d", {})
+    if isinstance(overlap_cfg, dict):
+        return bool(overlap_cfg.get("enabled", False))
+    return bool(overlap_cfg)
+
+
+def _zero_dc_2d(power_2d: np.ndarray) -> np.ndarray:
+    arr = np.asarray(power_2d, dtype=np.float64).copy()
+    if arr.ndim == 2 and arr.size:
+        arr[arr.shape[0] // 2, arr.shape[1] // 2] = 0.0
+    return arr
+
+
+def _normalize_power_2d(power_2d: np.ndarray) -> np.ndarray:
+    arr = np.asarray(power_2d, dtype=np.float64)
+    if arr.ndim != 2 or arr.size == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+    total = float(np.sum(arr))
+    if total <= _EPS:
+        return np.zeros_like(arr, dtype=np.float64)
+    return arr / total
+
+
+def _compute_attention_power_2d_mean(
+    attention_maps: List[np.ndarray],
+    patch_grid: tuple[int, int],
+    num_bands: int,
+    *,
+    fft_window: str,
+    suppress_dc: bool,
+) -> Optional[np.ndarray]:
+    """Mean full 2D attention spectrum aligned with the radial W_t path."""
+    powers: List[np.ndarray] = []
+
+    def _append_power(mean_attention: np.ndarray) -> None:
+        grid = attention_to_spatial_grid(mean_attention, patch_grid)
+        _, power_2d = compute_attention_power_spectrum(
+            grid,
+            num_bands=num_bands,
+            window=fft_window,
+            suppress_dc=suppress_dc,
+        )
+        powers.append(_zero_dc_2d(power_2d) if suppress_dc else power_2d)
+
+    for attn in attention_maps:
+        if attn.ndim == 1:
+            _append_power(attn)
+        elif attn.ndim == 2:
+            _append_power(attn.mean(axis=0))
+        elif attn.ndim == 3:
+            for head_idx in range(attn.shape[0]):
+                _append_power(attn[head_idx].mean(axis=0))
+
+    if not powers:
+        return None
+    return np.mean(np.stack(powers), axis=0)
+
+
+def _save_w_t_2d(
+    *,
+    filters_2d_dir: Path,
+    image_id: Any,
+    level_key: str,
+    group_name: str,
+    power_2d: np.ndarray,
+    W_t_2d: np.ndarray,
+    patch_grid: Any,
+    layer_indices: List[int],
+    fft_window: str,
+    suppress_dc: bool,
+) -> Dict[str, Any]:
+    filters_2d_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{image_id}_{level_key}_{group_name}.npz"
+    np.savez_compressed(
+        filters_2d_dir / filename,
+        W_t_2d=np.asarray(W_t_2d, dtype=np.float32),
+        power_2d=np.asarray(power_2d, dtype=np.float32),
+        patch_grid=np.asarray(patch_grid, dtype=np.int32),
+        layer_indices=np.asarray(layer_indices, dtype=np.int32),
+        image_id=np.asarray(str(image_id)),
+        level=np.asarray(level_key),
+        group=np.asarray(group_name),
+        fft_window=np.asarray(str(fft_window)),
+        suppress_dc=np.asarray(bool(suppress_dc)),
+    )
+    return {
+        "filename": filename,
+        "shape": [int(W_t_2d.shape[0]), int(W_t_2d.shape[1])],
+        "spectral_alignment": "fftshifted_attention_power",
+    }
 
 
 def _bandwidth_horse_race_predictors(points: List[Dict[str, Any]]) -> List[str]:
@@ -216,6 +313,7 @@ def _extract_attention_for_prompt(
     num_bands: int = 10,
     fft_window: str = "hann",
     suppress_dc: bool = True,
+    store_2d_spectra: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Extract attention maps and compute spectral analysis for one prompt.
 
@@ -263,7 +361,7 @@ def _extract_attention_for_prompt(
         W_t = compute_filter_W_t(mean_radial)
         W_t_l2 = compute_filter_W_t(mean_radial, norm="l2")
         bandwidth_l2 = compute_effective_bandwidth(W_t_l2)
-        return {
+        payload: Dict[str, Any] = {
             "radial_power": mean_radial,
             "bandwidth": bandwidth,
             "bandwidth_l2": bandwidth_l2,
@@ -275,6 +373,22 @@ def _extract_attention_for_prompt(
                 a.shape[0] if a.ndim == 3 else 1 for a in group_attn
             ),
         }
+        if store_2d_spectra:
+            power_2d = _compute_attention_power_2d_mean(
+                group_attn,
+                internals.patch_grid,
+                num_bands,
+                fft_window=fft_window,
+                suppress_dc=suppress_dc,
+            )
+            if power_2d is not None:
+                payload["power_2d"] = power_2d
+                payload["W_t_2d"] = _normalize_power_2d(power_2d)
+                payload["W_t_2d_shape"] = [
+                    int(power_2d.shape[0]),
+                    int(power_2d.shape[1]),
+                ]
+        return payload
 
     layer_indices = list(internals.cross_attention_layer_indices or range(len(attn_list)))
     total_layers = max(1, adapter.num_layers)
@@ -336,6 +450,7 @@ def run_exp2(
     ]
     num_bands = cfg.get("analysis", {}).get("num_bands", 10)
     suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
+    overlap_2d_enabled = _overlap_2d_enabled(cfg)
     effective_band_count = spectral_vector_length(num_bands, suppress_dc=suppress_dc)
     seed = cfg.get("seed", 42)
 
@@ -378,6 +493,9 @@ def run_exp2(
     # --- Create output dirs ---
     filters_dir = out_dir / "filters"
     filters_dir.mkdir(parents=True, exist_ok=True)
+    filters_2d_dir = out_dir / "filters_2d"
+    if overlap_2d_enabled:
+        filters_2d_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Extraction loop ---
     per_sample: List[Dict[str, Any]] = []
@@ -474,6 +592,7 @@ def run_exp2(
                 num_bands,
                 fft_window,
                 suppress_dc=suppress_dc,
+                store_2d_spectra=overlap_2d_enabled,
             )
 
             if result is None:
@@ -535,6 +654,21 @@ def run_exp2(
                 filters_dir / f"{sample.image_id}_{level_key}_l2.npy",
                 result["W_t_l2"],
             )
+            if overlap_2d_enabled and result.get("W_t_2d") is not None:
+                w_t_2d_entry = _save_w_t_2d(
+                    filters_2d_dir=filters_2d_dir,
+                    image_id=sample.image_id,
+                    level_key=level_key,
+                    group_name="overall",
+                    power_2d=result["power_2d"],
+                    W_t_2d=result["W_t_2d"],
+                    patch_grid=result["patch_grid"],
+                    layer_indices=result.get("layer_indices", []),
+                    fft_window=fft_window,
+                    suppress_dc=suppress_dc,
+                )
+                sample_record["levels"][level_key]["W_t_2d_file"] = w_t_2d_entry["filename"]
+                sample_record["levels"][level_key]["W_t_2d_shape"] = w_t_2d_entry["shape"]
 
             for group_name in LAYER_GROUP_ORDER:
                 group_result = result.get("layer_groups", {}).get(group_name)
@@ -561,6 +695,25 @@ def run_exp2(
                     filters_dir / f"{sample.image_id}_{level_key}_{group_name}_l2.npy",
                     group_result["W_t_l2"],
                 )
+                if overlap_2d_enabled and group_result.get("W_t_2d") is not None:
+                    w_t_2d_entry = _save_w_t_2d(
+                        filters_2d_dir=filters_2d_dir,
+                        image_id=sample.image_id,
+                        level_key=level_key,
+                        group_name=group_name,
+                        power_2d=group_result["power_2d"],
+                        W_t_2d=group_result["W_t_2d"],
+                        patch_grid=result["patch_grid"],
+                        layer_indices=group_result.get("layer_indices", []),
+                        fft_window=fft_window,
+                        suppress_dc=suppress_dc,
+                    )
+                    sample_record["levels"][level_key]["layer_groups"][group_name][
+                        "W_t_2d_file"
+                    ] = w_t_2d_entry["filename"]
+                    sample_record["levels"][level_key]["layer_groups"][group_name][
+                        "W_t_2d_shape"
+                    ] = w_t_2d_entry["shape"]
 
             control_prompts = _build_control_prompts(prompt, prompt_controls, seed + idx * 997 + level.value)
             for control_name, control_prompt in control_prompts.items():
@@ -671,6 +824,17 @@ def run_exp2(
         "requested_num_bands": int(num_bands),
         "effective_num_bands": int(effective_band_count),
         "prompt_controls": prompt_controls,
+        "overlap_2d": {
+            "enabled": bool(overlap_2d_enabled),
+            "domain": "attention_filter_space",
+            "storage": "npz_sidecars",
+            "filters_2d_dir": "filters_2d",
+            "num_w_t_2d_files": len(list(filters_2d_dir.glob("*.npz")))
+            if overlap_2d_enabled and filters_2d_dir.exists()
+            else 0,
+            "keying": "image_id x level x attention_group",
+            "groups": ["overall", *LAYER_GROUP_ORDER],
+        },
     }
     level_order = list(ALL_VQA_LEVEL_NAMES)
     present_levels = [lk for lk in level_order if lk in level_bandwidths]

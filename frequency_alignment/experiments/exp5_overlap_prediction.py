@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from PIL import Image
 
 from ..analysis.continuous import (
     summarize_fixed_effects_trend,
@@ -127,13 +128,98 @@ def _load_jsonl(path: Path) -> List[dict]:
     return records
 
 
+def _overlap_2d_enabled(cfg: Dict[str, Any]) -> bool:
+    """Single grouped switch for the optional 2D overlap diagnostic path."""
+    overlap_cfg = cfg.get("analysis", {}).get("overlap_2d", {})
+    if isinstance(overlap_cfg, dict):
+        return bool(overlap_cfg.get("enabled", False))
+    return bool(overlap_cfg)
+
+
+def _load_npz_array(
+    path: Path,
+    key: str,
+    cache: Dict[Tuple[str, str], Optional[np.ndarray]],
+) -> Optional[np.ndarray]:
+    cache_key = (str(path), key)
+    if cache_key in cache:
+        return cache[cache_key]
+    if not path.exists():
+        cache[cache_key] = None
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            value = np.asarray(data[key], dtype=np.float64)
+    except Exception as exc:
+        logger.warning("Could not load %s[%s]: %s", path, key, exc)
+        value = None
+    cache[cache_key] = value
+    return value
+
+
+def _resize_power_preserve_sum(power_2d: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+    arr = np.asarray(power_2d, dtype=np.float64)
+    if arr.shape == target_shape:
+        return arr
+    if arr.ndim != 2 or arr.size == 0:
+        return np.zeros(target_shape, dtype=np.float64)
+    source_sum = float(np.sum(arr))
+    image = Image.fromarray(arr.astype(np.float32))
+    resampling = getattr(Image, "Resampling", Image).BILINEAR
+    resized = np.asarray(
+        image.resize((int(target_shape[1]), int(target_shape[0])), resampling),
+        dtype=np.float64,
+    )
+    resized_sum = float(np.sum(resized))
+    if resized_sum > _EPS:
+        resized *= source_sum / resized_sum
+    return resized
+
+
+def _compute_2d_overlap(
+    W_t_2d: np.ndarray,
+    delta_2d: np.ndarray,
+) -> Optional[Dict[str, Any]]:
+    w = np.asarray(W_t_2d, dtype=np.float64)
+    d = np.asarray(delta_2d, dtype=np.float64)
+    if w.ndim != 2 or d.ndim != 2 or w.size == 0 or d.size == 0:
+        return None
+    original_delta_shape = [int(d.shape[0]), int(d.shape[1])]
+    alignment_method = "native_shape"
+    if d.shape != w.shape:
+        d = _resize_power_preserve_sum(d, (int(w.shape[0]), int(w.shape[1])))
+        alignment_method = "resize_delta_to_w_t_shape_preserve_sum"
+    first_order = float(np.sum(w * d))
+    denom = float(np.linalg.norm(w) * np.linalg.norm(d))
+    cosine = float(np.sum(w * d) / denom) if denom > _EPS else 0.0
+    return {
+        "predicted_2d_first_order": first_order,
+        "predicted_2d_cosine": cosine,
+        "w_t_2d_shape": [int(w.shape[0]), int(w.shape[1])],
+        "delta_2d_shape": original_delta_shape,
+        "delta_2d_aligned_shape": [int(d.shape[0]), int(d.shape[1])],
+        "overlap_2d_alignment_method": alignment_method,
+    }
+
+
 def _build_overlap_pairs(
     exp1_out_dir: Path,
     average_filters: Dict[str, np.ndarray],
     sample_filters: Dict[Tuple[str, str], np.ndarray],
     delta_key: str = "delta_f",
+    *,
+    overlap_2d_enabled: bool = False,
+    exp2_out_dir: Optional[Path] = None,
+    group_name: str = "overall",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     exp1_records = _load_jsonl(exp1_out_dir / "per_sample.jsonl")
+    filters_2d_dir = (exp2_out_dir or Path("")) / "filters_2d"
+    delta_2d_dir = exp1_out_dir / "delta_f_2d"
+    delta_2d_key = (
+        "delta_power_2d_relative" if str(delta_key).endswith("_relative") else "delta_power_2d"
+    )
+    w_2d_cache: Dict[Tuple[str, str], Optional[np.ndarray]] = {}
+    delta_2d_cache: Dict[Tuple[str, str], Optional[np.ndarray]] = {}
 
     sample_pairs: List[Dict[str, Any]] = []
     grouped: Dict[Tuple[str, str, str], Dict[str, Any]] = defaultdict(
@@ -142,6 +228,8 @@ def _build_overlap_pairs(
             "predicted_quadratic": [],
             "predicted_linear": [],
             "predicted_first_order": [],
+            "predicted_2d_first_order": [],
+            "predicted_2d_cosine": [],
             "complexity_score": [],
             "question_complexity_score": [],
             "prompt_complexity_score": [],
@@ -196,6 +284,15 @@ def _build_overlap_pairs(
                 predicted_quadratic = compute_spectral_overlap(W_t, delta_f)
                 predicted_linear = compute_spectral_overlap_linear(W_t, delta_f)
                 predicted_first_order = compute_overlap_integral(W_t, delta_f)
+                overlap_2d: Optional[Dict[str, Any]] = None
+                if overlap_2d_enabled and delta_key in {"delta_f", "delta_f_relative"}:
+                    delta_file = perturbation.get("delta_f_2d_file")
+                    if delta_file:
+                        w_path = filters_2d_dir / f"{image_id}_{level_key}_{group_name}.npz"
+                        w_2d = _load_npz_array(w_path, "W_t_2d", w_2d_cache)
+                        d_2d = _load_npz_array(delta_2d_dir / str(delta_file), delta_2d_key, delta_2d_cache)
+                        if w_2d is not None and d_2d is not None:
+                            overlap_2d = _compute_2d_overlap(w_2d, d_2d)
 
                 pair = {
                     "image_id": image_id,
@@ -224,6 +321,8 @@ def _build_overlap_pairs(
                     "is_binary": is_binary_flag,
                     "num_options": num_options_e5,
                 }
+                if overlap_2d is not None:
+                    pair.update(overlap_2d)
                 sample_pairs.append(pair)
 
                 key = (image_id, level_key, perturbation_family)
@@ -231,6 +330,13 @@ def _build_overlap_pairs(
                 grouped[key]["predicted_quadratic"].append(predicted_quadratic)
                 grouped[key]["predicted_linear"].append(predicted_linear)
                 grouped[key]["predicted_first_order"].append(predicted_first_order)
+                if overlap_2d is not None:
+                    grouped[key]["predicted_2d_first_order"].append(
+                        overlap_2d["predicted_2d_first_order"]
+                    )
+                    grouped[key]["predicted_2d_cosine"].append(
+                        overlap_2d["predicted_2d_cosine"]
+                    )
                 grouped[key]["complexity_score"].append(complexity_score)
                 grouped[key]["question_complexity_score"].append(question_complexity_score)
                 grouped[key]["prompt_complexity_score"].append(prompt_complexity_score)
@@ -268,6 +374,17 @@ def _build_overlap_pairs(
                 "predicted_quadratic": float(np.mean(values["predicted_quadratic"])),
                 "predicted_linear": float(np.mean(values["predicted_linear"])),
                 "predicted_first_order": float(np.mean(values["predicted_first_order"])),
+                "predicted_2d_first_order": (
+                    float(np.mean(values["predicted_2d_first_order"]))
+                    if values["predicted_2d_first_order"]
+                    else None
+                ),
+                "predicted_2d_cosine": (
+                    float(np.mean(values["predicted_2d_cosine"]))
+                    if values["predicted_2d_cosine"]
+                    else None
+                ),
+                "n_2d_overlap": len(values["predicted_2d_first_order"]),
                 "complexity_score": float(np.mean(values["complexity_score"])),
                 "question_complexity_score": float(np.mean(values["question_complexity_score"])),
                 "prompt_complexity_score": float(np.mean(values["prompt_complexity_score"])),
@@ -337,6 +454,8 @@ def _overlap_variant_correlations(
         "quadratic": "predicted_quadratic",
         "linear": "predicted_linear",
         "first_order": "predicted_first_order",
+        "two_d_first_order": "predicted_2d_first_order",
+        "two_d_cosine": "predicted_2d_cosine",
     }
     payload: Dict[str, Dict[str, Any]] = {}
     for variant_name, predicted_key in variants.items():
@@ -789,6 +908,11 @@ def _summarize_target(
         sample_target_pairs,
         actual_key="actual",
     )
+    overlap_law_2d = {
+        variant_name: variant_payload
+        for variant_name, variant_payload in overlap_law_variants.items()
+        if variant_name.startswith("two_d_")
+    }
     for pair in grouped_target_pairs:
         pair["aggregation_level"] = "grouped_perturbation_family"
         pair["aggregation_note"] = aggregation_note
@@ -829,8 +953,21 @@ def _summarize_target(
         "prediction_error_model_grouped": grouped_error_model,
         "prediction_error_model_sample": sample_error_model,
         "overlap_law_variants": overlap_law_variants,
+        "overlap_law_2d": {
+            "enabled": any(
+                payload.get("grouped", {}).get("n", 0) > 0
+                or payload.get("sample", {}).get("n", 0) > 0
+                for payload in overlap_law_2d.values()
+            ),
+            "variants": overlap_law_2d,
+            "note": (
+                "Optional image-space 2D overlap using W_t(u,v) and DeltaF(u,v); "
+                "radial overlap remains the default primary law."
+            ),
+        },
     }
     tests["overlap_law_variants"] = overlap_law_variants
+    tests["overlap_law_2d"] = summary["overlap_law_2d"]
     metrics = {
         "n_grouped_pairs": len(grouped_target_pairs),
         "n_sample_pairs": len(sample_target_pairs),
@@ -863,6 +1000,7 @@ def run_exp5(
     exp2_dir = base_out / "exp2"
     primary_group = exp_cfg.get("primary_layer_group", "late")
     primary_normalization = exp_cfg.get("primary_delta_normalization", "relative")
+    overlap_2d_enabled = _overlap_2d_enabled(cfg)
     control_groups = [group_name for group_name in FILTER_ANALYSIS_ORDER if group_name != primary_group]
     source_specs = _build_source_specs(primary_normalization)
 
@@ -888,6 +1026,11 @@ def run_exp5(
                 average_filters_by_group[group_name],
                 sample_filters_by_group[group_name],
                 delta_key,
+                overlap_2d_enabled=(
+                    overlap_2d_enabled and source_spec["domain"] == "image_space"
+                ),
+                exp2_out_dir=exp2_dir,
+                group_name=group_name,
             )
             if len(grouped_pairs) < 3:
                 logger.warning(
@@ -945,6 +1088,7 @@ def run_exp5(
                 average_filters_by_group_l2[group_name],
                 sample_filters_by_group_l2[group_name],
                 delta_key,
+                overlap_2d_enabled=False,
             )
             summarized_l2 = _summarize_target(
                 sample_pairs_l2,
@@ -1026,6 +1170,13 @@ def run_exp5(
         "control_groups": control_groups,
         "source_metadata": source_metadata,
         "normalization_variants": {"l2": {}},
+        "overlap_2d": {
+            "enabled": bool(overlap_2d_enabled),
+            "scope": "image_space_source_only",
+            "filter_keying": "image_id x level x attention_group",
+            "delta_keying": "image_id x perturbation",
+            "primary_keys": ["predicted_2d_first_order", "predicted_2d_cosine"],
+        },
     }
     tests_payload: Dict[str, Any] = {
         "analysis_groups": list(FILTER_ANALYSIS_ORDER),
@@ -1038,6 +1189,7 @@ def run_exp5(
         "control_groups": control_groups,
         "source_metadata": source_metadata,
         "normalization_variants": {"l2": {}},
+        "overlap_2d": summary_payload["overlap_2d"],
     }
     metrics: Dict[str, Any] = {}
     scatter_payload: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
@@ -1186,11 +1338,19 @@ def run_exp5(
         or next(iter(primary_group_analysis["target_analyses"].values()))
     )
     summary_payload.update(primary_target_analysis["summary"])
+    summary_payload["overlap_law_2d"] = primary_target_analysis["summary"].get(
+        "overlap_law_2d",
+        {},
+    )
     summary_payload["prediction_factor_horse_race"] = primary_group_analysis.get(
         "prediction_factor_horse_race",
         {},
     )
     tests_payload.update(primary_target_analysis["tests"])
+    tests_payload["overlap_law_2d"] = primary_target_analysis["tests"].get(
+        "overlap_law_2d",
+        {},
+    )
     tests_payload["prediction_factor_horse_race"] = primary_group_analysis.get(
         "prediction_factor_horse_race",
         {},

@@ -126,6 +126,8 @@ analysis:
     min_bands: 14
     max_bands: 30
   suppress_dc: false
+  overlap_2d:
+    enabled: false
   attention_layers: all
   # Set to hann / hamming to enable windowing, or none / off / false to disable it.
   attention_fft_window: none
