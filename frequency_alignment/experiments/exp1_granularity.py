@@ -186,6 +186,55 @@ def _save_delta_f_2d_suite(
     return saved
 
 
+def _save_delta_f_vision_2d_entry(
+    *,
+    image_id: Any,
+    perturbation: PerturbationResult,
+    feature_stats: Dict[str, Any],
+    delta_dir: Path,
+    suppress_dc: bool,
+    clean_patch_grid: Optional[tuple],
+    perturbed_patch_grid: Optional[tuple],
+) -> Optional[Dict[str, Any]]:
+    """Save one vision-token feature-space 2D perturbation spectrum."""
+
+    delta = np.asarray(feature_stats.get("delta_power_2d"), dtype=np.float64)
+    if delta.ndim != 2 or delta.size == 0:
+        return None
+    delta_shifted = np.fft.fftshift(delta)
+    if suppress_dc and delta_shifted.size:
+        cy, cx = delta_shifted.shape[0] // 2, delta_shifted.shape[1] // 2
+        delta_shifted = delta_shifted.copy()
+        delta_shifted[cy, cx] = 0.0
+    clean_energy = float(feature_stats.get("clean_total_energy") or 0.0)
+    delta_relative = delta_shifted / max(clean_energy, _EPS)
+    filename = _delta_f_2d_filename(image_id, perturbation.name)
+    delta_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        delta_dir / filename,
+        delta_power_vision_2d=delta_shifted.astype(np.float32),
+        delta_power_vision_2d_relative=delta_relative.astype(np.float32),
+        clean_feature_spectral_energy=np.asarray(clean_energy, dtype=np.float64),
+        image_id=np.asarray(str(image_id)),
+        perturbation_name=np.asarray(str(perturbation.name)),
+        perturbation_family=np.asarray(str(perturbation.family)),
+        severity=np.asarray(int(perturbation.severity), dtype=np.int32),
+        suppress_dc=np.asarray(bool(suppress_dc)),
+        clean_patch_grid=np.asarray(clean_patch_grid or [], dtype=np.int32),
+        perturbed_patch_grid=np.asarray(perturbed_patch_grid or [], dtype=np.int32),
+    )
+    return {
+        "name": perturbation.name,
+        "family": perturbation.family,
+        "severity": int(perturbation.severity),
+        "filename": filename,
+        "shape": [int(delta_shifted.shape[0]), int(delta_shifted.shape[1])],
+        "clean_feature_spectral_energy": clean_energy,
+        "clean_patch_grid": list(clean_patch_grid) if clean_patch_grid else None,
+        "perturbed_patch_grid": list(perturbed_patch_grid) if perturbed_patch_grid else None,
+    }
+
+
 def _optional_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -631,6 +680,7 @@ def _evaluate_sample(
     num_bands: int = 10,
     suppress_dc: bool = True,
     perturbation_2d_files: Optional[Dict[str, Dict[str, Any]]] = None,
+    feature_delta_2d_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Evaluate one sample across all levels and perturbations.
 
@@ -649,6 +699,7 @@ def _evaluate_sample(
     clean_dirichlet = None
     need_vision_features = extract_vision_tokens or store_feature_delta_f
     perturbation_vision_metrics: Dict[str, Dict[str, Any]] = {}
+    vision_2d_entries: List[Dict[str, Any]] = []
     if need_vision_features:
         try:
             vt = adapter.get_vision_tokens(image)
@@ -710,7 +761,42 @@ def _evaluate_sample(
                     metrics["clean_feature_spectral_energy"] = float(
                         feature_stats["clean_total_energy"]
                     )
+                    if feature_delta_2d_dir is not None:
+                        try:
+                            vision_2d_entry = _save_delta_f_vision_2d_entry(
+                                image_id=sample.image_id,
+                                perturbation=perturbation,
+                                feature_stats=feature_stats,
+                                delta_dir=feature_delta_2d_dir,
+                                suppress_dc=suppress_dc,
+                                clean_patch_grid=clean_patch_grid,
+                                perturbed_patch_grid=pert_patch_grid,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Could not save vision-token 2D spectrum for %s pert %s: %s",
+                                sample.image_id,
+                                perturbation.name,
+                                exc,
+                            )
+                            vision_2d_entry = None
+                        if vision_2d_entry:
+                            metrics["delta_f_vision_2d_file"] = vision_2d_entry["filename"]
+                            metrics["delta_f_vision_2d_shape"] = vision_2d_entry["shape"]
+                            vision_2d_entries.append(vision_2d_entry)
             perturbation_vision_metrics[perturbation.name] = metrics
+
+    if feature_delta_2d_dir is not None and vision_2d_entries:
+        save_json(
+            {
+                "image_id": str(sample.image_id),
+                "spectral_alignment": "fftshifted_vision_feature_delta_power",
+                "suppress_dc": bool(suppress_dc),
+                "keying": "image_id x perturbation",
+                "perturbations": vision_2d_entries,
+            },
+            feature_delta_2d_dir / f"{sample.image_id}__manifest.json",
+        )
 
     for level in GranularityLevel:
         level_data = sample.levels.get(level)
@@ -1705,6 +1791,11 @@ def run_exp1(
                 )
 
         # Evaluate across all levels and perturbations
+        feature_delta_2d_dir = (
+            out_dir / "delta_f_vision_2d"
+            if overlap_2d_enabled and store_feature_delta_f
+            else None
+        )
         record = _evaluate_sample(
             sample, adapter, perturbations,
             extract_vision_tokens=extract_vision_tokens,
@@ -1712,6 +1803,7 @@ def run_exp1(
             num_bands=num_bands,
             suppress_dc=suppress_dc,
             perturbation_2d_files=perturbation_2d_files,
+            feature_delta_2d_dir=feature_delta_2d_dir,
         )
         per_sample_results.append(record)
 
@@ -1735,15 +1827,41 @@ def run_exp1(
     # --- Aggregate results ---
     agg = _aggregate_results(per_sample_results)
     delta_2d_dir = out_dir / "delta_f_2d"
+    delta_vision_2d_dir = out_dir / "delta_f_vision_2d"
+    num_delta_f_2d_files = (
+        len(list(delta_2d_dir.glob("*.npz")))
+        if overlap_2d_enabled and delta_2d_dir.exists()
+        else 0
+    )
+    num_delta_f_vision_2d_files = (
+        len(list(delta_vision_2d_dir.glob("*.npz")))
+        if overlap_2d_enabled and delta_vision_2d_dir.exists()
+        else 0
+    )
     agg["overlap_2d"] = {
         "enabled": bool(overlap_2d_enabled),
         "domain": "image_space",
         "storage": "npz_sidecars",
         "delta_f_2d_dir": "delta_f_2d",
-        "num_delta_f_2d_files": len(list(delta_2d_dir.glob("*.npz")))
-        if overlap_2d_enabled and delta_2d_dir.exists()
-        else 0,
+        "num_delta_f_2d_files": num_delta_f_2d_files,
         "keying": "image_id x perturbation",
+        "domains": {
+            "image_space": {
+                "storage": "npz_sidecars",
+                "delta_f_2d_dir": "delta_f_2d",
+                "num_delta_f_2d_files": num_delta_f_2d_files,
+                "keying": "image_id x perturbation",
+                "spectral_alignment": "fftshifted_image_space_delta_power",
+            },
+            "vision_feature_space": {
+                "storage": "npz_sidecars",
+                "delta_f_2d_dir": "delta_f_vision_2d",
+                "num_delta_f_2d_files": num_delta_f_vision_2d_files,
+                "keying": "image_id x perturbation",
+                "spectral_alignment": "fftshifted_vision_feature_delta_power",
+                "wired_into_exp5": False,
+            },
+        },
     }
     complexity_points = _build_complexity_points(per_sample_results)
     perturbation_complexity_points = _build_perturbation_complexity_points(per_sample_results)

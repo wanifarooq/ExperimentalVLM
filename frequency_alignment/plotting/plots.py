@@ -3156,7 +3156,11 @@ def _exp2_sample_wt_series(record: Optional[Dict[str, Any]]) -> Dict[str, Dict[s
     return per_level
 
 
-def _exp3_level_perturbation_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str], List[str], np.ndarray]:
+def _exp3_level_perturbation_matrix(
+    records: List[Dict[str, Any]],
+    *,
+    value_key: str = "post_drift_scalar_all",
+) -> Tuple[List[str], List[str], np.ndarray]:
     present_keys = {
         level
         for record in records
@@ -3178,7 +3182,7 @@ def _exp3_level_perturbation_matrix(records: List[Dict[str, Any]]) -> Tuple[List
             for record in records:
                 for item in record.get("levels", {}).get(level, {}).get("perturbations", []):
                     if item.get("perturbation") == perturbation:
-                        value = item.get("post_drift_scalar_all")
+                        value = item.get(value_key)
                         if value is not None:
                             values.append(float(value))
             if values:
@@ -3188,7 +3192,11 @@ def _exp3_level_perturbation_matrix(records: List[Dict[str, Any]]) -> Tuple[List
     return valid_levels, perturbations, matrix[valid_rows]
 
 
-def _exp3_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str], List[str], np.ndarray]:
+def _exp3_sample_level_matrix(
+    records: List[Dict[str, Any]],
+    *,
+    value_key: str = "post_drift_scalar_all",
+) -> Tuple[List[str], List[str], np.ndarray]:
     present_keys = {
         level
         for record in records
@@ -3201,9 +3209,9 @@ def _exp3_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str],
         row = []
         for level in levels:
             values = [
-                float(item.get("post_drift_scalar_all"))
+                float(item.get(value_key))
                 for item in record.get("levels", {}).get(level, {}).get("perturbations", [])
-                if item.get("post_drift_scalar_all") is not None
+                if item.get(value_key) is not None
             ]
             row.append(float(np.mean(values)) if values else np.nan)
         if not np.all(np.isnan(row)):
@@ -3214,15 +3222,20 @@ def _exp3_sample_level_matrix(records: List[Dict[str, Any]]) -> Tuple[List[str],
     return sample_ids, levels, np.asarray(rows, dtype=float)
 
 
-def _select_exp3_samples(records: List[Dict[str, Any]], max_samples: int = 2) -> List[Dict[str, Any]]:
+def _select_exp3_samples(
+    records: List[Dict[str, Any]],
+    max_samples: int = 2,
+    *,
+    value_key: str = "post_drift_scalar_all",
+) -> List[Dict[str, Any]]:
     scored: List[Tuple[float, Dict[str, Any]]] = []
     for record in records:
         values = []
         for level_data in record.get("levels", {}).values():
             values.extend(
-                float(item.get("post_drift_scalar_all"))
+                float(item.get(value_key))
                 for item in level_data.get("perturbations", [])
-                if item.get("post_drift_scalar_all") is not None
+                if item.get(value_key) is not None
             )
         if values:
             scored.append((float(np.mean(values)), record))
@@ -3951,10 +3964,12 @@ def _plot_exp3_group_weighted_amplification(summary: Dict[str, Any], out_path: P
 
 
 def _plot_exp3_group_correlations(tests: Dict[str, Any], out_path: Path) -> None:
-    levels = _LEVEL_ORDER
     group_order = tests.get("analysis_groups", {}).get("order", _FILTER_ANALYSIS_ORDER)
     group_order = [group_name for group_name in group_order if group_name]
     correlation_map = tests.get("pearson_post_response_vs_overlap_by_level", {})
+    levels = _ordered_levels(correlation_map.keys())
+    if not levels:
+        return
     series = {}
     for group_name in group_order:
         values = []
@@ -5432,6 +5447,16 @@ def _generate_primary_l1_l4_plots_exp2_to_exp5(
                 ),
             )
     if exp3_tests:
+        exp3_tests_primary = copy.deepcopy(exp3_tests)
+        exp3_tests_primary["pearson_post_response_vs_overlap_by_level"] = (
+            _filter_level_keyed_mapping(
+                exp3_tests.get("pearson_post_response_vs_overlap_by_level"),
+            )
+        )
+        _plot_exp3_group_correlations(
+            exp3_tests_primary,
+            primary_dir / "exp3_controlled_overlap_correlations.png",
+        )
         cc = exp3_tests.get("continuous_complexity", {})
         for base_key, file_name, title in (
             ("horse_race_mean_post_drift_all", "exp3_coefficient_plot_post_drift_all.png", "Post-Fusion Drift"),
@@ -5494,6 +5519,29 @@ def _generate_primary_l1_l4_plots_exp2_to_exp5(
                     _plot_metadata(
                         experiment="3",
                         what="Primary-ladder mean all-token post-fusion response",
+                        aggregation="level x perturbation average over samples",
+                        x="perturbation type",
+                        y="task level",
+                        profile=profile,
+                    )
+                ),
+            )
+            amp_levels, amp_perturbations, amp_matrix = _exp3_level_perturbation_matrix(
+                exp3_samples,
+                value_key="response_amplification",
+            )
+            _plot_heatmap(
+                amp_matrix,
+                [_level_label(level) for level in amp_levels],
+                amp_perturbations,
+                primary_dir / "exp3_level_perturbation_response_amplification.png",
+                "Primary L1-L4: Response Amplification by Level and Perturbation",
+                "Mean Response Amplification",
+                cmap="magma",
+                metadata=_primary_plot_metadata(
+                    _plot_metadata(
+                        experiment="3",
+                        what="Primary-ladder post/pre response amplification",
                         aggregation="level x perturbation average over samples",
                         x="perturbation type",
                         y="task level",
@@ -6935,6 +6983,10 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 ),
             )
     if exp3_tests:
+        _plot_exp3_group_correlations(
+            exp3_tests,
+            plots_dir / "exp3_controlled_overlap_correlations.png",
+        )
         cc = exp3_tests.get("continuous_complexity", {})
         post_reg_pooled = cc.get("horse_race_mean_post_drift_all")
         post_reg_within = cc.get("horse_race_mean_post_drift_all_within_image")
@@ -7030,6 +7082,27 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 metadata=_plot_metadata(
                     experiment="3",
                     what="Mean all-token post-fusion response",
+                    aggregation="level x perturbation average over samples",
+                    x="perturbation type",
+                    y="task level",
+                    profile=profile,
+                ),
+            )
+            amp_levels, amp_perturbations, amp_matrix = _exp3_level_perturbation_matrix(
+                exp3_samples,
+                value_key="response_amplification",
+            )
+            _plot_heatmap(
+                amp_matrix,
+                [_level_label(level) for level in amp_levels],
+                amp_perturbations,
+                plots_dir / "exp3_level_perturbation_response_amplification.png",
+                "Response Amplification by Level and Perturbation",
+                "Mean Response Amplification",
+                cmap="magma",
+                metadata=_plot_metadata(
+                    experiment="3",
+                    what="Post/pre response amplification",
                     aggregation="level x perturbation average over samples",
                     x="perturbation type",
                     y="task level",
