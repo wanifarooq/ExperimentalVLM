@@ -279,12 +279,270 @@ class HFVLMAdapter(VLMAdapter):
 
         return (0, 0)
 
+    def _visual_module(self) -> Optional[Any]:
+        candidates: List[Any] = []
+        if self._model is not None:
+            candidates.append(self._model)
+            model_root = getattr(self._model, "model", None)
+            if model_root is not None:
+                candidates.append(model_root)
+            language_model = getattr(self._model, "language_model", None)
+            if language_model is not None:
+                candidates.append(language_model)
+        for obj in candidates:
+            for attr in ("visual", "vision_tower", "vision_model"):
+                module = getattr(obj, attr, None)
+                if module is not None:
+                    return module
+        return None
+
+    def _spatial_merge_size(self) -> int:
+        visual_module = self._visual_module()
+        value = getattr(visual_module, "spatial_merge_size", None)
+        if value is None:
+            value = getattr(getattr(self._model, "config", None), "spatial_merge_size", None)
+        try:
+            return max(1, int(value or 1))
+        except (TypeError, ValueError):
+            return 1
+
+    def _vision_device_dtype(self) -> Tuple[torch.device, torch.dtype]:
+        visual_module = self._visual_module()
+        if visual_module is not None:
+            try:
+                param = next(visual_module.parameters())
+                return param.device, param.dtype
+            except StopIteration:
+                pass
+            except Exception:
+                pass
+            try:
+                buffer = next(visual_module.buffers())
+                return buffer.device, buffer.dtype if torch.is_floating_point(buffer) else torch.float16
+            except StopIteration:
+                pass
+            except Exception:
+                pass
+        first_param = next(self._model.parameters(), None) if self._model is not None else None
+        if first_param is not None:
+            return first_param.device, first_param.dtype
+        return self._device_obj, torch.float16
+
+    @staticmethod
+    def _first_tensor(value: Any) -> Optional[torch.Tensor]:
+        if isinstance(value, torch.Tensor):
+            return value
+        if isinstance(value, dict):
+            for item in value.values():
+                tensor = HFVLMAdapter._first_tensor(item)
+                if tensor is not None:
+                    return tensor
+            return None
+        if hasattr(value, "to_tuple"):
+            try:
+                return HFVLMAdapter._first_tensor(value.to_tuple())
+            except Exception:
+                return None
+        if isinstance(value, (tuple, list)):
+            for item in value:
+                tensor = HFVLMAdapter._first_tensor(item)
+                if tensor is not None:
+                    return tensor
+        return None
+
+    @staticmethod
+    def _factor_grid(
+        n_tokens: int,
+        *,
+        preferred_ratio: Optional[float] = None,
+    ) -> Optional[Tuple[int, int]]:
+        if n_tokens <= 0:
+            return None
+        if n_tokens == 1:
+            return (1, 1)
+        if preferred_ratio is None or preferred_ratio <= 0:
+            side = int(math.isqrt(n_tokens))
+            for h in range(side, 0, -1):
+                if n_tokens % h == 0:
+                    return (h, n_tokens // h)
+            return (1, n_tokens)
+        best: Optional[Tuple[float, int, int]] = None
+        limit = int(math.isqrt(n_tokens))
+        for h in range(1, limit + 1):
+            if n_tokens % h != 0:
+                continue
+            for cand_h, cand_w in ((h, n_tokens // h), (n_tokens // h, h)):
+                ratio = cand_h / max(cand_w, 1)
+                score = abs(math.log(max(ratio, 1e-12) / preferred_ratio))
+                if best is None or score < best[0]:
+                    best = (score, cand_h, cand_w)
+        if best is None:
+            return None
+        return (best[1], best[2])
+
+    def _grid_from_image_grid(
+        self,
+        grid: Any,
+        n_tokens: int,
+    ) -> Optional[Tuple[int, int, int]]:
+        if grid is None or n_tokens <= 0:
+            return None
+        try:
+            if isinstance(grid, torch.Tensor):
+                grid_values = grid[0].detach().cpu().tolist()
+            else:
+                grid_values = grid[0].tolist() if hasattr(grid[0], "tolist") else grid[0]
+            t, h, w = [max(1, int(x)) for x in grid_values[:3]]
+        except Exception:
+            return None
+
+        merge_candidates = [self._spatial_merge_size(), 1, 2, 4]
+        seen = set()
+        for merge_size in merge_candidates:
+            if merge_size in seen or merge_size <= 0:
+                continue
+            seen.add(merge_size)
+            h_tokens = max(1, h // merge_size)
+            w_tokens = max(1, w // merge_size)
+            if t * h_tokens * w_tokens == n_tokens:
+                return (t, h_tokens, w_tokens)
+            if h_tokens * w_tokens == n_tokens:
+                return (1, h_tokens, w_tokens)
+
+        # Dynamic-resolution Qwen outputs are often rectangular. If the model's
+        # reported merge size does not match the returned token count, preserve
+        # the processor's aspect ratio and factor the actual token count.
+        preferred_ratio = h / max(w, 1)
+        if n_tokens % t == 0:
+            per_frame = n_tokens // t
+            factored = self._factor_grid(per_frame, preferred_ratio=preferred_ratio)
+            if factored is not None:
+                return (t, factored[0], factored[1])
+        factored = self._factor_grid(n_tokens, preferred_ratio=preferred_ratio)
+        if factored is not None:
+            return (1, factored[0], factored[1])
+        return None
+
+    def _normalise_vision_tokens(
+        self,
+        tokens: torch.Tensor,
+        *,
+        grid: Any = None,
+        image: Optional[Image.Image] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[Tuple[int, int]]]:
+        if not isinstance(tokens, torch.Tensor):
+            return None, None
+        if tokens.dim() == 4:
+            t, h, w, dim = tokens.shape
+            return tokens.reshape(-1, dim).detach().cpu(), (int(h), int(w))
+        if tokens.dim() == 3 and tokens.shape[0] == 1:
+            tokens = tokens[0]
+        elif tokens.dim() == 3 and grid is not None:
+            tokens = tokens.reshape(-1, tokens.shape[-1])
+        elif tokens.dim() == 3:
+            h, w, dim = tokens.shape
+            return tokens.reshape(-1, dim).detach().cpu(), (int(h), int(w))
+        elif tokens.dim() > 3:
+            tokens = tokens.reshape(-1, tokens.shape[-1])
+        if tokens.dim() != 2:
+            return None, None
+
+        n_tokens = int(tokens.shape[0])
+        grid_shape = self._grid_from_image_grid(grid, n_tokens)
+        if grid_shape is not None:
+            t, h, w = grid_shape
+            if t * h * w == n_tokens:
+                return tokens.reshape(-1, tokens.shape[-1]).detach().cpu(), (int(h), int(w))
+
+        preferred_ratio = None
+        if image is not None and image.width > 0:
+            preferred_ratio = image.height / image.width
+        factored = self._factor_grid(n_tokens, preferred_ratio=preferred_ratio)
+        if factored is None:
+            logger.debug(
+                "Could not infer rectangular vision-token grid for %s tokens on %s",
+                n_tokens,
+                self._model_id,
+            )
+            return tokens.detach().cpu(), None
+        return tokens.detach().cpu(), (int(factored[0]), int(factored[1]))
+
+    @torch.inference_mode()
+    def _extract_vision_tokens_direct(
+        self,
+        image: Image.Image,
+    ) -> Tuple[Optional[torch.Tensor], Optional[Tuple[int, int]]]:
+        image_processor = getattr(self._processor, "image_processor", None)
+        if self._model is None or image_processor is None:
+            return None, None
+        try:
+            vision_inputs = image_processor(images=[image], return_tensors="pt")
+        except Exception as exc:
+            logger.warning(
+                "Vision preprocessing failed for %s image size %s: %s",
+                self._model_id,
+                getattr(image, "size", None),
+                exc,
+            )
+            return None, None
+
+        pixel_values = vision_inputs.get("pixel_values")
+        if pixel_values is None:
+            logger.debug("Vision preprocessing for %s returned no pixel_values", self._model_id)
+            return None, None
+
+        vision_device, vision_dtype = self._vision_device_dtype()
+        moved: Dict[str, Any] = {}
+        for key, value in vision_inputs.items():
+            if isinstance(value, torch.Tensor):
+                if key == "pixel_values" and torch.is_floating_point(value):
+                    moved[key] = value.to(device=vision_device, dtype=vision_dtype)
+                else:
+                    moved[key] = value.to(device=vision_device)
+            else:
+                moved[key] = value
+
+        get_image_features = getattr(self._model, "get_image_features", None)
+        if not callable(get_image_features):
+            return None, None
+        kwargs: Dict[str, Any] = {"pixel_values": moved["pixel_values"]}
+        if moved.get("image_grid_thw") is not None:
+            kwargs["image_grid_thw"] = moved["image_grid_thw"]
+        elif moved.get("image_sizes") is not None:
+            kwargs["image_sizes"] = moved["image_sizes"]
+
+        try:
+            outputs = get_image_features(**kwargs)
+        except Exception as exc:
+            logger.warning(
+                "Vision encoder failed for %s image size %s: %s",
+                self._model_id,
+                getattr(image, "size", None),
+                exc,
+            )
+            return None, None
+
+        tokens = self._first_tensor(outputs)
+        if tokens is None:
+            logger.debug("Vision encoder for %s returned no tensor output", self._model_id)
+            return None, None
+        return self._normalise_vision_tokens(
+            tokens,
+            grid=moved.get("image_grid_thw"),
+            image=image,
+        )
+
     def _flatten_vision_tokens(
         self,
         image: Image.Image,
     ) -> Tuple[Optional[torch.Tensor], Optional[Tuple[int, int]]]:
         if self._model is None or self._processor is None:
             return None, None
+
+        flat_tokens, patch_grid = self._extract_vision_tokens_direct(image)
+        if flat_tokens is not None and patch_grid is not None:
+            return flat_tokens, patch_grid
+
         tokens = parent_get_vision_tokens(
             self._model,
             self._processor,
@@ -293,17 +551,7 @@ class HFVLMAdapter(VLMAdapter):
         )
         if tokens is None:
             return None, None
-        if tokens.dim() == 4:
-            _, h, w, dim = tokens.shape
-            return tokens.reshape(-1, dim).detach().cpu(), (int(h), int(w))
-        if tokens.dim() == 3:
-            h, w, dim = tokens.shape
-            return tokens.reshape(-1, dim).detach().cpu(), (int(h), int(w))
-        if tokens.dim() == 2:
-            n_tokens = int(tokens.shape[0])
-            side = max(1, int(math.isqrt(n_tokens)))
-            return tokens.detach().cpu(), (side, max(1, n_tokens // side))
-        return None, None
+        return self._normalise_vision_tokens(tokens, image=image)
 
     def _get_patch_grid_from_inputs(
         self,
@@ -312,8 +560,7 @@ class HFVLMAdapter(VLMAdapter):
     ) -> Optional[Tuple[int, int]]:
         grid = inputs.get("image_grid_thw")
         if grid is not None:
-            visual_module = getattr(getattr(self._model, "model", None), "visual", None)
-            merge_size = int(getattr(visual_module, "spatial_merge_size", 1))
+            merge_size = self._spatial_merge_size()
             _, h, w = [int(x) for x in grid[0].tolist()]
             return (max(1, h // merge_size), max(1, w // merge_size))
 
@@ -353,8 +600,7 @@ class HFVLMAdapter(VLMAdapter):
         grid = vision_inputs.get("image_grid_thw")
         if grid is not None:
             try:
-                visual_module = getattr(getattr(self._model, "model", None), "visual", None)
-                merge_size = int(getattr(visual_module, "spatial_merge_size", 1) or 1)
+                merge_size = self._spatial_merge_size()
                 _, h, w = [int(x) for x in grid[0].tolist()]
                 return (max(1, h // merge_size), max(1, w // merge_size))
             except Exception as exc:
@@ -368,13 +614,13 @@ class HFVLMAdapter(VLMAdapter):
         if isinstance(pixel_values, torch.Tensor) and pixel_values.ndim >= 4:
             height = int(pixel_values.shape[-2])
             width = int(pixel_values.shape[-1])
-            visual_module = getattr(getattr(self._model, "model", None), "visual", None)
+            visual_module = self._visual_module()
             vision_config = getattr(getattr(self._model, "config", None), "vision_config", None)
             patch_size = (
                 getattr(visual_module, "patch_size", None)
                 or getattr(vision_config, "patch_size", None)
             )
-            merge_size = int(getattr(visual_module, "spatial_merge_size", 1) or 1)
+            merge_size = self._spatial_merge_size()
             if patch_size:
                 return (
                     max(1, math.ceil(height / int(patch_size)) // merge_size),

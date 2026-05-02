@@ -245,6 +245,38 @@ def _optional_float(value: Any) -> Optional[float]:
     return value_float if np.isfinite(value_float) else None
 
 
+def _summarize_vision_feature_status(per_sample: List[Dict[str, Any]]) -> Dict[str, Any]:
+    statuses = [
+        record.get("vision_feature_status", {})
+        for record in per_sample
+        if isinstance(record.get("vision_feature_status", {}), dict)
+    ]
+    requested = [status for status in statuses if status.get("requested")]
+    total_attempted = int(sum(int(status.get("perturbations_attempted", 0) or 0) for status in statuses))
+    total_extracted = int(sum(int(status.get("perturbations_extracted", 0) or 0) for status in statuses))
+    total_delta_success = int(sum(int(status.get("feature_delta_success", 0) or 0) for status in statuses))
+    total_vision_2d_saved = int(sum(int(status.get("vision_2d_saved", 0) or 0) for status in statuses))
+    return {
+        "requested_images": len(requested),
+        "clean_extracted_images": int(sum(1 for status in requested if status.get("clean_extracted"))),
+        "perturbations_attempted": total_attempted,
+        "perturbations_extracted": total_extracted,
+        "feature_delta_success": total_delta_success,
+        "vision_2d_saved": total_vision_2d_saved,
+        "clean_extraction_rate": (
+            float(sum(1 for status in requested if status.get("clean_extracted")) / len(requested))
+            if requested
+            else 0.0
+        ),
+        "perturbation_extraction_rate": (
+            float(total_extracted / total_attempted) if total_attempted else 0.0
+        ),
+        "feature_delta_success_rate": (
+            float(total_delta_success / total_attempted) if total_attempted else 0.0
+        ),
+    }
+
+
 def _horse_race_predictors(points: List[Dict[str, Any]]) -> List[str]:
     """Use entropy + task-format controls when available.
 
@@ -700,11 +732,21 @@ def _evaluate_sample(
     need_vision_features = extract_vision_tokens or store_feature_delta_f
     perturbation_vision_metrics: Dict[str, Dict[str, Any]] = {}
     vision_2d_entries: List[Dict[str, Any]] = []
+    vision_feature_status: Dict[str, Any] = {
+        "requested": bool(need_vision_features),
+        "clean_extracted": False,
+        "perturbations_attempted": 0,
+        "perturbations_extracted": 0,
+        "feature_delta_success": 0,
+        "feature_delta_failed": 0,
+        "vision_2d_saved": 0,
+    }
     if need_vision_features:
         try:
             vt = adapter.get_vision_tokens(image)
             if vt is not None:
                 clean_vision_tokens = vt.cpu().numpy()
+                vision_feature_status["clean_extracted"] = True
                 if clean_vision_tokens.ndim == 4 and clean_vision_tokens.shape[0] == 1:
                     clean_patch_grid = (
                         int(clean_vision_tokens.shape[1]),
@@ -716,16 +758,30 @@ def _evaluate_sample(
                         int(clean_vision_tokens.shape[1]),
                     )
                 clean_dirichlet = dirichlet_energy_from_tokens(vt)
-        except Exception:
-            pass
+        except Exception as exc:
+            vision_feature_status["clean_error"] = str(exc)
+        if clean_vision_tokens is None:
+            logger.warning(
+                "Vision-token extraction unavailable for clean image %s; "
+                "delta_f_vision will be missing for this sample",
+                sample.image_id,
+            )
     if clean_vision_tokens is not None:
         for perturbation in perturbation_results:
+            vision_feature_status["perturbations_attempted"] += 1
             try:
                 pert_tokens = adapter.get_vision_tokens(perturbation.perturbed_image)
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Vision-token extraction raised for %s pert %s: %s",
+                    sample.image_id,
+                    perturbation.name,
+                    exc,
+                )
                 continue
             if pert_tokens is None:
                 continue
+            vision_feature_status["perturbations_extracted"] += 1
             pert_np = pert_tokens.cpu().numpy()
             pert_patch_grid = None
             if pert_np.ndim == 4 and pert_np.shape[0] == 1:
@@ -753,6 +809,7 @@ def _evaluate_sample(
                 except Exception:
                     feature_stats = None
                 if feature_stats is not None:
+                    vision_feature_status["feature_delta_success"] += 1
                     delta_f_vision = feature_stats["delta_f"]
                     metrics["delta_f_vision"] = delta_f_vision.tolist()
                     metrics["delta_f_vision_relative"] = feature_stats["delta_f_relative"].tolist()
@@ -784,7 +841,24 @@ def _evaluate_sample(
                             metrics["delta_f_vision_2d_file"] = vision_2d_entry["filename"]
                             metrics["delta_f_vision_2d_shape"] = vision_2d_entry["shape"]
                             vision_2d_entries.append(vision_2d_entry)
+                            vision_feature_status["vision_2d_saved"] += 1
+                elif store_feature_delta_f:
+                    vision_feature_status["feature_delta_failed"] += 1
             perturbation_vision_metrics[perturbation.name] = metrics
+
+    record["vision_feature_status"] = vision_feature_status
+    if (
+        vision_feature_status["requested"]
+        and vision_feature_status["clean_extracted"]
+        and vision_feature_status["feature_delta_success"]
+        < vision_feature_status["perturbations_attempted"]
+    ):
+        logger.info(
+            "Vision-token spectra for %s: %d/%d perturbations",
+            sample.image_id,
+            vision_feature_status["feature_delta_success"],
+            vision_feature_status["perturbations_attempted"],
+        )
 
     if feature_delta_2d_dir is not None and vision_2d_entries:
         save_json(
@@ -1826,6 +1900,7 @@ def run_exp1(
 
     # --- Aggregate results ---
     agg = _aggregate_results(per_sample_results)
+    agg["vision_feature_status"] = _summarize_vision_feature_status(per_sample_results)
     delta_2d_dir = out_dir / "delta_f_2d"
     delta_vision_2d_dir = out_dir / "delta_f_vision_2d"
     num_delta_f_2d_files = (
