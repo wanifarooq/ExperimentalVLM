@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Experimental plots for Exp 5 image-space 2D overlap diagnostics.
+"""Experimental plots for Exp 5 2D overlap diagnostics.
 
 This script intentionally lives outside the production plotting pipeline. It
-reads an existing run directory, uses the 2D overlap keys emitted by Exp 5, and
-writes plots to a separate folder for inspection before merging anything into
-``frequency_alignment/plotting``.
+reads an existing run directory, uses or recomputes 2D overlap keys, and writes
+plots to a separate folder for inspection before merging anything into
+``frequency_alignment/plotting``. It supports both image-space 2D spectra and
+vision-feature-space 2D spectra when the corresponding Exp 1 sidecars exist.
 """
 
 from __future__ import annotations
@@ -69,6 +70,24 @@ COLORS = {
     "two_d_cosine": "#d97706",
 }
 EPS = 1e-12
+DOMAIN_SPECS = {
+    "image_space": {
+        "source": "image_space",
+        "delta_dir": "delta_f_2d",
+        "delta_file_key": "delta_f_2d_file",
+        "delta_key_raw": "delta_power_2d",
+        "delta_key_relative": "delta_power_2d_relative",
+        "description": "image/pixel FFT perturbation spectrum",
+    },
+    "vision_feature_space": {
+        "source": "vision_feature_space",
+        "delta_dir": "delta_f_vision_2d",
+        "delta_file_key": "delta_f_vision_2d_file",
+        "delta_key_raw": "delta_power_vision_2d",
+        "delta_key_relative": "delta_power_vision_2d_relative",
+        "description": "vision-token feature-grid FFT perturbation spectrum",
+    },
+}
 
 
 def _parse_csv(value: Optional[str], default: Sequence[str]) -> List[str]:
@@ -301,9 +320,11 @@ def _compute_2d_variants(W_t_2d: np.ndarray, delta_2d: np.ndarray) -> Dict[str, 
     dot = float(np.sum(w * d))
     denom = float(np.linalg.norm(w) * np.linalg.norm(d))
     return {
+        "predicted_2d_first_order": dot,
         "predicted_2d_first_order_recomputed": dot,
         "predicted_2d_linear": float(np.sum(w * d ** 2)),
         "predicted_2d_quadratic": float(np.sum((w ** 2) * (d ** 2))),
+        "predicted_2d_cosine": float(dot / denom) if denom > EPS else 0.0,
         "predicted_2d_cosine_recomputed": float(dot / denom) if denom > EPS else 0.0,
     }
 
@@ -317,11 +338,13 @@ def _compute_grouped_2d_variant_rows(
     *,
     groups: Sequence[str],
     target_key: str,
-    delta_key: str = "delta_power_2d_relative",
+    domain: str,
+    delta_key: str,
 ) -> Dict[str, Dict[Tuple[str, str, str], Dict[str, Any]]]:
     """Recompute 2D linear/quadratic variants from Exp1/Exp2 sidecars."""
+    spec = DOMAIN_SPECS[domain]
     exp1_jsonl = run_dir / "exp1" / "per_sample.jsonl"
-    delta_dir = run_dir / "exp1" / "delta_f_2d"
+    delta_dir = run_dir / "exp1" / str(spec["delta_dir"])
     filter_dir = run_dir / "exp2" / "filters_2d"
     if not exp1_jsonl.exists() or not delta_dir.exists() or not filter_dir.exists():
         return {}
@@ -342,7 +365,7 @@ def _compute_grouped_2d_variant_rows(
                 continue
 
             for perturbation in level_data.get("perturbations", []):
-                delta_file = perturbation.get("delta_f_2d_file")
+                delta_file = perturbation.get(str(spec["delta_file_key"]))
                 target_value = _target_value(level_data, perturbation, target_key)
                 if not delta_file or target_value is None:
                     continue
@@ -364,11 +387,15 @@ def _compute_grouped_2d_variant_rows(
                     bucket["perturbation_family"].append(family)
                     bucket[target_key].append(float(target_value))
                     bucket["actual"].append(float(target_value))
+                    bucket["predicted_2d_first_order"].append(
+                        variants["predicted_2d_first_order"]
+                    )
                     bucket["predicted_2d_first_order_recomputed"].append(
                         variants["predicted_2d_first_order_recomputed"]
                     )
                     bucket["predicted_2d_linear"].append(variants["predicted_2d_linear"])
                     bucket["predicted_2d_quadratic"].append(variants["predicted_2d_quadratic"])
+                    bucket["predicted_2d_cosine"].append(variants["predicted_2d_cosine"])
                     bucket["predicted_2d_cosine_recomputed"].append(
                         variants["predicted_2d_cosine_recomputed"]
                     )
@@ -385,15 +412,21 @@ def _compute_grouped_2d_variant_rows(
                 "perturbation_family": family,
                 target_key: _mean_or_none(values[target_key]),
                 "actual": _mean_or_none(values["actual"]),
+                "predicted_2d_first_order": _mean_or_none(
+                    values["predicted_2d_first_order"]
+                ),
                 "predicted_2d_first_order_recomputed": _mean_or_none(
                     values["predicted_2d_first_order_recomputed"]
                 ),
                 "predicted_2d_linear": _mean_or_none(values["predicted_2d_linear"]),
                 "predicted_2d_quadratic": _mean_or_none(values["predicted_2d_quadratic"]),
+                "predicted_2d_cosine": _mean_or_none(values["predicted_2d_cosine"]),
                 "predicted_2d_cosine_recomputed": _mean_or_none(
                     values["predicted_2d_cosine_recomputed"]
                 ),
                 "n_2d_recomputed": len(values["actual"]),
+                "overlap_2d_domain": domain,
+                "overlap_2d_delta_key": delta_key,
             }
     return grouped
 
@@ -698,6 +731,9 @@ def _write_summary_files(
         json.dump(payload, handle, indent=2)
     with (out_dir / "exp5_overlap2d_correlations.csv").open("w", newline="") as handle:
         fieldnames = [
+            "domain",
+            "source",
+            "delta_key",
             "group",
             "variant",
             "target",
@@ -734,6 +770,37 @@ def _load_grouped_rows(exp5_dir: Path, source_name: str) -> Dict[str, List[Dict[
     return {"late": _load_json(fallback_path)}
 
 
+def _resolve_domain_and_source(args: argparse.Namespace) -> Tuple[str, str]:
+    domain = args.domain or args.source or "image_space"
+    if domain not in DOMAIN_SPECS:
+        raise ValueError(
+            f"Unknown 2D overlap domain {domain!r}; expected one of {sorted(DOMAIN_SPECS)}"
+        )
+    source = args.source or str(DOMAIN_SPECS[domain]["source"])
+    return domain, source
+
+
+def _resolve_delta_key(domain: str, delta_key: str) -> str:
+    spec = DOMAIN_SPECS[domain]
+    key = str(delta_key or "relative")
+    if key == "relative":
+        return str(spec["delta_key_relative"])
+    if key == "raw":
+        return str(spec["delta_key_raw"])
+    if key in {spec["delta_key_raw"], spec["delta_key_relative"]}:
+        return key
+    image_keys = {DOMAIN_SPECS["image_space"]["delta_key_raw"], DOMAIN_SPECS["image_space"]["delta_key_relative"]}
+    vision_keys = {
+        DOMAIN_SPECS["vision_feature_space"]["delta_key_raw"],
+        DOMAIN_SPECS["vision_feature_space"]["delta_key_relative"],
+    }
+    if domain == "vision_feature_space" and key in image_keys:
+        return str(spec["delta_key_relative"]) if key.endswith("_relative") else str(spec["delta_key_raw"])
+    if domain == "image_space" and key in vision_keys:
+        return str(spec["delta_key_relative"]) if key.endswith("_relative") else str(spec["delta_key_raw"])
+    raise ValueError(f"Unknown delta key {delta_key!r} for domain {domain!r}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate experimental Exp5 overlap_2d plots from an existing run."
@@ -750,7 +817,22 @@ def main() -> None:
         default=None,
         help="Destination directory. Defaults to <output-dir>/plots_overlap_2d_experimental.",
     )
-    parser.add_argument("--source", default="image_space", help="Exp5 source key to plot.")
+    parser.add_argument(
+        "--domain",
+        default=None,
+        choices=sorted(DOMAIN_SPECS),
+        help=(
+            "2D sidecar domain to recompute: image_space uses exp1/delta_f_2d; "
+            "vision_feature_space uses exp1/delta_f_vision_2d."
+        ),
+    )
+    parser.add_argument(
+        "--source",
+        default=None,
+        help=(
+            "Exp5 radial source key to load. Defaults to the matching source for --domain."
+        ),
+    )
     parser.add_argument(
         "--target",
         default="loglik_volatility",
@@ -773,8 +855,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--delta-key",
-        default="delta_power_2d_relative",
-        choices=["delta_power_2d", "delta_power_2d_relative"],
+        default="relative",
+        choices=[
+            "relative",
+            "raw",
+            "delta_power_2d",
+            "delta_power_2d_relative",
+            "delta_power_vision_2d",
+            "delta_power_vision_2d_relative",
+        ],
         help="Which saved 2D perturbation spectrum to use for recomputed variants.",
     )
     parser.add_argument("--max-points", type=int, default=8000)
@@ -790,18 +879,21 @@ def main() -> None:
 
     run_dir = args.output_dir
     exp5_dir = run_dir / "exp5"
-    plots_dir = args.plots_dir or (run_dir / "plots_overlap_2d_experimental")
+    domain, source = _resolve_domain_and_source(args)
+    delta_key = _resolve_delta_key(domain, args.delta_key)
+    plots_dir = args.plots_dir or (run_dir / "plots_overlap_2d_experimental" / domain)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    grouped_rows = _load_grouped_rows(exp5_dir, args.source)
+    grouped_rows = _load_grouped_rows(exp5_dir, source)
     groups = _parse_csv(args.groups, GROUP_ORDER)
     variants = _parse_csv(args.variants, list(VARIANTS))
-    if not args.skip_computed_variants and args.source == "image_space":
+    if not args.skip_computed_variants:
         computed_rows = _compute_grouped_2d_variant_rows(
             run_dir,
             groups=groups,
             target_key=args.target,
-            delta_key=args.delta_key,
+            domain=domain,
+            delta_key=delta_key,
         )
         _augment_grouped_rows_with_computed_2d(grouped_rows, computed_rows)
 
@@ -823,7 +915,7 @@ def main() -> None:
                     predicted_key=predicted_key,
                     target_key=args.target,
                     out_path=plots_dir
-                    / f"exp5_overlap2d_scatter_{_safe_name(variant_name)}_{_safe_name(group_name)}_{_safe_name(args.target)}.png",
+                    / f"exp5_overlap2d_scatter_{_safe_name(domain)}_{_safe_name(variant_name)}_{_safe_name(group_name)}_{_safe_name(args.target)}.png",
                     max_points=args.max_points,
                     seed=args.seed,
                     log_x=not args.no_log_x,
@@ -837,7 +929,7 @@ def main() -> None:
                     predicted_key=predicted_key,
                     target_key=args.target,
                     out_path=plots_dir
-                    / f"exp5_overlap2d_level_grid_{_safe_name(variant_name)}_{_safe_name(group_name)}_{_safe_name(args.target)}.png",
+                    / f"exp5_overlap2d_level_grid_{_safe_name(domain)}_{_safe_name(variant_name)}_{_safe_name(group_name)}_{_safe_name(args.target)}.png",
                     max_points_per_level=args.max_points_per_level,
                     seed=args.seed,
                     log_x=not args.no_log_x,
@@ -852,7 +944,7 @@ def main() -> None:
                         predicted_key=predicted_key,
                         target_key=args.target,
                         out_path=plots_dir
-                        / f"exp5_overlap2d_family_correlations_{_safe_name(variant_name)}_{_safe_name(group_name)}_{_safe_name(args.target)}.png",
+                        / f"exp5_overlap2d_family_correlations_{_safe_name(domain)}_{_safe_name(variant_name)}_{_safe_name(group_name)}_{_safe_name(args.target)}.png",
                         min_n=args.min_family_n,
                     )
                 )
@@ -861,11 +953,22 @@ def main() -> None:
         summaries,
         target_key=args.target,
         out_path=plots_dir
-        / f"exp5_overlap2d_correlation_bars_{_safe_name(args.target)}.png",
+        / f"exp5_overlap2d_correlation_bars_{_safe_name(domain)}_{_safe_name(args.target)}.png",
     )
+    for row in summaries:
+        row["domain"] = domain
+        row["source"] = source
+        row["delta_key"] = delta_key
+        row["domain_description"] = DOMAIN_SPECS[domain]["description"]
+    for row in family_summaries:
+        row["domain"] = domain
+        row["source"] = source
+        row["delta_key"] = delta_key
+        row["domain_description"] = DOMAIN_SPECS[domain]["description"]
     _write_summary_files(plots_dir, summaries, family_summaries)
 
     print(f"Wrote overlap_2d experimental plots to {plots_dir}")
+    print(f"Domain: {domain}  Source: {source}  Delta key: {delta_key}")
     print(f"Summary JSON: {plots_dir / 'exp5_overlap2d_plot_summary.json'}")
 
 
