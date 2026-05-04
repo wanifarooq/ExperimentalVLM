@@ -36,7 +36,7 @@ LEVEL_ORDER = [
     "L7_WORDY_FINE",
     "L8_WORDY_VERY_FINE",
 ]
-GROUP_ORDER = ["overall", "early", "mid", "late"]
+GROUP_ORDER = ["overall", "early", "mid", "late", "last_1", "last_2", "last_3", "last_4"]
 VARIANTS = {
     "radial_first_order": "predicted_first_order",
     "two_d_first_order": "predicted_2d_first_order",

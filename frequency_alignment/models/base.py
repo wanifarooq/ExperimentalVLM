@@ -115,6 +115,7 @@ class VLMAdapter(ABC):
         extract_pre_fusion: bool = True,
         extract_post_fusion: bool = True,
         layer_stride: int = 1,
+        attention_extra_last_layers: int = 0,
         post_fusion_layer_index: Optional[int] = None,
         post_fusion_layer_fraction: float = 0.8,
     ) -> HookOutputs:
@@ -129,6 +130,8 @@ class VLMAdapter(ABC):
             extract_pre_fusion: Capture vision features before fusion.
             extract_post_fusion: Capture features after fusion.
             layer_stride: Extract attention from every Nth layer (saves memory).
+            attention_extra_last_layers: Always include this many final decoder
+                attention layers in addition to the stride-sampled layers.
             post_fusion_layer_index: Optional explicit hidden-state index to use
                 for post-fusion features.
             post_fusion_layer_fraction: Default late-layer fraction used when

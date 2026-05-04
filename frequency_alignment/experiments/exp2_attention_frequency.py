@@ -70,6 +70,7 @@ from ..utils.io import save_json
 
 logger = logging.getLogger(__name__)
 CONTROL_ORDER = ("empty_language", "random_language")
+LAST_LAYER_GROUP_ORDER = ("last_1", "last_2", "last_3", "last_4")
 _EPS = 1e-8
 
 
@@ -79,6 +80,13 @@ def _overlap_2d_enabled(cfg: Dict[str, Any]) -> bool:
     if isinstance(overlap_cfg, dict):
         return bool(overlap_cfg.get("enabled", False))
     return bool(overlap_cfg)
+
+
+def _filter_group_order(include_last_layers: bool) -> tuple[str, ...]:
+    """Groups that should be persisted for task filters."""
+    if include_last_layers:
+        return (*LAYER_GROUP_ORDER, *LAST_LAYER_GROUP_ORDER)
+    return tuple(LAYER_GROUP_ORDER)
 
 
 def _zero_dc_2d(power_2d: np.ndarray) -> np.ndarray:
@@ -211,12 +219,8 @@ def _build_complexity_points(per_sample: List[Dict[str, Any]]) -> List[Dict[str,
                 "num_options": int(level_data.get("num_options", 0) or 0),
                 "bandwidth": float(level_data.get("bandwidth", 0.0) or 0.0),
             }
-            for group_name in LAYER_GROUP_ORDER:
-                group_bandwidth = (
-                    level_data.get("layer_groups", {})
-                    .get(group_name, {})
-                    .get("bandwidth")
-                )
+            for group_name, group_data in level_data.get("layer_groups", {}).items():
+                group_bandwidth = group_data.get("bandwidth")
                 if group_bandwidth is not None:
                     point[f"bandwidth_{group_name}"] = float(group_bandwidth)
             points.append(point)
@@ -327,6 +331,7 @@ def _extract_attention_for_prompt(
             extract_pre_fusion=False,
             extract_post_fusion=False,
             layer_stride=layer_stride,
+            attention_extra_last_layers=len(LAST_LAYER_GROUP_ORDER) if store_2d_spectra else 0,
         )
     except Exception as e:
         logger.warning("extract_internals failed: %s", e)
@@ -409,6 +414,15 @@ def _extract_attention_for_prompt(
         if not group_values:
             continue
         group_stats[group_name] = _summarize_group(group_values, group_layer_indices)
+    if store_2d_spectra:
+        last_pairs = sorted(
+            zip(layer_indices, attn_list),
+            key=lambda pair: int(pair[0]),
+            reverse=True,
+        )[: len(LAST_LAYER_GROUP_ORDER)]
+        for offset, (layer_index, attn) in enumerate(last_pairs, start=1):
+            group_name = f"last_{offset}"
+            group_stats[group_name] = _summarize_group([attn], [int(layer_index)])
 
     return {
         **overall,
@@ -451,6 +465,7 @@ def run_exp2(
     num_bands = cfg.get("analysis", {}).get("num_bands", 10)
     suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
     overlap_2d_enabled = _overlap_2d_enabled(cfg)
+    filter_group_order = _filter_group_order(overlap_2d_enabled)
     effective_band_count = spectral_vector_length(num_bands, suppress_dc=suppress_dc)
     seed = cfg.get("seed", 42)
 
@@ -504,13 +519,13 @@ def run_exp2(
     level_bandwidths_l2: Dict[str, List[float]] = defaultdict(list)
     level_radials: Dict[str, List[np.ndarray]] = defaultdict(list)
     level_group_bandwidths: Dict[str, Dict[str, List[float]]] = {
-        group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER
+        group_name: defaultdict(list) for group_name in filter_group_order
     }
     level_group_bandwidths_l2: Dict[str, Dict[str, List[float]]] = {
-        group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER
+        group_name: defaultdict(list) for group_name in filter_group_order
     }
     level_group_radials: Dict[str, Dict[str, List[np.ndarray]]] = {
-        group_name: defaultdict(list) for group_name in LAYER_GROUP_ORDER
+        group_name: defaultdict(list) for group_name in filter_group_order
     }
     level_per_layer_bandwidths: Dict[str, Dict[int, List[float]]] = defaultdict(
         lambda: defaultdict(list)
@@ -670,7 +685,7 @@ def run_exp2(
                 sample_record["levels"][level_key]["W_t_2d_file"] = w_t_2d_entry["filename"]
                 sample_record["levels"][level_key]["W_t_2d_shape"] = w_t_2d_entry["shape"]
 
-            for group_name in LAYER_GROUP_ORDER:
+            for group_name in filter_group_order:
                 group_result = result.get("layer_groups", {}).get(group_name)
                 if group_result is None:
                     continue
@@ -813,11 +828,20 @@ def run_exp2(
     agg: Dict[str, Any] = {
         "per_level": {},
         "layer_groups": {
-            "order": list(LAYER_GROUP_ORDER),
+            "order": list(filter_group_order),
             "ranges": {
                 group_name: {"start": start, "end": end}
                 for group_name, (start, end) in layer_group_meta.items()
             },
+            "last_layer_groups": {
+                group_name: {
+                    "offset_from_last": offset,
+                    "description": "single final decoder attention layer captured in addition to stride sampling",
+                }
+                for offset, group_name in enumerate(LAST_LAYER_GROUP_ORDER, start=1)
+            }
+            if overlap_2d_enabled
+            else {},
         },
         "fft_window": fft_window,
         "suppress_dc": suppress_dc,
@@ -833,7 +857,7 @@ def run_exp2(
             if overlap_2d_enabled and filters_2d_dir.exists()
             else 0,
             "keying": "image_id x level x attention_group",
-            "groups": ["overall", *LAYER_GROUP_ORDER],
+            "groups": ["overall", *filter_group_order],
         },
     }
     level_order = list(ALL_VQA_LEVEL_NAMES)
@@ -867,7 +891,7 @@ def run_exp2(
             "layer_groups": {},
         }
 
-        for group_name in LAYER_GROUP_ORDER:
+        for group_name in filter_group_order:
             group_bws = level_group_bandwidths[group_name].get(lk, [])
             group_bws_l2 = level_group_bandwidths_l2[group_name].get(lk, [])
             group_radials = level_group_radials[group_name].get(lk, [])
@@ -1052,7 +1076,7 @@ def run_exp2(
         W_t_avg = np.array(agg["per_level"][lk]["W_t_average"])
         np.save(filters_dir / f"average_{lk}.npy", W_t_avg)
         np.save(filters_dir / f"average_{lk}_l2.npy", np.array(agg["per_level"][lk]["W_t_average_l2"]))
-        for group_name in LAYER_GROUP_ORDER:
+        for group_name in filter_group_order:
             group_stats = agg["per_level"][lk]["layer_groups"].get(group_name)
             if group_stats is None:
                 continue

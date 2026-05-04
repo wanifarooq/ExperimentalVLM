@@ -678,6 +678,7 @@ class HFVLMAdapter(VLMAdapter):
         extract_pre_fusion: bool = True,
         extract_post_fusion: bool = True,
         layer_stride: int = 1,
+        attention_extra_last_layers: int = 0,
         post_fusion_layer_index: Optional[int] = None,
         post_fusion_layer_fraction: float = 0.8,
     ) -> HookOutputs:
@@ -709,10 +710,15 @@ class HFVLMAdapter(VLMAdapter):
         if extract_attention:
             attn_list: List[torch.Tensor] = []
             layer_indices: List[int] = []
-            for layer_index, attn in enumerate(getattr(outputs, "attentions", None) or []):
+            attentions = list(getattr(outputs, "attentions", None) or [])
+            extra_last = max(0, int(attention_extra_last_layers or 0))
+            extra_last_start = max(0, len(attentions) - extra_last) if extra_last else len(attentions)
+            for layer_index, attn in enumerate(attentions):
                 if attn is None or vis_end <= vis_start:
                     continue
-                if layer_stride > 1 and layer_index % layer_stride != 0:
+                is_stride_layer = layer_stride <= 1 or layer_index % layer_stride == 0
+                is_extra_last_layer = extra_last > 0 and layer_index >= extra_last_start
+                if not is_stride_layer and not is_extra_last_layer:
                     continue
                 seq_len = attn.shape[-1]
                 lang_mask = torch.ones(seq_len, dtype=torch.bool, device=attn.device)
