@@ -435,6 +435,7 @@ def _augment_grouped_rows_with_computed_2d(
     grouped_rows: Dict[str, List[Dict[str, Any]]],
     computed_rows: Dict[str, Dict[Tuple[str, str, str], Dict[str, Any]]],
 ) -> None:
+    """Merge recomputed 2D rows, including groups absent from Exp5 production."""
     for group_name, rows in grouped_rows.items():
         computed_group = computed_rows.get(group_name, {})
         for row in rows:
@@ -446,6 +447,20 @@ def _augment_grouped_rows_with_computed_2d(
             computed = computed_group.get(key)
             if computed:
                 row.update(computed)
+    for group_name, computed_group in computed_rows.items():
+        existing_rows = grouped_rows.setdefault(group_name, [])
+        existing_keys = {
+            (
+                str(row.get("image_id")),
+                str(row.get("level")),
+                str(row.get("perturbation_family", row.get("perturbation", "unknown"))),
+            )
+            for row in existing_rows
+        }
+        for row_key, computed in computed_group.items():
+            if row_key in existing_keys:
+                continue
+            existing_rows.append(dict(computed))
 
 
 def _plot_scatter(
@@ -840,7 +855,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--groups",
-        default="overall,early,mid,late",
+        default=",".join(GROUP_ORDER),
         help="Comma-separated filter groups to plot.",
     )
     parser.add_argument(

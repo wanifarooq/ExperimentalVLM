@@ -132,6 +132,8 @@ experiments:
     layer_stride: 8
     # Overrides analysis.attention_fft_window. Use none / off / false to disable.
     fft_window: none
+    question_only_control:
+      enabled: false
     prompt_controls:
       - empty_language
       - random_language

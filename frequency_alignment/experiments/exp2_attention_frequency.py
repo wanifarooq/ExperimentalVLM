@@ -82,6 +82,14 @@ def _overlap_2d_enabled(cfg: Dict[str, Any]) -> bool:
     return bool(overlap_cfg)
 
 
+def _question_only_control_enabled(exp_cfg: Dict[str, Any]) -> bool:
+    """Optional Exp2 side branch for filters extracted from question text only."""
+    control_cfg = exp_cfg.get("question_only_control", {})
+    if isinstance(control_cfg, dict):
+        return bool(control_cfg.get("enabled", False))
+    return bool(control_cfg)
+
+
 def _filter_group_order(include_last_layers: bool) -> tuple[str, ...]:
     """Groups that should be persisted for task filters."""
     if include_last_layers:
@@ -173,6 +181,56 @@ def _save_w_t_2d(
         "shape": [int(W_t_2d.shape[0]), int(W_t_2d.shape[1])],
         "spectral_alignment": "fftshifted_attention_power",
     }
+
+
+def _serialise_filter_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact JSON-safe representation of one extracted filter result."""
+    return {
+        "bandwidth": result["bandwidth"],
+        "bandwidth_l2": result["bandwidth_l2"],
+        "radial_power": result["radial_power"].tolist(),
+        "W_t": result["W_t"].tolist(),
+        "W_t_l2": result["W_t_l2"].tolist(),
+        "num_layers": result["num_layers_extracted"],
+        "num_heads": result["num_heads_total"],
+        "layer_indices": result.get("layer_indices", []),
+    }
+
+
+def _store_filter_artifacts(
+    *,
+    result: Dict[str, Any],
+    filters_dir: Path,
+    filters_2d_dir: Path,
+    image_id: Any,
+    level_key: str,
+    group_name: Optional[str],
+    patch_grid: Any,
+    fft_window: str,
+    suppress_dc: bool,
+    overlap_2d_enabled: bool,
+) -> Dict[str, Any]:
+    """Save radial/2D filter sidecars and return JSON metadata."""
+    suffix = "" if group_name is None else f"_{group_name}"
+    np.save(filters_dir / f"{image_id}_{level_key}{suffix}.npy", result["W_t"])
+    np.save(filters_dir / f"{image_id}_{level_key}{suffix}_l2.npy", result["W_t_l2"])
+    metadata: Dict[str, Any] = {}
+    if overlap_2d_enabled and result.get("W_t_2d") is not None:
+        w_t_2d_entry = _save_w_t_2d(
+            filters_2d_dir=filters_2d_dir,
+            image_id=image_id,
+            level_key=level_key,
+            group_name=group_name or "overall",
+            power_2d=result["power_2d"],
+            W_t_2d=result["W_t_2d"],
+            patch_grid=patch_grid,
+            layer_indices=result.get("layer_indices", []),
+            fft_window=fft_window,
+            suppress_dc=suppress_dc,
+        )
+        metadata["W_t_2d_file"] = w_t_2d_entry["filename"]
+        metadata["W_t_2d_shape"] = w_t_2d_entry["shape"]
+    return metadata
 
 
 def _bandwidth_horse_race_predictors(points: List[Dict[str, Any]]) -> List[str]:
@@ -465,6 +523,7 @@ def run_exp2(
     num_bands = cfg.get("analysis", {}).get("num_bands", 10)
     suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
     overlap_2d_enabled = _overlap_2d_enabled(cfg)
+    question_only_enabled = _question_only_control_enabled(exp_cfg)
     filter_group_order = _filter_group_order(overlap_2d_enabled)
     effective_band_count = spectral_vector_length(num_bands, suppress_dc=suppress_dc)
     seed = cfg.get("seed", 42)
@@ -511,6 +570,12 @@ def run_exp2(
     filters_2d_dir = out_dir / "filters_2d"
     if overlap_2d_enabled:
         filters_2d_dir.mkdir(parents=True, exist_ok=True)
+    question_only_filters_dir = out_dir / "filters_question_only"
+    question_only_filters_2d_dir = out_dir / "filters_2d_question_only"
+    if question_only_enabled:
+        question_only_filters_dir.mkdir(parents=True, exist_ok=True)
+        if overlap_2d_enabled:
+            question_only_filters_2d_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Extraction loop ---
     per_sample: List[Dict[str, Any]] = []
@@ -530,6 +595,33 @@ def run_exp2(
     level_per_layer_bandwidths: Dict[str, Dict[int, List[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
+    qo_level_bandwidths: Dict[str, List[float]] = defaultdict(list)
+    qo_level_bandwidths_l2: Dict[str, List[float]] = defaultdict(list)
+    qo_level_radials: Dict[str, List[np.ndarray]] = defaultdict(list)
+    qo_level_group_bandwidths: Dict[str, Dict[str, List[float]]] = {
+        group_name: defaultdict(list) for group_name in filter_group_order
+    }
+    qo_level_group_bandwidths_l2: Dict[str, Dict[str, List[float]]] = {
+        group_name: defaultdict(list) for group_name in filter_group_order
+    }
+    qo_level_group_radials: Dict[str, Dict[str, List[np.ndarray]]] = {
+        group_name: defaultdict(list) for group_name in filter_group_order
+    }
+    qo_level_divergences: Dict[str, Dict[str, List[float]]] = {
+        "js_divergence": defaultdict(list),
+        "l2_distance": defaultdict(list),
+        "cosine_similarity": defaultdict(list),
+        "bandwidth_delta_with_options_minus_question_only": defaultdict(list),
+    }
+    qo_level_group_divergences: Dict[str, Dict[str, Dict[str, List[float]]]] = {
+        group_name: {
+            "js_divergence": defaultdict(list),
+            "l2_distance": defaultdict(list),
+            "cosine_similarity": defaultdict(list),
+            "bandwidth_delta_with_options_minus_question_only": defaultdict(list),
+        }
+        for group_name in filter_group_order
+    }
     level_control_bandwidths: Dict[str, Dict[str, List[float]]] = {
         control_name: defaultdict(list) for control_name in prompt_controls
     }
@@ -729,6 +821,125 @@ def run_exp2(
                     sample_record["levels"][level_key]["layer_groups"][group_name][
                         "W_t_2d_shape"
                     ] = w_t_2d_entry["shape"]
+
+            if question_only_enabled:
+                question_only_result = _extract_attention_for_prompt(
+                    adapter,
+                    image,
+                    level_data.question,
+                    layer_stride,
+                    num_bands,
+                    fft_window,
+                    suppress_dc=suppress_dc,
+                    store_2d_spectra=overlap_2d_enabled,
+                )
+                if question_only_result is not None:
+                    qo_divergence = compare_spectral_filters(
+                        result["W_t"],
+                        question_only_result["W_t"],
+                    )
+                    qo_record = {
+                        "prompt": level_data.question,
+                        **_serialise_filter_result(question_only_result),
+                        **{
+                            f"{key}_to_option_conditioned": value
+                            for key, value in qo_divergence.items()
+                        },
+                        "bandwidth_delta_with_options_minus_question_only": float(
+                            result["bandwidth"] - question_only_result["bandwidth"]
+                        ),
+                        "layer_groups": {},
+                    }
+                    qo_record.update(
+                        _store_filter_artifacts(
+                            result=question_only_result,
+                            filters_dir=question_only_filters_dir,
+                            filters_2d_dir=question_only_filters_2d_dir,
+                            image_id=sample.image_id,
+                            level_key=level_key,
+                            group_name=None,
+                            patch_grid=question_only_result["patch_grid"],
+                            fft_window=fft_window,
+                            suppress_dc=suppress_dc,
+                            overlap_2d_enabled=overlap_2d_enabled,
+                        )
+                    )
+                    sample_record["levels"][level_key]["question_only_filter"] = qo_record
+                    qo_level_bandwidths[level_key].append(question_only_result["bandwidth"])
+                    qo_level_bandwidths_l2[level_key].append(question_only_result["bandwidth_l2"])
+                    qo_level_radials[level_key].append(question_only_result["radial_power"])
+                    qo_level_divergences["js_divergence"][level_key].append(
+                        qo_divergence["js_divergence"]
+                    )
+                    qo_level_divergences["l2_distance"][level_key].append(
+                        qo_divergence["l2_distance"]
+                    )
+                    qo_level_divergences["cosine_similarity"][level_key].append(
+                        qo_divergence["cosine_similarity"]
+                    )
+                    qo_level_divergences[
+                        "bandwidth_delta_with_options_minus_question_only"
+                    ][level_key].append(
+                        qo_record["bandwidth_delta_with_options_minus_question_only"]
+                    )
+
+                    for group_name in filter_group_order:
+                        task_group = result.get("layer_groups", {}).get(group_name)
+                        qo_group = question_only_result.get("layer_groups", {}).get(group_name)
+                        if task_group is None or qo_group is None:
+                            continue
+                        group_divergence = compare_spectral_filters(
+                            task_group["W_t"],
+                            qo_group["W_t"],
+                        )
+                        qo_group_record = {
+                            **_serialise_filter_result(qo_group),
+                            **{
+                                f"{key}_to_option_conditioned": value
+                                for key, value in group_divergence.items()
+                            },
+                            "bandwidth_delta_with_options_minus_question_only": float(
+                                task_group["bandwidth"] - qo_group["bandwidth"]
+                            ),
+                        }
+                        qo_group_record.update(
+                            _store_filter_artifacts(
+                                result=qo_group,
+                                filters_dir=question_only_filters_dir,
+                                filters_2d_dir=question_only_filters_2d_dir,
+                                image_id=sample.image_id,
+                                level_key=level_key,
+                                group_name=group_name,
+                                patch_grid=question_only_result["patch_grid"],
+                                fft_window=fft_window,
+                                suppress_dc=suppress_dc,
+                                overlap_2d_enabled=overlap_2d_enabled,
+                            )
+                        )
+                        qo_record["layer_groups"][group_name] = qo_group_record
+                        qo_level_group_bandwidths[group_name][level_key].append(
+                            qo_group["bandwidth"]
+                        )
+                        qo_level_group_bandwidths_l2[group_name][level_key].append(
+                            qo_group["bandwidth_l2"]
+                        )
+                        qo_level_group_radials[group_name][level_key].append(
+                            qo_group["radial_power"]
+                        )
+                        qo_level_group_divergences[group_name]["js_divergence"][level_key].append(
+                            group_divergence["js_divergence"]
+                        )
+                        qo_level_group_divergences[group_name]["l2_distance"][level_key].append(
+                            group_divergence["l2_distance"]
+                        )
+                        qo_level_group_divergences[group_name]["cosine_similarity"][level_key].append(
+                            group_divergence["cosine_similarity"]
+                        )
+                        qo_level_group_divergences[group_name][
+                            "bandwidth_delta_with_options_minus_question_only"
+                        ][level_key].append(
+                            qo_group_record["bandwidth_delta_with_options_minus_question_only"]
+                        )
 
             control_prompts = _build_control_prompts(prompt, prompt_controls, seed + idx * 997 + level.value)
             for control_name, control_prompt in control_prompts.items():
@@ -987,6 +1198,135 @@ def run_exp2(
                     "num_samples": len(group_bws),
                 }
             agg["per_level"][lk]["controls"][control_name] = control_entry
+
+    if question_only_enabled:
+        qo_present_levels = [lk for lk in level_order if lk in qo_level_bandwidths]
+        question_only_payload: Dict[str, Any] = {
+            "enabled": True,
+            "prompt_definition": "question text only; answer options omitted",
+            "comparison_reference": "option-conditioned task prompt used by the main Exp2 path",
+            "filters_dir": "filters_question_only",
+            "filters_2d_dir": "filters_2d_question_only" if overlap_2d_enabled else None,
+            "num_w_t_2d_files": len(list(question_only_filters_2d_dir.glob("*.npz")))
+            if overlap_2d_enabled and question_only_filters_2d_dir.exists()
+            else 0,
+            "groups": ["overall", *filter_group_order],
+            "per_level": {},
+        }
+        for lk in qo_present_levels:
+            bws = qo_level_bandwidths[lk]
+            bws_l2 = qo_level_bandwidths_l2[lk]
+            radials = qo_level_radials[lk]
+            mean_radial = (
+                np.mean(np.stack(radials), axis=0)
+                if radials
+                else np.zeros(effective_band_count, dtype=np.float64)
+            )
+            W_t_avg = compute_filter_W_t(mean_radial)
+            W_t_avg_l2 = compute_filter_W_t(mean_radial, norm="l2")
+            question_only_payload["per_level"][lk] = {
+                "mean_bandwidth": float(np.mean(bws)),
+                "mean_bandwidth_l2": float(np.mean(bws_l2)) if bws_l2 else 0.0,
+                "std_bandwidth": float(np.std(bws)),
+                "std_bandwidth_l2": float(np.std(bws_l2)) if bws_l2 else 0.0,
+                "median_bandwidth": float(np.median(bws)),
+                "median_bandwidth_l2": float(np.median(bws_l2)) if bws_l2 else 0.0,
+                "mean_radial_power": mean_radial.tolist(),
+                "W_t_average": W_t_avg.tolist(),
+                "W_t_average_l2": W_t_avg_l2.tolist(),
+                "shape_metrics": compute_filter_shape_metrics(W_t_avg),
+                "num_samples": len(bws),
+                "mean_js_divergence_to_option_conditioned": float(
+                    np.mean(qo_level_divergences["js_divergence"][lk])
+                )
+                if qo_level_divergences["js_divergence"][lk]
+                else None,
+                "mean_l2_distance_to_option_conditioned": float(
+                    np.mean(qo_level_divergences["l2_distance"][lk])
+                )
+                if qo_level_divergences["l2_distance"][lk]
+                else None,
+                "mean_cosine_similarity_to_option_conditioned": float(
+                    np.mean(qo_level_divergences["cosine_similarity"][lk])
+                )
+                if qo_level_divergences["cosine_similarity"][lk]
+                else None,
+                "mean_bandwidth_delta_with_options_minus_question_only": float(
+                    np.mean(
+                        qo_level_divergences[
+                            "bandwidth_delta_with_options_minus_question_only"
+                        ][lk]
+                    )
+                )
+                if qo_level_divergences[
+                    "bandwidth_delta_with_options_minus_question_only"
+                ][lk]
+                else None,
+                "layer_groups": {},
+            }
+            np.save(question_only_filters_dir / f"average_{lk}.npy", W_t_avg)
+            np.save(question_only_filters_dir / f"average_{lk}_l2.npy", W_t_avg_l2)
+
+            for group_name in filter_group_order:
+                group_bws = qo_level_group_bandwidths[group_name].get(lk, [])
+                group_bws_l2 = qo_level_group_bandwidths_l2[group_name].get(lk, [])
+                group_radials = qo_level_group_radials[group_name].get(lk, [])
+                if not group_radials:
+                    continue
+                group_mean_radial = np.mean(np.stack(group_radials), axis=0)
+                group_W_t = compute_filter_W_t(group_mean_radial)
+                group_W_t_l2 = compute_filter_W_t(group_mean_radial, norm="l2")
+                group_entry = {
+                    "mean_bandwidth": float(np.mean(group_bws)),
+                    "mean_bandwidth_l2": float(np.mean(group_bws_l2)) if group_bws_l2 else 0.0,
+                    "std_bandwidth": float(np.std(group_bws)),
+                    "std_bandwidth_l2": float(np.std(group_bws_l2)) if group_bws_l2 else 0.0,
+                    "median_bandwidth": float(np.median(group_bws)),
+                    "median_bandwidth_l2": float(np.median(group_bws_l2)) if group_bws_l2 else 0.0,
+                    "mean_radial_power": group_mean_radial.tolist(),
+                    "W_t_average": group_W_t.tolist(),
+                    "W_t_average_l2": group_W_t_l2.tolist(),
+                    "shape_metrics": compute_filter_shape_metrics(group_W_t),
+                    "num_samples": len(group_bws),
+                    "mean_js_divergence_to_option_conditioned": float(
+                        np.mean(qo_level_group_divergences[group_name]["js_divergence"][lk])
+                    )
+                    if qo_level_group_divergences[group_name]["js_divergence"][lk]
+                    else None,
+                    "mean_l2_distance_to_option_conditioned": float(
+                        np.mean(qo_level_group_divergences[group_name]["l2_distance"][lk])
+                    )
+                    if qo_level_group_divergences[group_name]["l2_distance"][lk]
+                    else None,
+                    "mean_cosine_similarity_to_option_conditioned": float(
+                        np.mean(qo_level_group_divergences[group_name]["cosine_similarity"][lk])
+                    )
+                    if qo_level_group_divergences[group_name]["cosine_similarity"][lk]
+                    else None,
+                    "mean_bandwidth_delta_with_options_minus_question_only": float(
+                        np.mean(
+                            qo_level_group_divergences[group_name][
+                                "bandwidth_delta_with_options_minus_question_only"
+                            ][lk]
+                        )
+                    )
+                    if qo_level_group_divergences[group_name][
+                        "bandwidth_delta_with_options_minus_question_only"
+                    ][lk]
+                    else None,
+                }
+                question_only_payload["per_level"][lk]["layer_groups"][group_name] = group_entry
+                np.save(
+                    question_only_filters_dir / f"average_{lk}_{group_name}.npy",
+                    group_W_t,
+                )
+                np.save(
+                    question_only_filters_dir / f"average_{lk}_{group_name}_l2.npy",
+                    group_W_t_l2,
+                )
+        agg["question_only_control"] = question_only_payload
+    else:
+        agg["question_only_control"] = {"enabled": False}
 
     agg["per_layer_bandwidth"] = {}
     for lk in present_levels:
@@ -1344,6 +1684,28 @@ def run_exp2(
     )
     tests["primary_group"] = "late"
     tests["fft_window"] = fft_window
+    tests["question_only_control"] = {
+        "enabled": bool(question_only_enabled),
+        "target": "quantify how answer options alter the attention frequency filter",
+    }
+    if question_only_enabled:
+        tests["question_only_control"]["per_level"] = {
+            lk: {
+                "mean_js_divergence_to_option_conditioned": entry.get(
+                    "mean_js_divergence_to_option_conditioned"
+                ),
+                "mean_l2_distance_to_option_conditioned": entry.get(
+                    "mean_l2_distance_to_option_conditioned"
+                ),
+                "mean_cosine_similarity_to_option_conditioned": entry.get(
+                    "mean_cosine_similarity_to_option_conditioned"
+                ),
+                "mean_bandwidth_delta_with_options_minus_question_only": entry.get(
+                    "mean_bandwidth_delta_with_options_minus_question_only"
+                ),
+            }
+            for lk, entry in agg.get("question_only_control", {}).get("per_level", {}).items()
+        }
     tests["prompt_controls"] = {}
     for control_name in prompt_controls:
         tests["prompt_controls"][control_name] = {

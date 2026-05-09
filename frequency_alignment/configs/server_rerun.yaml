@@ -152,6 +152,8 @@ experiments:
     max_samples: 200
     layer_stride: 2
     fft_window: none
+    question_only_control:
+      enabled: true
     prompt_controls:
       - empty_language
       - random_language

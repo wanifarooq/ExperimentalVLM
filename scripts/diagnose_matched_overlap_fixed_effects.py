@@ -671,7 +671,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--groups",
-        default="overall,early,mid,late",
+        default=",".join(GROUP_ORDER),
         help="Comma-separated attention groups.",
     )
     parser.add_argument(
