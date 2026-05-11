@@ -35,7 +35,7 @@ LEVEL_ORDER = [
     "L7_WORDY_FINE",
     "L8_WORDY_VERY_FINE",
 ]
-GROUP_ORDER = ["overall", "early", "mid", "late", "last_1", "last_2", "last_3", "last_4"]
+GROUP_ORDER = ["overall", "early", "mid", "late", "last_2"]
 DOMAIN_SPECS = {
     "image_space": {
         "delta_radial_raw": "delta_f",

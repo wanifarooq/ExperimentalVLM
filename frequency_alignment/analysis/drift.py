@@ -143,27 +143,6 @@ def compute_band_drift(
     return radially_bin_power(power, num_bands, suppress_dc=suppress_dc)
 
 
-def compute_amplification_ratio(
-    pre_drift_bands: np.ndarray,
-    post_drift_bands: np.ndarray,
-    epsilon: float = 1e-10,
-) -> np.ndarray:
-    """Compute per-band amplification ratio R(omega) = post_drift / pre_drift.
-
-    Args:
-        pre_drift_bands: Pre-fusion drift energy per band, shape ``(num_bands,)``.
-        post_drift_bands: Post-fusion drift energy per band, shape ``(num_bands,)``.
-        epsilon: Small constant to avoid division by zero.
-
-    Returns:
-        Amplification ratio per band, shape ``(num_bands,)``.
-        Values > 1 mean the fusion layer amplified drift at that frequency.
-    """
-    pre = np.asarray(pre_drift_bands, dtype=np.float64)
-    post = np.asarray(post_drift_bands, dtype=np.float64)
-    return post / (pre + epsilon)
-
-
 def compute_scalar_drift(
     clean_features: np.ndarray,
     perturbed_features: np.ndarray,
@@ -188,78 +167,6 @@ def compute_scalar_drift(
     diff = perturbed - clean
     if diff.ndim > 2:
         diff = diff.reshape(-1, diff.shape[-1])
-    per_token_norm = np.linalg.norm(diff, axis=-1)
-    return float(per_token_norm.mean())
-
-
-def compute_scalar_drift_all_tokens(
-    clean_features: np.ndarray,
-    perturbed_features: np.ndarray,
-    *,
-    clean_vision_token_range: Optional[Tuple[int, int]] = None,
-    perturbed_vision_token_range: Optional[Tuple[int, int]] = None,
-    clean_patch_grid: Optional[Tuple[int, int]] = None,
-    perturbed_patch_grid: Optional[Tuple[int, int]] = None,
-) -> float:
-    """Compute scalar drift over the full multimodal sequence.
-
-    Language tokens are aligned by sequence position. Vision-token spans are
-    aligned separately with patch-grid-aware resizing so perturbations that
-    change the number of vision tokens do not shift the language-token
-    comparison.
-    """
-    clean = _flatten_token_features(clean_features)
-    perturbed = _flatten_token_features(perturbed_features)
-
-    if clean.ndim != 2 or perturbed.ndim != 2:
-        return compute_scalar_drift(clean, perturbed)
-
-    if clean_vision_token_range is None or perturbed_vision_token_range is None:
-        return compute_scalar_drift(clean, perturbed)
-
-    c_start, c_end = clean_vision_token_range
-    p_start, p_end = perturbed_vision_token_range
-    c_start = max(0, min(int(c_start), clean.shape[0]))
-    c_end = max(c_start, min(int(c_end), clean.shape[0]))
-    p_start = max(0, min(int(p_start), perturbed.shape[0]))
-    p_end = max(p_start, min(int(p_end), perturbed.shape[0]))
-
-    prefix_usable = min(c_start, p_start)
-    suffix_usable = min(clean.shape[0] - c_end, perturbed.shape[0] - p_end)
-
-    segments_clean = []
-    segments_perturbed = []
-
-    if prefix_usable > 0:
-        segments_clean.append(clean[:prefix_usable])
-        segments_perturbed.append(perturbed[:prefix_usable])
-
-    clean_vision = clean[c_start:c_end]
-    perturbed_vision = perturbed[p_start:p_end]
-    if clean_vision.size > 0 and perturbed_vision.size > 0:
-        aligned_clean_vision, aligned_perturbed_vision = _align_features(
-            clean_vision,
-            perturbed_vision,
-            clean_patch_grid,
-            perturbed_patch_grid,
-        )
-        aligned_clean_vision = _flatten_token_features(aligned_clean_vision)
-        aligned_perturbed_vision = _flatten_token_features(aligned_perturbed_vision)
-        usable_vision = min(aligned_clean_vision.shape[0], aligned_perturbed_vision.shape[0])
-        if usable_vision > 0:
-            segments_clean.append(aligned_clean_vision[:usable_vision])
-            segments_perturbed.append(aligned_perturbed_vision[:usable_vision])
-
-    if suffix_usable > 0:
-        segments_clean.append(clean[c_end:c_end + suffix_usable])
-        segments_perturbed.append(perturbed[p_end:p_end + suffix_usable])
-
-    if not segments_clean or not segments_perturbed:
-        return compute_scalar_drift(clean, perturbed)
-
-    clean_concat = np.concatenate(segments_clean, axis=0)
-    perturbed_concat = np.concatenate(segments_perturbed, axis=0)
-    diff = perturbed_concat - clean_concat
     per_token_norm = np.linalg.norm(diff, axis=-1)
     return float(per_token_norm.mean())
 

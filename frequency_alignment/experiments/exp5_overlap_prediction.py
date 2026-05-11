@@ -22,7 +22,6 @@ from ..analysis.level_views import LEVEL_VIEW_ORDER, LEVEL_VIEWS
 from ..analysis.spectral import (
     compute_overlap_integral,
     compute_spectral_overlap,
-    compute_spectral_overlap_linear,
 )
 from ..analysis.statistics import bootstrap_ci, pearson_correlation, spearman_correlation
 from ..data.base import ALL_VQA_LEVEL_NAMES, ExperimentResult
@@ -190,11 +189,8 @@ def _compute_2d_overlap(
         d = _resize_power_preserve_sum(d, (int(w.shape[0]), int(w.shape[1])))
         alignment_method = "resize_delta_to_w_t_shape_preserve_sum"
     first_order = float(np.sum(w * d))
-    denom = float(np.linalg.norm(w) * np.linalg.norm(d))
-    cosine = float(np.sum(w * d) / denom) if denom > _EPS else 0.0
     return {
         "predicted_2d_first_order": first_order,
-        "predicted_2d_cosine": cosine,
         "w_t_2d_shape": [int(w.shape[0]), int(w.shape[1])],
         "delta_2d_shape": original_delta_shape,
         "delta_2d_aligned_shape": [int(d.shape[0]), int(d.shape[1])],
@@ -226,10 +222,8 @@ def _build_overlap_pairs(
         lambda: {
             "predicted": [],
             "predicted_quadratic": [],
-            "predicted_linear": [],
             "predicted_first_order": [],
             "predicted_2d_first_order": [],
-            "predicted_2d_cosine": [],
             "complexity_score": [],
             "question_complexity_score": [],
             "prompt_complexity_score": [],
@@ -281,8 +275,12 @@ def _build_overlap_pairs(
                 loglik_erosion = max(loglik_drift, 0.0)
                 loglik_recovery = min(loglik_drift, 0.0)
                 loglik_volatility = abs(loglik_drift)
+                # Primary: linear overlap integral ⟨W_t, ΔF⟩ (Theorem 1).
+                # Quadratic Σ|W|²|ΔF|² is retained as a legacy comparison.
+                # The mixed-linear variant Σ W·|ΔF|² was dropped during the
+                # camera-ready cleanup (subsumed by the first-order form and
+                # gave the weakest correlation of the three).
                 predicted_quadratic = compute_spectral_overlap(W_t, delta_f)
-                predicted_linear = compute_spectral_overlap_linear(W_t, delta_f)
                 predicted_first_order = compute_overlap_integral(W_t, delta_f)
                 overlap_2d: Optional[Dict[str, Any]] = None
                 if overlap_2d_enabled and delta_key in {"delta_f", "delta_f_relative"}:
@@ -301,7 +299,6 @@ def _build_overlap_pairs(
                     "perturbation_family": perturbation_family,
                     "predicted": predicted_first_order,
                     "predicted_quadratic": predicted_quadratic,
-                    "predicted_linear": predicted_linear,
                     "predicted_first_order": predicted_first_order,
                     "actual": accuracy_drop,
                     "accuracy_drop": accuracy_drop,
@@ -328,14 +325,10 @@ def _build_overlap_pairs(
                 key = (image_id, level_key, perturbation_family)
                 grouped[key]["predicted"].append(predicted_first_order)
                 grouped[key]["predicted_quadratic"].append(predicted_quadratic)
-                grouped[key]["predicted_linear"].append(predicted_linear)
                 grouped[key]["predicted_first_order"].append(predicted_first_order)
                 if overlap_2d is not None:
                     grouped[key]["predicted_2d_first_order"].append(
                         overlap_2d["predicted_2d_first_order"]
-                    )
-                    grouped[key]["predicted_2d_cosine"].append(
-                        overlap_2d["predicted_2d_cosine"]
                     )
                 grouped[key]["complexity_score"].append(complexity_score)
                 grouped[key]["question_complexity_score"].append(question_complexity_score)
@@ -372,16 +365,10 @@ def _build_overlap_pairs(
                 "perturbation_family": perturbation_family,
                 "predicted": float(np.mean(values["predicted"])),
                 "predicted_quadratic": float(np.mean(values["predicted_quadratic"])),
-                "predicted_linear": float(np.mean(values["predicted_linear"])),
                 "predicted_first_order": float(np.mean(values["predicted_first_order"])),
                 "predicted_2d_first_order": (
                     float(np.mean(values["predicted_2d_first_order"]))
                     if values["predicted_2d_first_order"]
-                    else None
-                ),
-                "predicted_2d_cosine": (
-                    float(np.mean(values["predicted_2d_cosine"]))
-                    if values["predicted_2d_cosine"]
                     else None
                 ),
                 "n_2d_overlap": len(values["predicted_2d_first_order"]),
@@ -451,11 +438,13 @@ def _overlap_variant_correlations(
     actual_key: str = "actual",
 ) -> Dict[str, Dict[str, Any]]:
     variants = {
+        # Reduced to four variants: the primary first-order, its 2D analogue,
+        # and the legacy quadratic Σ|W|²|ΔF|² kept as a comparison column.
+        # The mixed-linear / 2D-cosine / 2D-linear / 2D-quadratic variants
+        # were dropped during the camera-ready cleanup.
         "quadratic": "predicted_quadratic",
-        "linear": "predicted_linear",
         "first_order": "predicted_first_order",
         "two_d_first_order": "predicted_2d_first_order",
-        "two_d_cosine": "predicted_2d_cosine",
     }
     payload: Dict[str, Dict[str, Any]] = {}
     for variant_name, predicted_key in variants.items():
@@ -1175,7 +1164,7 @@ def run_exp5(
             "scope": "image_space_source_only",
             "filter_keying": "image_id x level x attention_group",
             "delta_keying": "image_id x perturbation",
-            "primary_keys": ["predicted_2d_first_order", "predicted_2d_cosine"],
+            "primary_keys": ["predicted_2d_first_order"],
         },
     }
     tests_payload: Dict[str, Any] = {
@@ -1392,7 +1381,6 @@ def run_exp5(
                 perts_seen.append(pert_name)
             cell_values[(level_key, pert_name)] = {
                 "first_order": float(row.get("predicted_first_order", 0.0) or 0.0),
-                "linear": float(row.get("predicted_linear", 0.0) or 0.0),
                 "quadratic": float(row.get("predicted_quadratic", 0.0) or 0.0),
                 "mean_loglik_drift": float(row.get("mean_loglik_drift", 0.0) or 0.0),
                 "mean_loglik_volatility": float(row.get("mean_loglik_volatility", 0.0) or 0.0),

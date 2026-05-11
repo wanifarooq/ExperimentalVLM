@@ -25,14 +25,3 @@ def level_in_filter(level: Any, level_filter: Optional[Set[str]]) -> bool:
     return str(level) in level_filter
 
 
-def filter_rows_by_level(
-    rows: Iterable[Dict[str, Any]],
-    level_filter: Optional[Set[str]],
-    *,
-    level_key: str = "level",
-) -> list[Dict[str, Any]]:
-    """Filter dictionaries by level while preserving pooled compatibility."""
-
-    if level_filter is None:
-        return list(rows)
-    return [row for row in rows if level_in_filter(row.get(level_key), level_filter)]

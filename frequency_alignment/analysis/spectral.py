@@ -443,26 +443,6 @@ def compute_feature_spectral_signature_stats(
     }
 
 
-def compute_feature_spectral_signature(
-    clean_features: np.ndarray,
-    perturbed_features: np.ndarray,
-    num_bands: int = 10,
-    clean_patch_grid: Optional[Tuple[int, int]] = None,
-    perturbed_patch_grid: Optional[Tuple[int, int]] = None,
-    suppress_dc: bool = True,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute radially binned FFT-difference energy in feature space."""
-    stats = compute_feature_spectral_signature_stats(
-        clean_features,
-        perturbed_features,
-        num_bands=num_bands,
-        clean_patch_grid=clean_patch_grid,
-        perturbed_patch_grid=perturbed_patch_grid,
-        suppress_dc=suppress_dc,
-    )
-    return stats["delta_f"], stats["delta_power_2d"]
-
-
 def compute_image_spectral_signature_stats(
     clean: Image.Image,
     perturbed: Image.Image,
@@ -492,21 +472,6 @@ def compute_image_spectral_signature_stats(
         "delta_2d": delta_power_2d,
         "clean_spectral_energy": clean_spectral_energy,
     }
-
-
-def compute_image_spectral_signature(
-    clean: Image.Image,
-    perturbed: Image.Image,
-    num_bands: int = 10,
-    suppress_dc: bool = True,
-) -> Tuple[np.ndarray, np.ndarray]:
-    stats = compute_image_spectral_signature_stats(
-        clean,
-        perturbed,
-        num_bands=num_bands,
-        suppress_dc=suppress_dc,
-    )
-    return stats["delta_f"], stats["delta_2d"]
 
 
 def compute_effective_bandwidth(power_spectrum: np.ndarray) -> float:
@@ -586,8 +551,8 @@ def compute_spectral_overlap(
 
     This is the quadratic matched-filter energy overlap retained as a legacy
     robustness variant. The primary Exp 5 overlap uses
-    :func:`compute_overlap_integral`; a probability-weighted power variant is
-    available as :func:`compute_spectral_overlap_linear`.
+    :func:`compute_overlap_integral` (the first-order form
+    :math:`\\langle W_t, \\Delta F\\rangle` derived in Theorem 1).
 
     Args:
         W_t: Task-specific frequency filter, shape ``(num_bands,)``.
@@ -601,17 +566,6 @@ def compute_spectral_overlap(
     # Ensure same length
     min_len = min(len(w), len(d))
     return float(np.sum(w[:min_len] ** 2 * d[:min_len] ** 2))
-
-
-def compute_spectral_overlap_linear(
-    W_t: np.ndarray,
-    delta_f: np.ndarray,
-) -> float:
-    """Linear overlap: S_pred_lin = Σ W_t(ω) · |ΔF(ω)|²."""
-    w = np.asarray(W_t, dtype=np.float64)
-    d = np.asarray(delta_f, dtype=np.float64)
-    min_len = min(len(w), len(d))
-    return float(np.sum(w[:min_len] * d[:min_len] ** 2))
 
 
 def compute_overlap_integral(

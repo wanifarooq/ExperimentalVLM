@@ -46,8 +46,3 @@ def load_yaml(path: Path) -> dict:
         return yaml.safe_load(f)
 
 
-def save_yaml(data: dict, path: Path) -> None:
-    """Save data as YAML."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        yaml.dump(data, f, default_flow_style=False)

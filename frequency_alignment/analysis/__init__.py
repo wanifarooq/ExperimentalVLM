@@ -18,15 +18,9 @@ from .spectral import (
     spectral_vector_length,
 )
 from .drift import (
-    compute_amplification_ratio,
     compute_band_drift,
     compute_cosine_drift_per_token,
     compute_scalar_drift,
-)
-from .overlap import (
-    load_actual_sensitivities_from_exp1,
-    match_predictions_to_actuals,
-    predict_sensitivities,
 )
 from .statistics import (
     bootstrap_ci,

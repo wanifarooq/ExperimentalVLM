@@ -36,20 +36,14 @@ LEVEL_ORDER = [
     "L7_WORDY_FINE",
     "L8_WORDY_VERY_FINE",
 ]
-GROUP_ORDER = ["overall", "early", "mid", "late", "last_1", "last_2", "last_3", "last_4"]
+GROUP_ORDER = ["overall", "early", "mid", "late", "last_2"]
 VARIANTS = {
     "radial_first_order": "predicted_first_order",
     "two_d_first_order": "predicted_2d_first_order",
-    "two_d_linear": "predicted_2d_linear",
-    "two_d_quadratic": "predicted_2d_quadratic",
-    "two_d_cosine": "predicted_2d_cosine",
 }
 VARIANT_LABELS = {
     "radial_first_order": "Radial first-order",
     "two_d_first_order": "2D first-order",
-    "two_d_linear": "2D linear",
-    "two_d_quadratic": "2D quadratic / second-order",
-    "two_d_cosine": "2D cosine",
 }
 TARGET_LABELS = {
     "accuracy_drop": "Accuracy Drop",
@@ -63,11 +57,9 @@ COLORS = {
     "early": "#3182bd",
     "mid": "#31a354",
     "late": "#de2d26",
+    "last_2": "#9333ea",
     "radial_first_order": "#6b7280",
     "two_d_first_order": "#2563eb",
-    "two_d_linear": "#16a34a",
-    "two_d_quadratic": "#7c3aed",
-    "two_d_cosine": "#d97706",
 }
 EPS = 1e-12
 DOMAIN_SPECS = {
@@ -860,13 +852,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--variants",
-        default="radial_first_order,two_d_first_order,two_d_linear,two_d_quadratic,two_d_cosine",
+        default="radial_first_order,two_d_first_order",
         help="Comma-separated variants to plot.",
-    )
-    parser.add_argument(
-        "--skip-computed-variants",
-        action="store_true",
-        help="Do not recompute 2D linear/quadratic variants from Exp1/Exp2 sidecars.",
     )
     parser.add_argument(
         "--delta-key",
@@ -902,15 +889,9 @@ def main() -> None:
     grouped_rows = _load_grouped_rows(exp5_dir, source)
     groups = _parse_csv(args.groups, GROUP_ORDER)
     variants = _parse_csv(args.variants, list(VARIANTS))
-    if not args.skip_computed_variants:
-        computed_rows = _compute_grouped_2d_variant_rows(
-            run_dir,
-            groups=groups,
-            target_key=args.target,
-            domain=domain,
-            delta_key=delta_key,
-        )
-        _augment_grouped_rows_with_computed_2d(grouped_rows, computed_rows)
+    # The two_d_linear / two_d_quadratic / two_d_cosine variants were retired
+    # in the camera-ready cleanup. The script no longer recomputes them; only
+    # radial_first_order and two_d_first_order are produced.
 
     summaries: List[Dict[str, Any]] = []
     family_summaries: List[Dict[str, Any]] = []

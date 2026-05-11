@@ -166,37 +166,6 @@ def compute_spectral_signature_stats(
     )
 
 
-def compute_spectral_signature(
-    clean: Image.Image,
-    perturbed: Image.Image,
-    num_bands: int = 10,
-    suppress_dc: bool = True,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute radially binned spectral difference |ΔF(ω)|².
-
-    Args:
-        clean: Original PIL image.
-        perturbed: Perturbed PIL image.
-        num_bands: Number of radial frequency bands.
-
-    Returns:
-        ``(radial_bins, delta_2d)`` where ``radial_bins`` has shape
-        ``(num_bands,)`` and ``delta_2d`` has shape ``(H, W)``.
-    """
-    stats = compute_spectral_signature_stats(
-        clean,
-        perturbed,
-        num_bands=num_bands,
-        suppress_dc=suppress_dc,
-    )
-    return stats["delta_f"], stats["delta_2d"]
-
-
-# ---------------------------------------------------------------------------
-# Individual perturbation applicators
-# ---------------------------------------------------------------------------
-
-
 def _apply_frequency_perturbation(
     image: Image.Image,
     mode: str,

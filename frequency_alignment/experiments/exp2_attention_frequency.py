@@ -70,7 +70,30 @@ from ..utils.io import save_json
 
 logger = logging.getLogger(__name__)
 CONTROL_ORDER = ("empty_language", "random_language")
-LAST_LAYER_GROUP_ORDER = ("last_1", "last_2", "last_3", "last_4")
+# Last-layer subgroups: only `last_2` is retained as the canonical depth-probe
+# (it consistently delivers the strongest overlap-law correlation in the
+# matched-FE diagnostic). last_1 / last_3 / last_4 added clutter without
+# changing the conclusions and were removed for the camera-ready cleanup.
+# Naming convention: `last_K` is the K-th-from-last decoder attention layer
+# (singleton, not an average), so the maximum K determines how many trailing
+# layers we must extract from the adapter.
+LAST_LAYER_GROUP_ORDER = ("last_2",)
+
+
+def _max_last_layer_offset(group_order: tuple = LAST_LAYER_GROUP_ORDER) -> int:
+    """Largest K in any `last_K` name in ``group_order`` (0 if none)."""
+    max_k = 0
+    for name in group_order:
+        if not name.startswith("last_"):
+            continue
+        try:
+            max_k = max(max_k, int(name.split("_", 1)[1]))
+        except (ValueError, IndexError):
+            continue
+    return max_k
+
+
+LAST_LAYER_MAX_OFFSET = _max_last_layer_offset()
 _EPS = 1e-8
 
 
@@ -88,6 +111,55 @@ def _question_only_control_enabled(exp_cfg: Dict[str, Any]) -> bool:
     if isinstance(control_cfg, dict):
         return bool(control_cfg.get("enabled", False))
     return bool(control_cfg)
+
+
+def _compute_l2_variants_enabled(cfg: Dict[str, Any]) -> bool:
+    """Whether to compute and persist the L2-normalised W_t variants.
+
+    The paper uses L1-normalised W_t throughout; the L2 variant was an
+    early-exploration convention that doubles JSON / .npy output and is
+    no longer cited. Disabled by default; flip via
+    ``analysis.compute_l2_variants: true``.
+    """
+    return bool(cfg.get("analysis", {}).get("compute_l2_variants", False))
+
+
+def _store_per_sample_filter_npy_enabled(cfg: Dict[str, Any]) -> bool:
+    """Whether to write the per-sample W_t as a sidecar ``.npy`` file.
+
+    The same numbers are persisted in ``power_spectra.json`` (which is what
+    ``load_exp2_filter_bank`` reads). The sidecars only duplicate that
+    information and inflate disk usage by an extra ~16 MB per 30-sample run.
+    Disabled by default; flip via
+    ``analysis.store_per_sample_filter_npy: true``.
+    """
+    return bool(cfg.get("analysis", {}).get("store_per_sample_filter_npy", False))
+
+
+_L2_KEY_MARKERS = ("_l2", "l2_")
+
+
+def _strip_l2_variants_inplace(obj: Any) -> None:
+    """Recursively drop dict keys ending in ``_l2`` / containing the ``l2_``
+    marker so a run with ``compute_l2_variants: false`` does not emit a fossil
+    of the L2 branch in its JSON outputs.
+
+    The function mutates ``obj`` and silently skips non-container values.
+    """
+    if isinstance(obj, dict):
+        for key in list(obj.keys()):
+            if isinstance(key, str) and (
+                key.endswith("_l2")
+                or key.startswith("l2_")
+                or key.endswith("_l2_normalized")
+                or "_l2_" in key
+            ):
+                del obj[key]
+                continue
+            _strip_l2_variants_inplace(obj[key])
+    elif isinstance(obj, list):
+        for item in obj:
+            _strip_l2_variants_inplace(item)
 
 
 def _filter_group_order(include_last_layers: bool) -> tuple[str, ...]:
@@ -209,11 +281,19 @@ def _store_filter_artifacts(
     fft_window: str,
     suppress_dc: bool,
     overlap_2d_enabled: bool,
+    store_radial_npy: bool = True,
 ) -> Dict[str, Any]:
-    """Save radial/2D filter sidecars and return JSON metadata."""
+    """Save radial/2D filter sidecars and return JSON metadata.
+
+    When ``store_radial_npy`` is false the per-sample radial W_t .npy sidecars
+    are skipped (the same numbers live in ``power_spectra.json``). The 2D
+    sidecars under ``filters_2d/`` are always written when
+    ``overlap_2d_enabled`` because Exp 5 loads them by path.
+    """
     suffix = "" if group_name is None else f"_{group_name}"
-    np.save(filters_dir / f"{image_id}_{level_key}{suffix}.npy", result["W_t"])
-    np.save(filters_dir / f"{image_id}_{level_key}{suffix}_l2.npy", result["W_t_l2"])
+    if store_radial_npy:
+        np.save(filters_dir / f"{image_id}_{level_key}{suffix}.npy", result["W_t"])
+        np.save(filters_dir / f"{image_id}_{level_key}{suffix}_l2.npy", result["W_t_l2"])
     metadata: Dict[str, Any] = {}
     if overlap_2d_enabled and result.get("W_t_2d") is not None:
         w_t_2d_entry = _save_w_t_2d(
@@ -389,7 +469,7 @@ def _extract_attention_for_prompt(
             extract_pre_fusion=False,
             extract_post_fusion=False,
             layer_stride=layer_stride,
-            attention_extra_last_layers=len(LAST_LAYER_GROUP_ORDER) if store_2d_spectra else 0,
+            attention_extra_last_layers=LAST_LAYER_MAX_OFFSET if store_2d_spectra else 0,
         )
     except Exception as e:
         logger.warning("extract_internals failed: %s", e)
@@ -473,13 +553,20 @@ def _extract_attention_for_prompt(
             continue
         group_stats[group_name] = _summarize_group(group_values, group_layer_indices)
     if store_2d_spectra:
+        # Extract the top-K most recent layers (where K is the largest `last_K`
+        # in LAST_LAYER_GROUP_ORDER), then emit only the groups actually
+        # requested. This decouples "how many layers to grab" from "which to
+        # publish" so retiring intermediate groups (last_1/last_3) does not
+        # change which physical layer ends up labelled `last_2`.
         last_pairs = sorted(
             zip(layer_indices, attn_list),
             key=lambda pair: int(pair[0]),
             reverse=True,
-        )[: len(LAST_LAYER_GROUP_ORDER)]
+        )[:LAST_LAYER_MAX_OFFSET]
         for offset, (layer_index, attn) in enumerate(last_pairs, start=1):
             group_name = f"last_{offset}"
+            if group_name not in LAST_LAYER_GROUP_ORDER:
+                continue
             group_stats[group_name] = _summarize_group([attn], [int(layer_index)])
 
     return {
@@ -524,6 +611,7 @@ def run_exp2(
     suppress_dc = bool(cfg.get("analysis", {}).get("suppress_dc", True))
     overlap_2d_enabled = _overlap_2d_enabled(cfg)
     question_only_enabled = _question_only_control_enabled(exp_cfg)
+    store_per_sample_npy = _store_per_sample_filter_npy_enabled(cfg)
     filter_group_order = _filter_group_order(overlap_2d_enabled)
     effective_band_count = spectral_vector_length(num_bands, suppress_dc=suppress_dc)
     seed = cfg.get("seed", 42)
@@ -752,15 +840,18 @@ def run_exp2(
                     float(layer_item["bandwidth"])
                 )
 
-            # Save W_t filter
-            np.save(
-                filters_dir / f"{sample.image_id}_{level_key}.npy",
-                result["W_t"],
-            )
-            np.save(
-                filters_dir / f"{sample.image_id}_{level_key}_l2.npy",
-                result["W_t_l2"],
-            )
+            # Save W_t filter (per-sample sidecars are opt-in; the same data
+            # lives in power_spectra.json and load_exp2_filter_bank reads from
+            # there for sample filters).
+            if store_per_sample_npy:
+                np.save(
+                    filters_dir / f"{sample.image_id}_{level_key}.npy",
+                    result["W_t"],
+                )
+                np.save(
+                    filters_dir / f"{sample.image_id}_{level_key}_l2.npy",
+                    result["W_t_l2"],
+                )
             if overlap_2d_enabled and result.get("W_t_2d") is not None:
                 w_t_2d_entry = _save_w_t_2d(
                     filters_2d_dir=filters_2d_dir,
@@ -794,14 +885,15 @@ def run_exp2(
                 level_group_bandwidths[group_name][level_key].append(group_result["bandwidth"])
                 level_group_bandwidths_l2[group_name][level_key].append(group_result["bandwidth_l2"])
                 level_group_radials[group_name][level_key].append(group_result["radial_power"])
-                np.save(
-                    filters_dir / f"{sample.image_id}_{level_key}_{group_name}.npy",
-                    group_result["W_t"],
-                )
-                np.save(
-                    filters_dir / f"{sample.image_id}_{level_key}_{group_name}_l2.npy",
-                    group_result["W_t_l2"],
-                )
+                if store_per_sample_npy:
+                    np.save(
+                        filters_dir / f"{sample.image_id}_{level_key}_{group_name}.npy",
+                        group_result["W_t"],
+                    )
+                    np.save(
+                        filters_dir / f"{sample.image_id}_{level_key}_{group_name}_l2.npy",
+                        group_result["W_t_l2"],
+                    )
                 if overlap_2d_enabled and group_result.get("W_t_2d") is not None:
                     w_t_2d_entry = _save_w_t_2d(
                         filters_2d_dir=filters_2d_dir,
@@ -862,6 +954,7 @@ def run_exp2(
                             fft_window=fft_window,
                             suppress_dc=suppress_dc,
                             overlap_2d_enabled=overlap_2d_enabled,
+                            store_radial_npy=store_per_sample_npy,
                         )
                     )
                     sample_record["levels"][level_key]["question_only_filter"] = qo_record
@@ -914,6 +1007,7 @@ def run_exp2(
                                 fft_window=fft_window,
                                 suppress_dc=suppress_dc,
                                 overlap_2d_enabled=overlap_2d_enabled,
+                                store_radial_npy=store_per_sample_npy,
                             )
                         )
                         qo_record["layer_groups"][group_name] = qo_group_record
@@ -1046,10 +1140,12 @@ def run_exp2(
             },
             "last_layer_groups": {
                 group_name: {
-                    "offset_from_last": offset,
-                    "description": "single final decoder attention layer captured in addition to stride sampling",
+                    "offset_from_last": int(group_name.split("_", 1)[1])
+                    if group_name.startswith("last_") and group_name.split("_", 1)[1].isdigit()
+                    else None,
+                    "description": "single final decoder attention layer (K-th from last)",
                 }
-                for offset, group_name in enumerate(LAST_LAYER_GROUP_ORDER, start=1)
+                for group_name in LAST_LAYER_GROUP_ORDER
             }
             if overlap_2d_enabled
             else {},
@@ -1878,6 +1974,29 @@ def run_exp2(
         "PASS" if sp.get("passed") else "FAIL",
     )
     logger.info("-" * 40)
+
+    # --- Optionally strip L2-normalised variants before persisting ---
+    # The paper uses L1-normalised W_t throughout; the L2 branch is retained as
+    # an opt-in alternative behind ``analysis.compute_l2_variants``. When that
+    # flag is off (default) we prune both the in-memory dicts and the on-disk
+    # .npy sidecars so the run does not advertise data it no longer keeps.
+    if not _compute_l2_variants_enabled(cfg):
+        _strip_l2_variants_inplace(agg)
+        _strip_l2_variants_inplace(tests)
+        _strip_l2_variants_inplace(complexity_points)
+        for record in per_sample:
+            _strip_l2_variants_inplace(record)
+        for npy_path in list(filters_dir.glob("*_l2.npy")):
+            try:
+                npy_path.unlink()
+            except OSError:
+                pass
+        if question_only_filters_dir.exists():
+            for npy_path in list(question_only_filters_dir.glob("*_l2.npy")):
+                try:
+                    npy_path.unlink()
+                except OSError:
+                    pass
 
     # --- Save outputs ---
     save_json(agg, out_dir / "summary.json")

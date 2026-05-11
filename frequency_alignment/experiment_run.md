@@ -147,16 +147,11 @@ python3 -m frequency_alignment.run_experiment \
 - `hypothesis_tests.json` now includes primary marginal summaries and wordy/pooled horse-race regressions (`Csem`, `prompt load`, `option hardness`) in addition to the univariate trends.
 - Bandwidth plots include the wordy controls when those levels are present; primary monotonic granularity tests remain `L1-L4`.
 
-### Experiment 3
+### Experiment 3 (retired)
 
-- Loads the real `W_t` filters from Experiment 2.
-- Computes task-agnostic pre-fusion band drift from vision tokens only, once per perturbation.
-- Computes the task-conditioned post-fusion response as scalar drift over all aligned tokens from a late decoder hidden state.
-- Groups perturbations by similar pre-fusion drift profiles so the controlled input is approximately held fixed.
-- Reports controlled overlap-vs-response correlations for `overall`, `early`, `mid`, and `late`, with `late` as the main post-fusion test.
-- Also runs continuous analyses from semantic complexity to internal response metrics (`ΔZ_all` and response amplification), including primary marginal summaries and wordy/pooled horse-race controls over semantic complexity, prompt load, and option hardness.
-- The plotting layer now includes pooled-vs-within-image coefficient plots and a dedicated two-factor "tug-of-war" bar chart for internal drift.
-- Wordy-control plots compare base levels against `L5-L8` for post-fusion drift and response amplification.
+Exp 3 (fusion drift / response amplification) was retired in the camera-ready
+cleanup. Its analysis is subsumed by the Exp 5 overlap law on pixel-space ΔF
+plus the per-layer-group W_t shape statistics already in Exp 2.
 
 ### Experiment 4
 
@@ -307,10 +302,6 @@ frequency_alignment_outputs/
   exp2/hypothesis_tests.json
   exp2/power_spectra.json
   exp2/complexity_points.json
-  exp3/summary.json
-  exp3/hypothesis_tests.json
-  exp3/amplification.json
-  exp3/complexity_points.json
   exp4/summary.json
   exp4/accuracy_curves.json
   exp4/complexity_points.json
@@ -376,10 +367,10 @@ Added to the existing `hypothesis_tests.json` structure:
 - Coefficient plots now include triple-view variants when the result JSON contains the `_views` regression payloads.
 - Exp 5 predicted-vs-observed scatter plots include triple-view panels for Primary, Wordy, and Pooled.
 - Spectral plots can use log scaling for visualization only; this does not change stored spectra or hypothesis tests.
-- Plot generation intentionally skips the old discrete `exp1_granularity_curves.png` and the raw Exp 3 correlation heatmap so the regression and paired-control figures stay primary.
+- Plot generation intentionally skips the old discrete `exp1_granularity_curves.png` so the regression and paired-control figures stay primary.
 - `plotting.max_sample_scatter_points` can cap dense Exp 5 sample-level scatter rendering for visualization only; stored correlations still come from the full result data.
 - `perturbations.export_num_images` controls how many clean + perturbed example image folders are saved per supported experiment.
-- `experiments.exp3.perturbation_subset: null` means Exp 3 uses all perturbations. A positive integer caps Exp 3 to the first `N` perturbations per sample.
+- Exp 3 (fusion drift) was retired during the camera-ready cleanup; its analysis is subsumed by the Exp 5 overlap law on pixel-space ΔF.
 
 ## Troubleshooting
 
@@ -389,13 +380,13 @@ Added to the existing `hypothesis_tests.json` structure:
 - Single A100: switch server profile from `30B-A3B` to `8B`.
 - Increase `exp2.layer_stride` or reduce `max_samples`.
 
-### Experiment 3 or 5 Missing Inputs
+### Experiment 5 Missing Inputs
 
-Run in dependency order:
+Exp 5 depends on Exp 1 + Exp 2. Run in dependency order:
 
 ```bash
 python3 -m frequency_alignment.run_experiment \
-  --experiment "1 2 3 5" \
+  --experiment "1 2 5" \
   --config frequency_alignment/configs/local_test.yaml \
   -v
 ```

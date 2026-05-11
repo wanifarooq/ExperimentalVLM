@@ -26,11 +26,12 @@ logger = logging.getLogger("frequency_alignment")
 _DEFAULT_CONFIG = Path(__file__).parent / "configs" / "default.yaml"
 
 # Experiment execution order respecting dependencies:
-# {1, 2, 4, 6} are independent; 3 needs Exp2; 5 needs Exp1+Exp2
+# {1, 2, 4, 6} are independent; 5 needs Exp1+Exp2.
+# Exp3 (fusion drift) was retired — its analysis is subsumed by the Exp5
+# overlap law, and the spectral-drift signal is computed inside Exp5 directly.
 _INDEPENDENT = [1, 2, 4, 6]
-_DEPENDS_ON_2 = [3]
 _DEPENDS_ON_1_AND_2 = [5]
-_ALL_ORDER = _INDEPENDENT + _DEPENDS_ON_2 + _DEPENDS_ON_1_AND_2
+_ALL_ORDER = _INDEPENDENT + _DEPENDS_ON_1_AND_2
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,9 +132,6 @@ def run_single_experiment(
     elif exp_id == 2:
         from .experiments.exp2_attention_frequency import run_exp2
         return run_exp2(cfg, exp_out, results_so_far)
-    elif exp_id == 3:
-        from .experiments.exp3_fusion_drift import run_exp3
-        return run_exp3(cfg, exp_out, results_so_far)
     elif exp_id == 4:
         from .experiments.exp4_frequency_ablation import run_exp4
         return run_exp4(cfg, exp_out, results_so_far)

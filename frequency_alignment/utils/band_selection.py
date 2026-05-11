@@ -195,6 +195,24 @@ def resolve_num_bands_config(
         rounding=rounding,
     )
 
+    # Safety cap: a centered radial binning on an H×W grid supports at most
+    # ceil(0.5 * sqrt(cy^2 + cx^2)) distinct annuli (where cy=H//2, cx=W//2)
+    # before further subdivision yields empty bins. We use the smallest
+    # probed grid as the conservative bound — running with more bands than
+    # this would inject hardcoded zeros into every W_t and visibly damage
+    # the published filter plots. The bound is applied after the √-rule and
+    # the min/max clamp so an explicit min_bands floor cannot push us past it.
+    min_h = min(h for h, _ in patch_grids)
+    min_w = min(w for _, w in patch_grids)
+    radial_cap = max(1, math.ceil(math.sqrt((min_h // 2) ** 2 + (min_w // 2) ** 2)))
+    if resolved_num_bands > radial_cap:
+        logger.info(
+            "Auto num_bands recommendation %d exceeds the radial-annulus cap %d "
+            "for the smallest probed patch grid (%d, %d); clipping to %d.",
+            resolved_num_bands, radial_cap, min_h, min_w, radial_cap,
+        )
+        resolved_num_bands = radial_cap
+
     analysis_cfg["num_bands"] = int(resolved_num_bands)
     resolution_info.update(
         {

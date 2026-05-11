@@ -120,18 +120,26 @@ perturbations:
       jpeg_quality: 30
 
 analysis:
-  num_bands: 20
+  num_bands: 10
   num_bands_mode: auto
   num_bands_auto:
     probe_samples: 8
     coefficient: 0.6
     rounding: ceil
     statistic: median
-    min_bands: 20
-    max_bands: 30
+    # min_bands lowered from 20 to 8: with min_bands=20 on Qwen3-VL's typical
+    # 12×16 patch grid, several radial annuli are empty and the published W_t
+    # contains visible alternating zeros every other bin. The √-rule + radial
+    # cap in band_selection.py now resolve to ~9 naturally for that grid.
+    min_bands: 8
+    max_bands: 20
   suppress_dc: false
   overlap_2d:
     enabled: true
+  # L1-normalised W_t only (paper convention). Set true to also persist L2.
+  compute_l2_variants: false
+  # Per-sample radial .npy sidecars (data also lives in power_spectra.json).
+  store_per_sample_filter_npy: false
   attention_layers: all
   attention_fft_window: none
   significance_level: 0.05
@@ -145,8 +153,9 @@ experiments:
   exp1:
     enabled: true
     max_samples: 1000
-    extract_vision_tokens: true
-    store_feature_delta_f: true
+    # Vision-feature spectral path: disabled by default (sign-inverted vs pixel-space).
+    extract_vision_tokens: false
+    store_feature_delta_f: false
   exp2:
     enabled: true
     max_samples: 200
@@ -157,11 +166,7 @@ experiments:
     prompt_controls:
       - empty_language
       - random_language
-  exp3:
-    enabled: true
-    max_samples: 200
-    perturbation_subset: 10
-    post_fusion_layer_fraction: 0.8
+  # exp3 (fusion drift) retired during camera-ready cleanup.
   exp4:
     enabled: true
     max_samples: 500

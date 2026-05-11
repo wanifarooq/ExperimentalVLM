@@ -123,11 +123,14 @@ analysis:
     coefficient: 0.6
     rounding: ceil
     statistic: median
-    min_bands: 14
-    max_bands: 30
+    # min_bands lowered: high floors force empty radial annuli on small grids.
+    min_bands: 8
+    max_bands: 20
   suppress_dc: false
   overlap_2d:
     enabled: false
+  compute_l2_variants: false
+  store_per_sample_filter_npy: false
   attention_layers: all
   # Set to hann / hamming to enable windowing, or none / off / false to disable it.
   attention_fft_window: none
@@ -142,8 +145,9 @@ experiments:
   exp1:
     enabled: true
     max_samples: 1000
-    extract_vision_tokens: true
-    store_feature_delta_f: true
+    # Vision-feature spectral path: disabled by default (sign-inverted vs pixel-space).
+    extract_vision_tokens: false
+    store_feature_delta_f: false
   exp2:
     enabled: true
     max_samples: 200
@@ -153,12 +157,7 @@ experiments:
     prompt_controls:
       - empty_language
       - random_language
-  exp3:
-    enabled: true
-    max_samples: 200
-    # Set to null to use all perturbations for each sample.
-    perturbation_subset: 10
-    post_fusion_layer_fraction: 0.8
+  # exp3 (fusion drift) retired during camera-ready cleanup.
   exp4:
     enabled: true
     max_samples: 500

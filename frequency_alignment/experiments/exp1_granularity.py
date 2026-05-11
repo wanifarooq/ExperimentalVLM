@@ -708,7 +708,7 @@ def _evaluate_sample(
     adapter,
     perturbation_results: List[PerturbationResult],
     extract_vision_tokens: bool = False,
-    store_feature_delta_f: bool = True,
+    store_feature_delta_f: bool = False,
     num_bands: int = 10,
     suppress_dc: bool = True,
     perturbation_2d_files: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -1788,9 +1788,12 @@ def run_exp1(
     export_num_images = max(0, int(pert_cfg.get("export_num_images", 1) or 0))
     exported_examples = 0
 
-    # Whether to extract vision tokens for cosine drift (slower)
+    # Whether to extract vision tokens for cosine drift (slower).
+    # Disabled by default — the vision-feature spectral path produces
+    # sign-inverted overlap correlations vs the pixel path because the vision
+    # encoder concentrates perturbation residuals on high spatial frequencies.
     extract_vision_tokens = exp_cfg.get("extract_vision_tokens", False)
-    store_feature_delta_f = exp_cfg.get("store_feature_delta_f", True)
+    store_feature_delta_f = exp_cfg.get("store_feature_delta_f", False)
 
     # --- Evaluation loop ---
     per_sample_results: List[Dict[str, Any]] = []
