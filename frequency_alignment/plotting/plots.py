@@ -6990,7 +6990,12 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 )
     if exhaustive and exp5_grouped_by_group_and_target and exp5_summary:
         primary_group = exp5_summary.get("primary_group", "late")
-        extra_targets = [target for target in exp5_summary.get("targets", []) if target != exp5_primary_target]
+        # Iterate ALL targets including the primary. The primary target also
+        # gets a canonical short-named file (``exp5_overlap_scatter.png``) from
+        # the unsuffixed block above; emitting the fully-suffixed copy here
+        # too keeps the file naming convention symmetric across targets and
+        # makes the primary easy to find by grep alongside the others.
+        all_targets = list(exp5_summary.get("targets", []))
         for source_name, source_groups in exp5_grouped_by_group_and_target.items():
             if source_name.endswith("_raw"):
                 continue
@@ -6999,7 +7004,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 exp5_summary.get(source_name, {})
                 .get("primary_group_target_summaries", {})
             )
-            for target_name in extra_targets:
+            for target_name in all_targets:
                 grouped_pairs = primary_group_targets.get(target_name)
                 target_summary = source_target_summaries.get(target_name, {})
                 if grouped_pairs:
@@ -7107,7 +7112,9 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                     )
     if exhaustive and exp5_sample_by_group_and_target and exp5_summary:
         primary_group = exp5_summary.get("primary_group", "late")
-        extra_targets = [target for target in exp5_summary.get("targets", []) if target != "accuracy_drop"]
+        # All targets including the primary (which is loglik_volatility, not the
+        # stale ``accuracy_drop`` literal that used to live here).
+        all_targets = list(exp5_summary.get("targets", []))
         for source_name, source_groups in exp5_sample_by_group_and_target.items():
             if source_name.endswith("_raw"):
                 continue
@@ -7116,7 +7123,7 @@ def generate_all_plots(results_dir: Path, config: Optional[Dict[str, Any]] = Non
                 exp5_summary.get(source_name, {})
                 .get("primary_group_target_summaries", {})
             )
-            for target_name in extra_targets:
+            for target_name in all_targets:
                 sample_pairs = primary_group_targets.get(target_name)
                 target_summary = source_target_summaries.get(target_name, {})
                 if not sample_pairs or target_summary.get("pearson_r_sample") is None:

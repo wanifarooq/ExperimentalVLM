@@ -109,7 +109,7 @@ analysis:
     max_bands: 16
   suppress_dc: false
   overlap_2d:
-    enabled: false
+    enabled: true
   compute_l2_variants: false
   store_per_sample_filter_npy: false
   attention_layers: all
@@ -125,13 +125,13 @@ plotting:
 experiments:
   exp1:
     enabled: true
-    max_samples: 5
+    max_samples: 20
     # Vision-feature spectral path: disabled by default (sign-inverted vs pixel-space).
     extract_vision_tokens: false
     store_feature_delta_f: false
   exp2:
     enabled: true
-    max_samples: 5
+    max_samples: 20
     layer_stride: 8
     # Overrides analysis.attention_fft_window. Use none / off / false to disable.
     fft_window: none
@@ -143,7 +143,7 @@ experiments:
   # exp3 (fusion drift) retired during camera-ready cleanup.
   exp4:
     enabled: true
-    max_samples: 5
+    max_samples: 20
     sweep_steps: 5
   exp5:
     enabled: true

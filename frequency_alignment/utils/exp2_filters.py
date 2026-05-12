@@ -9,6 +9,12 @@ from ..data.base import ALL_VQA_LEVEL_NAMES
 from .io import load_json
 from .layer_groups import LAYER_GROUP_ORDER
 
+# Groups whose per-sample filters live under ``record.levels.<level>.layer_groups``
+# in ``power_spectra.json``. ``last_2`` (the 2nd-from-last attention layer) is
+# stored by Exp 2 alongside the early/mid/late tertile and needs to be loaded
+# here for Exp 5's overlap law to evaluate it.
+_LOAD_GROUPS = LAYER_GROUP_ORDER + ("last_2",)
+
 
 def load_exp2_filter_bank(
     exp2_out_dir: Path,
@@ -20,7 +26,7 @@ def load_exp2_filter_bank(
 ]:
     average_filters: Dict[str, Dict[str, np.ndarray]] = {"overall": {}}
     sample_filters: Dict[str, Dict[Tuple[str, str], np.ndarray]] = {"overall": {}}
-    for group_name in LAYER_GROUP_ORDER:
+    for group_name in _LOAD_GROUPS:
         average_filters[group_name] = {}
         sample_filters[group_name] = {}
 
@@ -31,7 +37,7 @@ def load_exp2_filter_bank(
         overall_path = filters_dir / f"average_{level_key}{suffix}.npy"
         if overall_path.exists():
             average_filters["overall"][level_key] = np.load(overall_path)
-        for group_name in LAYER_GROUP_ORDER:
+        for group_name in _LOAD_GROUPS:
             group_path = filters_dir / f"average_{level_key}_{group_name}{suffix}.npy"
             if group_path.exists():
                 average_filters[group_name][level_key] = np.load(group_path)
@@ -46,7 +52,7 @@ def load_exp2_filter_bank(
             w_t = level_data.get("W_t_l2" if norm == "l2" else "W_t")
             if w_t:
                 sample_filters["overall"][(image_id, level_key)] = np.asarray(w_t, dtype=np.float64)
-            for group_name in LAYER_GROUP_ORDER:
+            for group_name in _LOAD_GROUPS:
                 group_w_t = level_data.get("layer_groups", {}).get(group_name, {}).get(
                     "W_t_l2" if norm == "l2" else "W_t"
                 )

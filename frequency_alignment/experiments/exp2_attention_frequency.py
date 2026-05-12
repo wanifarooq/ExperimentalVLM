@@ -162,8 +162,14 @@ def _strip_l2_variants_inplace(obj: Any) -> None:
             _strip_l2_variants_inplace(item)
 
 
-def _filter_group_order(include_last_layers: bool) -> tuple[str, ...]:
-    """Groups that should be persisted for task filters."""
+def _filter_group_order(include_last_layers: bool = True) -> tuple[str, ...]:
+    """Groups persisted for task filters.
+
+    ``last_K`` subgroups are now always included so Exp 5's radial overlap
+    law can consume them regardless of whether the 2D-overlap pathway is
+    enabled. The ``include_last_layers`` arg is retained for back-compat
+    but defaults to ``True``.
+    """
     if include_last_layers:
         return (*LAYER_GROUP_ORDER, *LAST_LAYER_GROUP_ORDER)
     return tuple(LAYER_GROUP_ORDER)
@@ -469,7 +475,12 @@ def _extract_attention_for_prompt(
             extract_pre_fusion=False,
             extract_post_fusion=False,
             layer_stride=layer_stride,
-            attention_extra_last_layers=LAST_LAYER_MAX_OFFSET if store_2d_spectra else 0,
+            # Always pull the trailing K=LAST_LAYER_MAX_OFFSET layers so the
+            # `last_2` filter is available downstream regardless of whether the
+            # 2D-overlap pathway is enabled. Decoupling this from
+            # ``store_2d_spectra`` ensures Exp 5 always sees ``last_2`` filters
+            # for the radial overlap correlation too.
+            attention_extra_last_layers=LAST_LAYER_MAX_OFFSET,
         )
     except Exception as e:
         logger.warning("extract_internals failed: %s", e)
@@ -552,22 +563,20 @@ def _extract_attention_for_prompt(
         if not group_values:
             continue
         group_stats[group_name] = _summarize_group(group_values, group_layer_indices)
-    if store_2d_spectra:
-        # Extract the top-K most recent layers (where K is the largest `last_K`
-        # in LAST_LAYER_GROUP_ORDER), then emit only the groups actually
-        # requested. This decouples "how many layers to grab" from "which to
-        # publish" so retiring intermediate groups (last_1/last_3) does not
-        # change which physical layer ends up labelled `last_2`.
-        last_pairs = sorted(
-            zip(layer_indices, attn_list),
-            key=lambda pair: int(pair[0]),
-            reverse=True,
-        )[:LAST_LAYER_MAX_OFFSET]
-        for offset, (layer_index, attn) in enumerate(last_pairs, start=1):
-            group_name = f"last_{offset}"
-            if group_name not in LAST_LAYER_GROUP_ORDER:
-                continue
-            group_stats[group_name] = _summarize_group([attn], [int(layer_index)])
+    # Always emit the `last_K` subgroups defined in LAST_LAYER_GROUP_ORDER so
+    # Exp 5 can read them for the radial overlap law, regardless of whether
+    # the 2D overlap pathway is enabled. (The 2D pathway separately consumes
+    # ``power_2d`` from the per-group result when ``store_2d_spectra`` is on.)
+    last_pairs = sorted(
+        zip(layer_indices, attn_list),
+        key=lambda pair: int(pair[0]),
+        reverse=True,
+    )[:LAST_LAYER_MAX_OFFSET]
+    for offset, (layer_index, attn) in enumerate(last_pairs, start=1):
+        group_name = f"last_{offset}"
+        if group_name not in LAST_LAYER_GROUP_ORDER:
+            continue
+        group_stats[group_name] = _summarize_group([attn], [int(layer_index)])
 
     return {
         **overall,
@@ -612,7 +621,7 @@ def run_exp2(
     overlap_2d_enabled = _overlap_2d_enabled(cfg)
     question_only_enabled = _question_only_control_enabled(exp_cfg)
     store_per_sample_npy = _store_per_sample_filter_npy_enabled(cfg)
-    filter_group_order = _filter_group_order(overlap_2d_enabled)
+    filter_group_order = _filter_group_order(include_last_layers=True)
     effective_band_count = spectral_vector_length(num_bands, suppress_dc=suppress_dc)
     seed = cfg.get("seed", 42)
 
@@ -2013,6 +2022,9 @@ def run_exp2(
     except Exception:
         pass
 
+    # ``mean_bandwidth_l2`` is only present when the L2-variant pathway was
+    # active; otherwise ``_strip_l2_variants_inplace`` removed it earlier in
+    # this function. Use .get() so the metrics dict survives either mode.
     metrics = {
         "num_samples": len(per_sample),
         "total_time_s": total_time,
@@ -2023,6 +2035,7 @@ def run_exp2(
         **{
             f"{lk}_mean_bandwidth_l2": agg["per_level"][lk]["mean_bandwidth_l2"]
             for lk in present_levels
+            if "mean_bandwidth_l2" in agg["per_level"].get(lk, {})
         },
         "spearman_rho": sp.get("rho", 0),
         "spearman_p": sp.get("p_value", 1),

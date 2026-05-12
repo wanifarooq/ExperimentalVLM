@@ -37,6 +37,10 @@ LEVEL_ORDER = [
     "L8_WORDY_VERY_FINE",
 ]
 GROUP_ORDER = ["overall", "early", "mid", "late", "last_2"]
+FILTER_2D_DIRS = {
+    "option_conditioned": "filters_2d",
+    "question_only": "filters_2d_question_only",
+}
 VARIANTS = {
     "radial_first_order": "predicted_first_order",
     "two_d_first_order": "predicted_2d_first_order",
@@ -332,12 +336,16 @@ def _compute_grouped_2d_variant_rows(
     target_key: str,
     domain: str,
     delta_key: str,
+    filter_mode: str,
 ) -> Dict[str, Dict[Tuple[str, str, str], Dict[str, Any]]]:
     """Recompute 2D linear/quadratic variants from Exp1/Exp2 sidecars."""
     spec = DOMAIN_SPECS[domain]
     exp1_jsonl = run_dir / "exp1" / "per_sample.jsonl"
     delta_dir = run_dir / "exp1" / str(spec["delta_dir"])
-    filter_dir = run_dir / "exp2" / "filters_2d"
+    filter_dir_name = FILTER_2D_DIRS.get(filter_mode)
+    if filter_dir_name is None:
+        raise ValueError(f"Unknown filter mode {filter_mode!r}")
+    filter_dir = run_dir / "exp2" / filter_dir_name
     if not exp1_jsonl.exists() or not delta_dir.exists() or not filter_dir.exists():
         return {}
 
@@ -419,6 +427,7 @@ def _compute_grouped_2d_variant_rows(
                 "n_2d_recomputed": len(values["actual"]),
                 "overlap_2d_domain": domain,
                 "overlap_2d_delta_key": delta_key,
+                "overlap_2d_filter_mode": filter_mode,
             }
     return grouped
 
@@ -868,6 +877,15 @@ def main() -> None:
         ],
         help="Which saved 2D perturbation spectrum to use for recomputed variants.",
     )
+    parser.add_argument(
+        "--filter-mode",
+        default="option_conditioned",
+        choices=sorted(FILTER_2D_DIRS),
+        help=(
+            "Which Exp2 2D attention filters to use: option_conditioned reads "
+            "exp2/filters_2d; question_only reads exp2/filters_2d_question_only."
+        ),
+    )
     parser.add_argument("--max-points", type=int, default=8000)
     parser.add_argument("--max-points-per-level", type=int, default=1800)
     parser.add_argument("--min-family-n", type=int, default=20)
@@ -883,15 +901,27 @@ def main() -> None:
     exp5_dir = run_dir / "exp5"
     domain, source = _resolve_domain_and_source(args)
     delta_key = _resolve_delta_key(domain, args.delta_key)
-    plots_dir = args.plots_dir or (run_dir / "plots_overlap_2d_experimental" / domain)
+    default_subdir = domain if args.filter_mode == "option_conditioned" else f"{domain}_{args.filter_mode}"
+    plots_dir = args.plots_dir or (run_dir / "plots_overlap_2d_experimental" / default_subdir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     grouped_rows = _load_grouped_rows(exp5_dir, source)
     groups = _parse_csv(args.groups, GROUP_ORDER)
     variants = _parse_csv(args.variants, list(VARIANTS))
-    # The two_d_linear / two_d_quadratic / two_d_cosine variants were retired
-    # in the camera-ready cleanup. The script no longer recomputes them; only
-    # radial_first_order and two_d_first_order are produced.
+    if args.filter_mode != "option_conditioned":
+        variants = [variant for variant in variants if variant != "radial_first_order"]
+    computed_rows = _compute_grouped_2d_variant_rows(
+        run_dir,
+        groups=groups,
+        target_key=args.target,
+        domain=domain,
+        delta_key=delta_key,
+        filter_mode=args.filter_mode,
+    )
+    _augment_grouped_rows_with_computed_2d(grouped_rows, computed_rows)
+    # The production Exp5 JSON only contains radial groups. The call above
+    # reconstructs saved 2D variants from Exp1/Exp2 sidecars, including last_2
+    # and question-only filters when those sidecars were saved.
 
     summaries: List[Dict[str, Any]] = []
     family_summaries: List[Dict[str, Any]] = []
@@ -955,16 +985,18 @@ def main() -> None:
         row["domain"] = domain
         row["source"] = source
         row["delta_key"] = delta_key
+        row["filter_mode"] = args.filter_mode
         row["domain_description"] = DOMAIN_SPECS[domain]["description"]
     for row in family_summaries:
         row["domain"] = domain
         row["source"] = source
         row["delta_key"] = delta_key
+        row["filter_mode"] = args.filter_mode
         row["domain_description"] = DOMAIN_SPECS[domain]["description"]
     _write_summary_files(plots_dir, summaries, family_summaries)
 
     print(f"Wrote overlap_2d experimental plots to {plots_dir}")
-    print(f"Domain: {domain}  Source: {source}  Delta key: {delta_key}")
+    print(f"Domain: {domain}  Source: {source}  Delta key: {delta_key}  Filter mode: {args.filter_mode}")
     print(f"Summary JSON: {plots_dir / 'exp5_overlap2d_plot_summary.json'}")
 
 

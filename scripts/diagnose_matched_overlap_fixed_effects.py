@@ -36,6 +36,10 @@ LEVEL_ORDER = [
     "L8_WORDY_VERY_FINE",
 ]
 GROUP_ORDER = ["overall", "early", "mid", "late", "last_2"]
+FILTER_2D_DIRS = {
+    "option_conditioned": "filters_2d",
+    "question_only": "filters_2d_question_only",
+}
 DOMAIN_SPECS = {
     "image_space": {
         "delta_radial_raw": "delta_f",
@@ -291,9 +295,13 @@ def _collect_rows(
     centering_modes: Sequence[str],
     target_key: str,
     normalization: str,
+    filter_mode: str,
 ) -> Dict[Tuple[str, str, str, str], List[Dict[str, Any]]]:
     exp1_path = run_dir / "exp1" / "per_sample.jsonl"
-    filters_2d_dir = run_dir / "exp2" / "filters_2d"
+    filter_dir_name = FILTER_2D_DIRS.get(filter_mode)
+    if filter_dir_name is None:
+        raise ValueError(f"Unknown filter mode {filter_mode!r}")
+    filters_2d_dir = run_dir / "exp2" / filter_dir_name
     if not exp1_path.exists():
         raise FileNotFoundError(f"Missing {exp1_path}")
     if not filters_2d_dir.exists():
@@ -333,7 +341,7 @@ def _collect_rows(
                             npz_cache,
                         )
 
-                        if radial_w is not None and radial_delta:
+                        if filter_mode == "option_conditioned" and radial_w is not None and radial_delta:
                             radial_delta_arr = np.asarray(radial_delta, dtype=np.float64)
                             for centering in centering_modes:
                                 _accumulate_row(
@@ -487,6 +495,7 @@ def _summarize_variant(
     *,
     target_key: str,
     normalization: str,
+    filter_mode: str,
     min_levels: int,
     n_bootstrap: int,
     seed: int,
@@ -513,6 +522,7 @@ def _summarize_variant(
         "centering": centering,
         "target": target_key,
         "normalization": normalization,
+        "filter_mode": filter_mode,
         "matched_unit": "image_id x perturbation_name x severity",
         "min_levels_per_unit": min_levels,
         "n_rows": int(len(rows)),
@@ -556,6 +566,7 @@ def _write_outputs(out_dir: Path, summaries: Sequence[Dict[str, Any]]) -> None:
         "centering",
         "target",
         "normalization",
+        "filter_mode",
         "matched_unit",
         "min_levels_per_unit",
         "n_rows",
@@ -691,6 +702,16 @@ def main() -> None:
         help="Use raw or energy-relative perturbation spectra.",
     )
     parser.add_argument(
+        "--filter-mode",
+        default="option_conditioned",
+        choices=sorted(FILTER_2D_DIRS),
+        help=(
+            "Which saved 2D attention filters to use. question_only reads "
+            "exp2/filters_2d_question_only and omits radial rows because no "
+            "question-only radial filter bank is saved."
+        ),
+    )
+    parser.add_argument(
         "--min-levels",
         type=int,
         default=8,
@@ -706,7 +727,10 @@ def main() -> None:
     args = parser.parse_args()
 
     run_dir = args.output_dir
-    out_dir = args.plots_dir or (run_dir / "plots_overlap_matched_fe")
+    default_subdir = "plots_overlap_matched_fe"
+    if args.filter_mode != "option_conditioned":
+        default_subdir = f"{default_subdir}_{args.filter_mode}"
+    out_dir = args.plots_dir or (run_dir / default_subdir)
     domains = _parse_csv(args.domains, list(DOMAIN_SPECS))
     groups = _parse_csv(args.groups, GROUP_ORDER)
     centering_modes = _parse_csv(args.centering, ["raw"])
@@ -726,6 +750,7 @@ def main() -> None:
         centering_modes=centering_modes,
         target_key=args.target,
         normalization=args.normalization,
+        filter_mode=args.filter_mode,
     )
     summaries = [
         _summarize_variant(
@@ -733,6 +758,7 @@ def main() -> None:
             rows,
             target_key=args.target,
             normalization=args.normalization,
+            filter_mode=args.filter_mode,
             min_levels=args.min_levels,
             n_bootstrap=args.bootstrap,
             seed=args.seed,

@@ -31,7 +31,10 @@ from ..utils.layer_groups import LAYER_GROUP_ORDER
 
 logger = logging.getLogger(__name__)
 
-FILTER_ANALYSIS_ORDER = ("overall",) + LAYER_GROUP_ORDER
+# Exp2 also stores a ``last_2`` filter (the second-from-last attention layer)
+# which empirically delivers the strongest overlap-law correlation. We include
+# it alongside the standard early/mid/late tertile so exp5 reports it.
+FILTER_ANALYSIS_ORDER = ("overall",) + LAYER_GROUP_ORDER + ("last_2",)
 PRIMARY_TARGET = "loglik_volatility"
 PRIMARY_OVERLAP_VARIANT = "first_order"
 TARGET_SPECS: Dict[str, Dict[str, Any]] = {
