@@ -473,11 +473,39 @@ def _build_l4(
     target_idx: int,
     objects: Sequence[Dict[str, Any]],
     rng: random.Random,
+    l2_level: Optional[LevelData] = None,
 ) -> Optional[LevelData]:
+    """L4 = L2 + spatial restriction.
+
+    When ``l2_level`` is supplied (the normal path from
+    ``_build_levels_for_scene``), L4 reuses L2's attribute category, option
+    dict, and gold answer label. The only structural difference from L2 is the
+    added spatial-restriction clause, which makes the L2 → L4 Csem delta a
+    clean attribution to "+1 relation operator" alone. Without ``l2_level``
+    (legacy / direct callers) the function falls back to picking its own
+    category and options.
+    """
     target = objects[target_idx]
-    category = _candidate_attribute(objects, target, rng=rng)
+    if l2_level is not None and l2_level.question_type and l2_level.question_type.startswith("clevr_attribute_"):
+        category = l2_level.question_type.replace("clevr_attribute_", "")
+        # Safety: the L2 category must still be a known attribute and uniquely
+        # identify *target* in the scene (otherwise the L4 noun phrase
+        # "<target_phrase> that is <rel> of <ref>" would not pin down target
+        # via attributes alone). _build_l2 already enforced this.
+        if category not in _ATTR_VOCAB or _descriptor_count(objects, target, category) != 1:
+            return None
+        options = dict(l2_level.options or {})
+        answer = l2_level.answer_label
+        if not options or answer is None or answer not in options:
+            return None
+    else:
+        category = _candidate_attribute(objects, target, rng=rng)
+        if category is None:
+            return None
+        correct = _attr(target, category)
+        options, answer = _make_options(correct, category, rng)
     pair = _relation_pair(scene, objects, target_idx)
-    if category is None or pair is None:
+    if pair is None:
         return None
     # See _build_l3: _relation_pair returns (stored_rel, ref) meaning ref is
     # stored_rel of target. The L4 descriptor phrases target as the subject
@@ -486,12 +514,10 @@ def _build_l4(
     stored_rel, ref_idx = pair
     relation = _OPPOSITE_RELATION[stored_rel]
     ref = objects[ref_idx]
-    correct = _attr(target, category)
     target_phrase = _phrase_excluding(target, category)
     ref_phrase = _full_phrase(ref)
     relation_text = _RELATION_TEXT[relation]
     question = f"What {category} is the {target_phrase} that is {relation_text} the {ref_phrase}?"
-    options, answer = _make_options(correct, category, rng)
     complexity = build_semantic_complexity(
         entity_names=[target_phrase, ref_phrase],
         attribute_queries=[category],
@@ -532,7 +558,10 @@ def _build_levels_for_scene(scene: Dict[str, Any], rng: random.Random, image_ind
             continue
         l2 = _build_l2(scene, target, objects, rng)
         l3 = _build_l3(scene, target_idx, objects, make_false=bool(image_index % 2))
-        l4 = _build_l4(scene, target_idx, objects, rng)
+        # L4 = L2 + spatial restriction: reuses L2's category, options, and
+        # answer so the only structural difference is the +relation operator
+        # (program depth 4 vs 2). Cleans the L2 → L4 Csem-delta interpretation.
+        l4 = _build_l4(scene, target_idx, objects, rng, l2_level=l2)
         if l2 is None or l3 is None or l4 is None:
             continue
         l1 = _build_l1(scene, target, objects, make_false=bool((image_index + 1) % 2))

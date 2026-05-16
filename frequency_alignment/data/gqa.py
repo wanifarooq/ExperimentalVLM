@@ -65,10 +65,14 @@ from .complexity import (
 
 logger = logging.getLogger(__name__)
 
-_DATASET_CACHE_VERSION = "gqa_multilevel_v7"
+_DATASET_CACHE_VERSION = "gqa_multilevel_v8"
 _DATASET_MEMO: Dict[str, List[GranularitySample]] = {}
 _WORDY_MIN_EXTRA_PROMPT_CONTENT_WORDS = 12
 
+# v8: L2 and L4 are now jointly built from a single object with attrs+relations
+# so L4 = L2 + spatial-restriction clause. Reuses L2's category, options, and
+# gold answer; only the question text adds the relation phrase. Cleans the
+# L2 → L4 Csem-delta interpretation. L1/L3 still independently selected.
 # v7: L3 negative-case restricted to relations with a known cardinal opposite,
 # eliminating the "joint-truth" label-noise where the randomly-picked wrong
 # relation might also be true in the scene (e.g. "to the left of" and "behind"
@@ -793,62 +797,67 @@ def build_l7_question(base_level: LevelData) -> Optional[LevelData]:
     )
 
 
-def build_l4_question(
+def build_l4_from_l2(
     sg: dict,
+    obj_id: str,
+    obj: dict,
     objects: dict,
+    l2_level: LevelData,
     rng: random.Random,
 ) -> Optional[LevelData]:
-    """L4 (Very Fine): Compositional MCQ combining attributes + relations.
+    """L4 = L2 + spatial restriction.
 
-    Template: "What is the {attribute_category} of the {object} that is
-    {relation} the {other_object}?"
+    Reuses L2's attribute category, option set, and gold answer label so the
+    only structural difference between L2 and L4 is the added restrict-by-
+    relation clause. The L2 → L4 Csem delta therefore attributes cleanly to
+    "+1 relation operator" and the model is queried about the same fact
+    presented through two compositionally different program paths.
+
+    Returns ``None`` if ``obj`` has no usable outgoing relation (caller should
+    fall through to the next object).
     """
-    # Find an object with both attributes AND outgoing relations
-    candidates = []
-    for oid, obj in objects.items():
-        attrs = obj.get("attributes", [])
-        rels = obj.get("relations", [])
-        classified = _classify_attributes(attrs)
-        if classified and rels:
-            candidates.append((oid, obj, classified, rels))
-
-    if not candidates:
+    if l2_level is None:
         return None
-
-    oid, obj, classified, rels = rng.choice(candidates)
+    rels = obj.get("relations", [])
+    if not rels:
+        return None
     name = obj.get("name", "").strip()
-
-    # Pick a relation for the compositional reference
-    rel = rng.choice(rels)
-    rel_name = rel.get("name", "").strip()
-    target_id = rel.get("object", "")
-    target_obj = objects.get(target_id)
-    if not rel_name or target_obj is None:
+    if not name:
         return None
-    target_name = target_obj.get("name", "").strip()
-    if not target_name:
+    cat = (l2_level.question_type or "").replace("attribute_", "").strip()
+    if not cat:
         return None
-
-    # Pick an attribute to ask about
-    cat = rng.choice(list(classified.keys()))
-    correct_val = classified[cat]
-    distractors = _make_distractors(correct_val, cat, n=3, rng=rng)
-    if len(distractors) < 2:
+    options = dict(l2_level.options or {})
+    answer = l2_level.answer_label
+    if not options or answer is None or answer not in options:
         return None
-
-    all_opts = [correct_val] + distractors[:3]
-    rng.shuffle(all_opts)
-    labels = ["A", "B", "C", "D"]
-    options = {labels[i]: opt for i, opt in enumerate(all_opts)}
-    answer = next(l for l, v in options.items() if v == correct_val)
-
+    # Try relations until one yields a valid (rel_name, target_name) pair.
+    rel_indices = list(range(len(rels)))
+    rng.shuffle(rel_indices)
+    chosen_rel = None
+    target_name: Optional[str] = None
+    for idx in rel_indices:
+        rel = rels[idx]
+        rel_name = str(rel.get("name", "") or "").strip()
+        target_id = rel.get("object", "")
+        target_obj = objects.get(target_id)
+        if not rel_name or target_obj is None:
+            continue
+        tn = str(target_obj.get("name", "") or "").strip()
+        if not tn:
+            continue
+        chosen_rel = rel_name
+        target_name = tn
+        break
+    if chosen_rel is None or target_name is None:
+        return None
     question = (
-        f"What {cat} is the {name} that is {rel_name} the {target_name}?"
+        f"What {cat} is the {name} that is {chosen_rel} the {target_name}?"
     )
     complexity = build_semantic_complexity(
         entity_names=[name, target_name],
         attribute_queries=[cat],
-        relation_labels=[rel_name],
+        relation_labels=[chosen_rel],
         reasoning_ops=["restrict_by_relation", "query_attribute"],
         program_depth=3,
         grounding_candidate_count=_count_named_pairs(objects, name, target_name),
@@ -1236,13 +1245,24 @@ def build_granularity_dataset(
                     if q_wordy is not None:
                         levels[GranularityLevel.L5_WORDY_SIMPLETON] = q_wordy
 
+            # L2 + L4 are jointly built from a single object so L4 = L2 +
+            # spatial-restriction clause (same category, same option set, same
+            # gold answer). Requires the object to have both attributes AND at
+            # least one outgoing relation; if not, fall through to other obj_ids.
             if GranularityLevel.L2_MEDIUM not in levels:
-                q = build_l2_question(sg, obj_id, obj, rng)
-                if q is not None:
-                    levels[GranularityLevel.L2_MEDIUM] = q
-                    q_wordy = build_l6_question(q)
-                    if q_wordy is not None:
-                        levels[GranularityLevel.L6_WORDY_MEDIUM] = q_wordy
+                if obj.get("attributes") and obj.get("relations"):
+                    l2_q = build_l2_question(sg, obj_id, obj, rng)
+                    if l2_q is not None:
+                        l4_q = build_l4_from_l2(sg, obj_id, obj, objects, l2_q, rng)
+                        if l4_q is not None:
+                            levels[GranularityLevel.L2_MEDIUM] = l2_q
+                            levels[GranularityLevel.L4_VERY_FINE] = l4_q
+                            l2_wordy = build_l6_question(l2_q)
+                            if l2_wordy is not None:
+                                levels[GranularityLevel.L6_WORDY_MEDIUM] = l2_wordy
+                            l4_wordy = build_l8_question(l4_q)
+                            if l4_wordy is not None:
+                                levels[GranularityLevel.L8_WORDY_VERY_FINE] = l4_wordy
 
             if GranularityLevel.L3_FINE not in levels:
                 q = build_l3_question(sg, obj_id, obj, objects, rng)
@@ -1252,17 +1272,8 @@ def build_granularity_dataset(
                     if q_wordy is not None:
                         levels[GranularityLevel.L7_WORDY_FINE] = q_wordy
 
-            if len(levels) >= 6:
+            if len(levels) >= len(ALL_VQA_LEVELS):
                 break
-
-        # L4 uses the full scene graph
-        if GranularityLevel.L4_VERY_FINE not in levels:
-            q = build_l4_question(sg, objects, rng)
-            if q is not None:
-                levels[GranularityLevel.L4_VERY_FINE] = q
-                q_wordy = build_l8_question(q)
-                if q_wordy is not None:
-                    levels[GranularityLevel.L8_WORDY_VERY_FINE] = q_wordy
 
         # Only keep images where all levels were generated
         sample = GranularitySample(
