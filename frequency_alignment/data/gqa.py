@@ -65,9 +65,25 @@ from .complexity import (
 
 logger = logging.getLogger(__name__)
 
-_DATASET_CACHE_VERSION = "gqa_multilevel_v6"
+_DATASET_CACHE_VERSION = "gqa_multilevel_v7"
 _DATASET_MEMO: Dict[str, List[GranularitySample]] = {}
 _WORDY_MIN_EXTRA_PROMPT_CONTENT_WORDS = 12
+
+# v7: L3 negative-case restricted to relations with a known cardinal opposite,
+# eliminating the "joint-truth" label-noise where the randomly-picked wrong
+# relation might also be true in the scene (e.g. "to the left of" and "behind"
+# can both hold). Cardinal opposites are mutually exclusive by physical
+# geometry, so a flip is provably false.
+_GQA_OPPOSITE_RELATION = {
+    "to the left of": "to the right of",
+    "to the right of": "to the left of",
+    "above": "below",
+    "below": "above",
+    "behind": "in front of",
+    "in front of": "behind",
+    "on top of": "under",
+    "under": "on top of",
+}
 
 _WORDY_FILLER_PREFIX = (
     "Please read the following question carefully and answer the same question directly. "
@@ -727,12 +743,14 @@ def build_l3_question(
         question = f"Is the {name} {rel_name} the {target_name}?"
         answer = "A"
     else:
-        other_rels = ["to the left of", "to the right of", "above", "below",
-                      "behind", "in front of", "on top of", "next to"]
-        other_rels = [r for r in other_rels if r != rel_name]
-        if not other_rels:
+        # Restrict the wrong relation to a known cardinal opposite so it is
+        # provably false. The previous random-from-fixed-list approach could
+        # pick a relation that was also jointly true (e.g. "above" and "behind"
+        # can both hold), producing label noise. Relations without a defined
+        # opposite (e.g. "next to", "near") get filtered — caller retries.
+        wrong_rel = _GQA_OPPOSITE_RELATION.get(rel_name)
+        if not wrong_rel:
             return None
-        wrong_rel = rng.choice(other_rels)
         question = f"Is the {name} {wrong_rel} the {target_name}?"
         answer = "B"
         rel_name = wrong_rel

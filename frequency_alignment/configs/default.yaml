@@ -21,7 +21,7 @@ model:
   trust_remote_code: true
 
 data:
-  dataset: gqa
+  dataset: gqa 
   max_samples: 1000
   allow_download: true
   seedbench_tsv: null

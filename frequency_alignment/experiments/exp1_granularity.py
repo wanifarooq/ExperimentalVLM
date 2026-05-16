@@ -880,6 +880,16 @@ def _evaluate_sample(
         level_key = level.name  # e.g. "L1_COARSE"
         complexity = ensure_level_complexity(level_data)
         num_options = int(len(level_data.options or {}))
+        # Strict yes/no detection: the loglik-drift scoring topology of a
+        # binary verification question (options = {yes, no}) is mechanically
+        # different from a 2-option MCQ over attribute values such as
+        # {rubber, metal} or {small, large} that CLEVR L2/L4 may produce.
+        # Conflating them pollutes the is_binary control regressor in the
+        # long-format dual-force test. is_binary therefore requires the
+        # option-set to be exactly {yes, no}; num_options still reports the
+        # raw MCQ arity so any analysis that wants the format axis can use it.
+        _opt_values = {str(v).strip().lower() for v in (level_data.options or {}).values()}
+        is_yes_no = (_opt_values == {"yes", "no"})
         level_record: Dict[str, Any] = {
             "question": level_data.question,
             "question_type": level_data.question_type,
@@ -888,12 +898,12 @@ def _evaluate_sample(
             "question_complexity_score": complexity["question_complexity_score"],
             "prompt_complexity_score": complexity["prompt_complexity_score"],
             "option_hardness_score": float(getattr(level_data, "option_hardness_score", 0.0) or 0.0),
-            # Task-format covariate to disentangle binary (yes/no, 2 options) from
-            # MCQ (4+ options): the scoring topology of loglik_drift differs
-            # mechanically between the two regimes and option_hardness is degenerate
-            # on binary items (always ~0). Reported as both an indicator and a
-            # raw count so downstream regressions can pick whichever is cleaner.
-            "is_binary": 1.0 if num_options == 2 else 0.0,
+            # Task-format covariate to disentangle binary verification
+            # (options = {yes, no}) from non-yes/no MCQ. option_hardness is
+            # degenerate on yes/no items (always ~0). Reported as both an
+            # indicator and a raw count so downstream regressions can pick
+            # whichever is cleaner.
+            "is_binary": 1.0 if is_yes_no else 0.0,
             "num_options": num_options,
             "semantic_atoms": complexity["semantic_atoms"],
             "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],

@@ -30,6 +30,8 @@ data:
   allow_download: true
   seedbench_tsv: null
   seedbench_image_root: null
+  clevr_dir: null
+  clevr_split: val
   partimagenet_dir: null
 
 perturbations:

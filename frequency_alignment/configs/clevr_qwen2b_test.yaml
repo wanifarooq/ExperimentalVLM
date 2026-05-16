@@ -1,26 +1,26 @@
 seed: 42
 deterministic: false
-device: auto
+device: cuda:0
 cache_dir: .hf_cache
-out_dir: frequency_alignment_outputs_llava_test
+out_dir: frequency_alignment_outputs_clevr_qwen2b_test
 
 model:
-  primary: llava-hf/llava-onevision-qwen2-0.5b-ov-hf
+  primary: Qwen/Qwen3-VL-2B-Instruct
   alternatives: []
   quantization: null
-  device_map: auto
+  device_map: null
   attn_implementation: null
   attention_extract_implementation: eager
   trust_remote_code: true
 
 data:
-  dataset: gqa
-  max_samples: 10
-  allow_download: true
+  dataset: clevr
+  max_samples: 2
+  allow_download: false
+  clevr_dir: .hf_cache/clevr/CLEVR_v1.0
+  clevr_split: val
   seedbench_tsv: null
   seedbench_image_root: null
-  clevr_dir: null
-  clevr_split: val
   partimagenet_dir: null
 
 perturbations:
@@ -32,25 +32,10 @@ perturbations:
   include_natural: true
   include_frequency: false
   natural_types:
-    - translation
-    - padcrop
-    - scale
-    - scalepad_black
-    - scalepad_white
-    - rotation
     - gaussian_blur
-    - motion_blur
-    - occlusion
-    - brightness
-    - contrast
-    - gaussian_noise
     - jpeg_compression
-  frequency_types:
-    - lowpass_keep
-    - highpass_keep
-    - lowband_noise
-    - highband_noise
-    - allband_noise
+    - brightness
+  frequency_types: []
   severity_params:
     1:
       translate: 8
@@ -69,15 +54,8 @@ perturbations:
       jpeg_quality: 70
 
 analysis:
-  num_bands: 20
-  num_bands_mode: auto
-  num_bands_auto:
-    probe_samples: 6
-    coefficient: 0.6
-    rounding: ceil
-    statistic: median
-    min_bands: 8
-    max_bands: 20
+  num_bands: 12
+  num_bands_mode: fixed
   suppress_dc: false
   overlap_2d:
     enabled: false
@@ -89,34 +67,33 @@ analysis:
   hypothesis_testing: true
 
 plotting:
-  profile: exhaustive
-  representative_samples: 10
+  profile: compact
+  representative_samples: 2
 
 experiments:
   exp1:
     enabled: true
-    max_samples: 10
-    # Vision-feature spectral path: disabled by default (sign-inverted vs pixel-space).
+    max_samples: 2
     extract_vision_tokens: false
     store_feature_delta_f: false
   exp2:
-    enabled: true
-    max_samples: 10
-    layer_stride: 8
+    enabled: false
+    max_samples: 2
+    layer_stride: 1
     fft_window: none
-    prompt_controls:
-      - empty_language
-      - random_language
-  # exp3 (fusion drift) retired during camera-ready cleanup.
+    question_only_control:
+      enabled: false
+    prompt_controls: []
   exp4:
     enabled: false
-    max_samples: 10
-    sweep_steps: 5
+    max_samples: 2
+    sweep_steps: 8
+    sweep_modes:
+      - lowpass
+      - highpass
   exp5:
     enabled: false
-    primary_layer_group: late
+    primary_layer_group: last_2
     primary_delta_normalization: relative
   exp6:
     enabled: false
-    max_samples: 3
-    dataset: partimagenet

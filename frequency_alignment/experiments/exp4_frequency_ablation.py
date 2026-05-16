@@ -344,6 +344,11 @@ def run_exp4(
                     accuracy_data[mode][level_key][ci].append(correct)
 
                 num_options_e4 = int(len(level_data.options or {}))
+                # is_binary = strict yes/no (options == {yes, no}); see exp1
+                # for rationale. CLEVR L2/L4 can yield 2-option attribute
+                # MCQs that are NOT yes/no.
+                _opt_values_e4 = {str(v).strip().lower() for v in (level_data.options or {}).values()}
+                is_yes_no_e4 = (_opt_values_e4 == {"yes", "no"})
                 mode_record["levels"][level_key] = {
                     "question": level_data.question,
                     "question_type": level_data.question_type,
@@ -351,7 +356,7 @@ def run_exp4(
                     "question_complexity_score": complexity["question_complexity_score"],
                     "prompt_complexity_score": complexity["prompt_complexity_score"],
                     "option_hardness_score": float(getattr(level_data, "option_hardness_score", 0.0) or 0.0),
-                    "is_binary": 1.0 if num_options_e4 == 2 else 0.0,
+                    "is_binary": 1.0 if is_yes_no_e4 else 0.0,
                     "num_options": num_options_e4,
                     "semantic_atoms": complexity["semantic_atoms"],
                     "prompt_semantic_atoms": complexity["prompt_semantic_atoms"],

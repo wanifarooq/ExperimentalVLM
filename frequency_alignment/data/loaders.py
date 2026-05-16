@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 
 from .base import GranularitySample
+from .clevr import build_clevr_granularity_dataset
 from .gqa import build_granularity_dataset
 from .partimagenet import build_partimagenet_dataset
 from .seedbench_adapter import load_seedbench_as_granularity
@@ -32,6 +33,16 @@ def load_multilevel_vqa_dataset(
             allow_download=allow_download,
         )
 
+    if dataset == "clevr":
+        return build_clevr_granularity_dataset(
+            cache_dir=cache_dir,
+            max_samples=max_samples,
+            seed=seed,
+            split=str(data_cfg.get("clevr_split", "val")),
+            root_dir=Path(data_cfg["clevr_dir"]) if data_cfg.get("clevr_dir") else None,
+            allow_download=allow_download,
+        )
+
     if dataset == "seedbench":
         samples = load_seedbench_as_granularity(
             tsv_path=Path(data_cfg["seedbench_tsv"]) if data_cfg.get("seedbench_tsv") else None,
@@ -48,7 +59,7 @@ def load_multilevel_vqa_dataset(
 
     raise ValueError(
         f"Unsupported dataset for VQA experiments: {dataset!r}. "
-        "Use 'gqa' for experiments 1-5."
+        "Use 'gqa' or 'clevr' for experiments 1-5."
     )
 
 
