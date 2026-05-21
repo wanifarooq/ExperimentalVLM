@@ -62,3 +62,7 @@ package.json
 *.h5
 tmp/
 temp/
+formal/
+qwen_clevr_*/
+qwen_gpa_*/
+

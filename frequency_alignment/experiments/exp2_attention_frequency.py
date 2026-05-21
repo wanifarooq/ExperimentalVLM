@@ -136,6 +136,42 @@ def _store_per_sample_filter_npy_enabled(cfg: Dict[str, Any]) -> bool:
     return bool(cfg.get("analysis", {}).get("store_per_sample_filter_npy", False))
 
 
+def _require_exact_patch_grid_enabled(cfg: Dict[str, Any]) -> bool:
+    """Whether Exp2 should reject FFT filters that require grid padding/truncation."""
+    return bool(cfg.get("analysis", {}).get("require_exact_patch_grid", False))
+
+
+def _patch_grid_fft_metadata(
+    patch_grid: Any,
+    vision_token_range: Any,
+) -> Dict[str, Any]:
+    """Return exactness metadata for reshaping visual-token attention to 2D."""
+    try:
+        h, w = [int(x) for x in patch_grid[:2]]
+        patch_grid_area: Optional[int] = h * w
+    except Exception:
+        patch_grid_area = None
+
+    num_vision_tokens: Optional[int] = None
+    try:
+        start, end = [int(x) for x in vision_token_range[:2]]
+        if end > start:
+            num_vision_tokens = end - start
+    except Exception:
+        num_vision_tokens = None
+
+    patch_grid_exact = (
+        patch_grid_area is not None
+        and num_vision_tokens is not None
+        and patch_grid_area == num_vision_tokens
+    )
+    return {
+        "patch_grid_area": patch_grid_area,
+        "num_vision_tokens": num_vision_tokens,
+        "patch_grid_exact": bool(patch_grid_exact),
+    }
+
+
 _L2_KEY_MARKERS = ("_l2", "l2_")
 
 
@@ -462,12 +498,16 @@ def _extract_attention_for_prompt(
     fft_window: str = "hann",
     suppress_dc: bool = True,
     store_2d_spectra: bool = False,
+    require_exact_patch_grid: bool = False,
+    extraction_stats: Optional[Dict[str, int]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Extract attention maps and compute spectral analysis for one prompt.
 
     Returns dict with power spectrum, bandwidth, and W_t filter, or None
     on failure.
     """
+    if extraction_stats is not None:
+        extraction_stats["attempted"] = extraction_stats.get("attempted", 0) + 1
     try:
         internals = adapter.extract_internals(
             image, prompt,
@@ -483,15 +523,43 @@ def _extract_attention_for_prompt(
             attention_extra_last_layers=LAST_LAYER_MAX_OFFSET,
         )
     except Exception as e:
+        if extraction_stats is not None:
+            extraction_stats["extract_internals_failed"] = (
+                extraction_stats.get("extract_internals_failed", 0) + 1
+            )
         logger.warning("extract_internals failed: %s", e)
         return None
 
     if internals.cross_attention_weights is None or not internals.cross_attention_weights:
+        if extraction_stats is not None:
+            extraction_stats["no_cross_attention"] = (
+                extraction_stats.get("no_cross_attention", 0) + 1
+            )
         logger.warning("No cross-attention weights returned")
         return None
 
     if internals.patch_grid is None:
+        if extraction_stats is not None:
+            extraction_stats["no_patch_grid"] = extraction_stats.get("no_patch_grid", 0) + 1
         logger.warning("No patch grid shape returned")
+        return None
+
+    patch_grid_meta = _patch_grid_fft_metadata(
+        internals.patch_grid,
+        internals.vision_token_range,
+    )
+    if require_exact_patch_grid and not patch_grid_meta["patch_grid_exact"]:
+        if extraction_stats is not None:
+            extraction_stats["invalid_patch_grid_for_fft"] = (
+                extraction_stats.get("invalid_patch_grid_for_fft", 0) + 1
+            )
+        logger.warning(
+            "Skipping Exp2 FFT filter because patch_grid area does not match "
+            "vision-token span: patch_grid=%s area=%s num_vision_tokens=%s",
+            internals.patch_grid,
+            patch_grid_meta["patch_grid_area"],
+            patch_grid_meta["num_vision_tokens"],
+        )
         return None
 
     # Convert attention tensors to numpy
@@ -501,6 +569,10 @@ def _extract_attention_for_prompt(
             attn_list.append(attn_tensor.cpu().float().numpy())
 
     if not attn_list:
+        if extraction_stats is not None:
+            extraction_stats["empty_attention_tensors"] = (
+                extraction_stats.get("empty_attention_tensors", 0) + 1
+            )
         return None
 
     def _summarize_group(group_attn: List[np.ndarray], layer_indices: List[int]) -> Dict[str, Any]:
@@ -578,13 +650,19 @@ def _extract_attention_for_prompt(
             continue
         group_stats[group_name] = _summarize_group([attn], [int(layer_index)])
 
+    if extraction_stats is not None:
+        extraction_stats["valid"] = extraction_stats.get("valid", 0) + 1
+
     return {
         **overall,
+        **patch_grid_meta,
         "layer_groups": group_stats,
         "per_layer": per_layer,
         "layer_group_ranges": layer_group_ranges(total_layers),
         "total_model_layers": total_layers,
         "patch_grid": internals.patch_grid,
+        "vision_token_range": internals.vision_token_range,
+        "layer_indices": layer_indices,
         "fft_window": fft_window,
     }
 
@@ -621,6 +699,7 @@ def run_exp2(
     overlap_2d_enabled = _overlap_2d_enabled(cfg)
     question_only_enabled = _question_only_control_enabled(exp_cfg)
     store_per_sample_npy = _store_per_sample_filter_npy_enabled(cfg)
+    require_exact_patch_grid = _require_exact_patch_grid_enabled(cfg)
     filter_group_order = _filter_group_order(include_last_layers=True)
     effective_band_count = spectral_vector_length(num_bands, suppress_dc=suppress_dc)
     seed = cfg.get("seed", 42)
@@ -755,6 +834,7 @@ def run_exp2(
         for control_name in prompt_controls
     }
     layer_group_meta = layer_group_ranges(max(1, adapter.num_layers))
+    extraction_stats: Dict[str, int] = {}
     t0 = time.time()
 
     for idx, sample in enumerate(samples):
@@ -797,6 +877,8 @@ def run_exp2(
                 fft_window,
                 suppress_dc=suppress_dc,
                 store_2d_spectra=overlap_2d_enabled,
+                require_exact_patch_grid=require_exact_patch_grid,
+                extraction_stats=extraction_stats,
             )
 
             if result is None:
@@ -832,6 +914,14 @@ def run_exp2(
                 "num_layers": result["num_layers_extracted"],
                 "num_heads": result["num_heads_total"],
                 "patch_grid": list(result["patch_grid"]) if result.get("patch_grid") else None,
+                "vision_token_range": (
+                    list(result["vision_token_range"])
+                    if result.get("vision_token_range") else None
+                ),
+                "patch_grid_area": result.get("patch_grid_area"),
+                "num_vision_tokens": result.get("num_vision_tokens"),
+                "patch_grid_exact": result.get("patch_grid_exact"),
+                "layer_indices": [int(idx) for idx in result.get("layer_indices", [])],
                 "fft_window": result.get("fft_window"),
                 "layer_groups": {},
                 "per_layer": [
@@ -938,6 +1028,8 @@ def run_exp2(
                     fft_window,
                     suppress_dc=suppress_dc,
                     store_2d_spectra=overlap_2d_enabled,
+                    require_exact_patch_grid=require_exact_patch_grid,
+                    extraction_stats=extraction_stats,
                 )
                 if question_only_result is not None:
                     qo_divergence = compare_spectral_filters(
@@ -955,6 +1047,17 @@ def run_exp2(
                             result["bandwidth"] - question_only_result["bandwidth"]
                         ),
                         "layer_groups": {},
+                        "patch_grid": (
+                            list(question_only_result["patch_grid"])
+                            if question_only_result.get("patch_grid") else None
+                        ),
+                        "vision_token_range": (
+                            list(question_only_result["vision_token_range"])
+                            if question_only_result.get("vision_token_range") else None
+                        ),
+                        "patch_grid_area": question_only_result.get("patch_grid_area"),
+                        "num_vision_tokens": question_only_result.get("num_vision_tokens"),
+                        "patch_grid_exact": question_only_result.get("patch_grid_exact"),
                     }
                     qo_record.update(
                         _store_filter_artifacts(
@@ -1059,6 +1162,8 @@ def run_exp2(
                     num_bands,
                     fft_window,
                     suppress_dc,
+                    require_exact_patch_grid=require_exact_patch_grid,
+                    extraction_stats=extraction_stats,
                 )
                 if control_result is None:
                     continue
@@ -1169,6 +1274,21 @@ def run_exp2(
         "requested_num_bands": int(num_bands),
         "effective_num_bands": int(effective_band_count),
         "prompt_controls": prompt_controls,
+        "patch_grid_guardrail": {
+            "require_exact_patch_grid": bool(require_exact_patch_grid),
+            "policy": (
+                "skip FFT filter entries whose patch_grid area differs from "
+                "the fused vision-token span"
+            ),
+            "extraction_stats": {
+                key: int(value) for key, value in sorted(extraction_stats.items())
+            },
+            "note": (
+                "This guardrail protects Exp2/Exp5 spectral claims from "
+                "zero-padding or truncation artifacts in models with inferred "
+                "vision-token grids, especially LLaVA-OneVision."
+            ),
+        },
         "overlap_2d": {
             "enabled": bool(overlap_2d_enabled),
             "domain": "attention_filter_space",

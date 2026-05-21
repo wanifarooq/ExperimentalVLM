@@ -26,16 +26,33 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+matplotlib.rcParams.update(
+    {
+        "figure.dpi": 120,
+        "savefig.dpi": 300,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "font.size": 10,
+        "axes.titlesize": 11,
+        "axes.labelsize": 10,
+        "legend.fontsize": 9,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+    }
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-SIGNATURE_ORDER = ["low", "mid", "high", "broadband"]
+DELTA_SIGNATURE_ORDER = ["low", "mid", "high", "broadband"]
+WT_SIGNATURE_ORDER = ["narrow", "broadband"]
 SIGNATURE_COLORS = {
     "low": "#3182bd",
     "mid": "#31a354",
     "high": "#de2d26",
+    "narrow": "#2563eb",
     "broadband": "#8c6bb1",
 }
 LEVEL_ORDER = [
@@ -49,6 +66,11 @@ LEVEL_ORDER = [
     "L8_WORDY_VERY_FINE",
 ]
 EPS = 1e-12
+
+
+def _save_paper_figure(fig: plt.Figure, out_path: Path) -> None:
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
 
 
 def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -126,6 +148,11 @@ def _spectral_features(values: Sequence[float], *, entropy_threshold: float = 0.
     }
 
 
+def _query_signature(features: Dict[str, Any]) -> str:
+    """Collapse query filters to the scientific contrast: narrow vs broadband."""
+    return "broadband" if features.get("signature") == "broadband" else "narrow"
+
+
 def _spectrum_values(perturbation: Dict[str, Any], spectrum: str) -> Optional[Sequence[float]]:
     if spectrum == "image":
         return perturbation.get("delta_f_relative") or perturbation.get("delta_f")
@@ -201,7 +228,8 @@ def _load_wt_bank(run_dir: Path, *, group: str, question_only: bool) -> Dict[Tup
             features = _spectral_features(w_t)
             bank[(image_id, str(level))] = {
                 "W_t": w_t,
-                "wt_signature": features["signature"],
+                "wt_signature": _query_signature(features),
+                "wt_dominant_band": features["signature"],
                 "wt_low_mass": features["low_mass"],
                 "wt_mid_mass": features["mid_mass"],
                 "wt_high_mass": features["high_mass"],
@@ -252,6 +280,7 @@ def _load_rows(
                         "delta_entropy": delta_features["entropy"],
                         "delta_centroid": delta_features["centroid"],
                         "wt_signature": wt["wt_signature"],
+                        "wt_dominant_band": wt["wt_dominant_band"],
                         "wt_low_mass": wt["wt_low_mass"],
                         "wt_mid_mass": wt["wt_mid_mass"],
                         "wt_high_mass": wt["wt_high_mass"],
@@ -259,30 +288,31 @@ def _load_rows(
                         "wt_centroid": wt["wt_centroid"],
                         "predicted_first_order_overlap": predicted_overlap,
                         "loglik_drift": float(drift),
+                        "loglik_erosion": max(float(drift), 0.0),
                         "loglik_volatility": abs(float(drift)),
                     }
                 )
     return rows
 
 
-def _mean_ci(values: Sequence[float]) -> Dict[str, Any]:
+def _mean_ci(values: Sequence[float], *, prefix: str) -> Dict[str, Any]:
     arr = np.asarray(values, dtype=np.float64)
     arr = arr[np.isfinite(arr)]
     if arr.size == 0:
         return {
             "n": 0,
-            "mean_loglik_volatility": None,
-            "median_loglik_volatility": None,
-            "std_loglik_volatility": None,
-            "ci95_mean_loglik_volatility": None,
+            f"mean_{prefix}": None,
+            f"median_{prefix}": None,
+            f"std_{prefix}": None,
+            f"ci95_mean_{prefix}": None,
         }
     std = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
     return {
         "n": int(arr.size),
-        "mean_loglik_volatility": float(np.mean(arr)),
-        "median_loglik_volatility": float(np.median(arr)),
-        "std_loglik_volatility": std,
-        "ci95_mean_loglik_volatility": float(1.96 * std / math.sqrt(arr.size)) if arr.size > 1 else 0.0,
+        f"mean_{prefix}": float(np.mean(arr)),
+        f"median_{prefix}": float(np.median(arr)),
+        f"std_{prefix}": std,
+        f"ci95_mean_{prefix}": float(1.96 * std / math.sqrt(arr.size)) if arr.size > 1 else 0.0,
     }
 
 
@@ -297,9 +327,16 @@ def _correlation_summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         for row in rows
         if row.get("predicted_first_order_overlap") is not None
     ]
+    erosion_y = [
+        float(row["loglik_erosion"])
+        for row in rows
+        if row.get("predicted_first_order_overlap") is not None
+    ]
     return {
         "pearson_r_overlap_vs_volatility": _pearson(x, y),
         "spearman_rho_overlap_vs_volatility": _spearman(x, y),
+        "pearson_r_overlap_vs_erosion": _pearson(x, erosion_y),
+        "spearman_rho_overlap_vs_erosion": _spearman(x, erosion_y),
     }
 
 
@@ -310,7 +347,18 @@ def _summarize(rows: Sequence[Dict[str, Any]], keys: Sequence[str]) -> List[Dict
     out: List[Dict[str, Any]] = []
     for key_values, bucket_rows in sorted(buckets.items()):
         item = {key: value for key, value in zip(keys, key_values)}
-        item.update(_mean_ci([float(row["loglik_volatility"]) for row in bucket_rows]))
+        item.update(
+            _mean_ci(
+                [float(row["loglik_volatility"]) for row in bucket_rows],
+                prefix="loglik_volatility",
+            )
+        )
+        item.update(
+            _mean_ci(
+                [float(row["loglik_erosion"]) for row in bucket_rows],
+                prefix="loglik_erosion",
+            )
+        )
         item.update(_correlation_summary(bucket_rows))
         out.append(item)
     return out
@@ -337,27 +385,27 @@ def _matrix_plot(
     vmax: Optional[float] = None,
 ) -> None:
     lookup = {(row["delta_signature"], row["wt_signature"]): row for row in rows}
-    matrix = np.full((len(SIGNATURE_ORDER), len(SIGNATURE_ORDER)), np.nan, dtype=np.float64)
+    matrix = np.full((len(DELTA_SIGNATURE_ORDER), len(WT_SIGNATURE_ORDER)), np.nan, dtype=np.float64)
     counts = np.zeros_like(matrix)
-    for i, delta_sig in enumerate(SIGNATURE_ORDER):
-        for j, wt_sig in enumerate(SIGNATURE_ORDER):
+    for i, delta_sig in enumerate(DELTA_SIGNATURE_ORDER):
+        for j, wt_sig in enumerate(WT_SIGNATURE_ORDER):
             row = lookup.get((delta_sig, wt_sig))
             if row and row.get(value_key) is not None:
                 matrix[i, j] = float(row[value_key])
                 counts[i, j] = int(row["n"])
-    fig, ax = plt.subplots(figsize=(8.8, 7.2))
+    fig, ax = plt.subplots(figsize=(7.2, 7.2))
     im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
-    ax.set_xticks(np.arange(len(SIGNATURE_ORDER)))
-    ax.set_xticklabels(SIGNATURE_ORDER)
-    ax.set_yticks(np.arange(len(SIGNATURE_ORDER)))
-    ax.set_yticklabels(SIGNATURE_ORDER)
-    ax.set_xlabel("Query W_t signature")
+    ax.set_xticks(np.arange(len(WT_SIGNATURE_ORDER)))
+    ax.set_xticklabels(WT_SIGNATURE_ORDER)
+    ax.set_yticks(np.arange(len(DELTA_SIGNATURE_ORDER)))
+    ax.set_yticklabels(DELTA_SIGNATURE_ORDER)
+    ax.set_xlabel("Query W_t signature (narrow vs broadband)")
     ax.set_ylabel("Perturbation ΔF signature")
     ax.set_title(title)
     max_abs = float(np.nanmax(np.abs(matrix))) if np.isfinite(matrix).any() else 1.0
     max_value = float(np.nanmax(matrix)) if np.isfinite(matrix).any() else 1.0
-    for i in range(len(SIGNATURE_ORDER)):
-        for j in range(len(SIGNATURE_ORDER)):
+    for i in range(len(DELTA_SIGNATURE_ORDER)):
+        for j in range(len(WT_SIGNATURE_ORDER)):
             if np.isfinite(matrix[i, j]):
                 if value_key.endswith("volatility"):
                     color = "white" if matrix[i, j] > 0.45 * max_value else "#111827"
@@ -377,23 +425,24 @@ def _matrix_plot(
     fig.text(
         0.01,
         0.01,
-        "Signatures use low/mid/high mass fractions plus normalized entropy. Correlations use W_t·ΔF vs abs(loglik_drift) inside each cell.",
+        "ΔF uses low/mid/high/broadband classes. Query W_t is collapsed to narrow vs broadband. Correlations use W_t·ΔF vs abs(loglik_drift) inside each cell.",
         ha="left",
         va="bottom",
         fontsize=8,
         color="#374151",
     )
     fig.tight_layout(rect=(0, 0.05, 1, 1))
-    fig.savefig(out_path, dpi=180)
+    _save_paper_figure(fig, out_path)
     plt.close(fig)
 
 
 def _signature_distribution_plot(rows: Sequence[Dict[str, Any]], out_path: Path, *, key: str, title: str) -> None:
-    counts = {sig: 0 for sig in SIGNATURE_ORDER}
+    order = WT_SIGNATURE_ORDER if key == "wt_signature" else DELTA_SIGNATURE_ORDER
+    counts = {sig: 0 for sig in order}
     for row in rows:
         sig = str(row.get(key, "unknown"))
         counts[sig] = counts.get(sig, 0) + 1
-    labels = [sig for sig in SIGNATURE_ORDER if counts.get(sig, 0) > 0]
+    labels = [sig for sig in order if counts.get(sig, 0) > 0]
     values = [counts[sig] for sig in labels]
     colors = [SIGNATURE_COLORS.get(sig, "#4b5563") for sig in labels]
     fig, ax = plt.subplots(figsize=(8.0, 4.8))
@@ -404,7 +453,7 @@ def _signature_distribution_plot(rows: Sequence[Dict[str, Any]], out_path: Path,
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=180)
+    _save_paper_figure(fig, out_path)
     plt.close(fig)
 
 
@@ -425,6 +474,11 @@ def main() -> None:
         "--question-only-wt",
         action="store_true",
         help="Use Exp2 question-only W_t filters instead of option-conditioned W_t.",
+    )
+    parser.add_argument(
+        "--write-rows",
+        action="store_true",
+        help="Also write the large per-perturbation row CSV. Disabled by default for paper plots.",
     )
     args = parser.parse_args()
 
@@ -461,12 +515,14 @@ def main() -> None:
         "delta_entropy",
         "delta_centroid",
         "wt_signature",
+        "wt_dominant_band",
         "wt_low_mass",
         "wt_mid_mass",
         "wt_high_mass",
         "wt_entropy",
         "wt_centroid",
         "loglik_drift",
+        "loglik_erosion",
         "loglik_volatility",
         "predicted_first_order_overlap",
     ]
@@ -476,10 +532,17 @@ def main() -> None:
         "median_loglik_volatility",
         "std_loglik_volatility",
         "ci95_mean_loglik_volatility",
+        "mean_loglik_erosion",
+        "median_loglik_erosion",
+        "std_loglik_erosion",
+        "ci95_mean_loglik_erosion",
         "pearson_r_overlap_vs_volatility",
         "spearman_rho_overlap_vs_volatility",
+        "pearson_r_overlap_vs_erosion",
+        "spearman_rho_overlap_vs_erosion",
     ]
-    _write_csv(out_dir / "delta_wt_signature_rows.csv", rows, row_fields)
+    if args.write_rows:
+        _write_csv(out_dir / "delta_wt_signature_rows.csv", rows, row_fields)
     _write_csv(
         out_dir / "delta_wt_signature_matrix.csv",
         matrix_rows,
@@ -497,6 +560,8 @@ def main() -> None:
     )
     _write_csv(out_dir / "delta_signature_summary.csv", delta_summary, ["delta_signature", *summary_fields])
     _write_csv(out_dir / "wt_signature_summary.csv", wt_summary, ["wt_signature", *summary_fields])
+    wt_band_summary = _summarize(rows, ["wt_dominant_band"])
+    _write_csv(out_dir / "wt_dominant_band_summary.csv", wt_band_summary, ["wt_dominant_band", *summary_fields])
 
     wt_label = f"{args.wt_group} W_t" + (" question-only" if args.question_only_wt else "")
     _matrix_plot(
@@ -509,10 +574,28 @@ def main() -> None:
     )
     _matrix_plot(
         matrix_rows,
+        out_dir / "delta_wt_signature_erosion_matrix.png",
+        title=f"ΔF signature × {wt_label} signature vs erosion ({args.spectrum} ΔF)",
+        value_key="mean_loglik_erosion",
+        cbar_label="Mean log-likelihood erosion",
+        cmap="magma",
+    )
+    _matrix_plot(
+        matrix_rows,
         out_dir / "delta_wt_signature_pearson_matrix.png",
         title=f"Within-cell Pearson r: overlap vs volatility ({args.spectrum} ΔF, {wt_label})",
         value_key="pearson_r_overlap_vs_volatility",
         cbar_label="Pearson r(W_t·ΔF, volatility)",
+        cmap="coolwarm",
+        vmin=-1.0,
+        vmax=1.0,
+    )
+    _matrix_plot(
+        matrix_rows,
+        out_dir / "delta_wt_signature_erosion_pearson_matrix.png",
+        title=f"Within-cell Pearson r: overlap vs erosion ({args.spectrum} ΔF, {wt_label})",
+        value_key="pearson_r_overlap_vs_erosion",
+        cbar_label="Pearson r(W_t·ΔF, erosion)",
         cmap="coolwarm",
         vmin=-1.0,
         vmax=1.0,
@@ -545,12 +628,15 @@ def main() -> None:
         "spectrum": args.spectrum,
         "wt_group": args.wt_group,
         "question_only_wt": bool(args.question_only_wt),
+        "large_row_csv_written": bool(args.write_rows),
         "n_rows": len(rows),
         "outputs": sorted(path.name for path in out_dir.iterdir() if path.is_file()),
         "signature_method": {
-            "mass_bins": "np.array_split(radial vector, 3) -> low/mid/high",
-            "broadband_rule": "normalized_entropy>=0.86 and top_mass-second_mass<0.12",
-            "otherwise": "dominant low/mid/high mass",
+            "delta_mass_bins": "np.array_split(radial vector, 3) -> low/mid/high",
+            "delta_broadband_rule": "normalized_entropy>=0.86 and top_mass-second_mass<0.12",
+            "delta_otherwise": "dominant low/mid/high mass",
+            "query_w_t_signature": "broadband if entropy-flat/non-dominant; otherwise narrow",
+            "query_w_t_dominant_band_saved_as": "wt_dominant_band_summary.csv",
         },
     }
     with (out_dir / "plot_manifest.json").open("w") as handle:

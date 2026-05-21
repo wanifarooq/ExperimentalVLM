@@ -19,12 +19,13 @@ cache_dir: .hf_cache
 out_dir: frequency_alignment_outputs
 
 model:
-  primary: Qwen/Qwen3-VL-8B-Instruct
+  primary: llava-hf/llava-onevision-qwen2-7b-ov-hf
   alternatives:
     - Qwen/Qwen3-VL-2B-Instruct
     - Qwen/Qwen3-VL-8B-Instruct
     - llava-hf/llava-v1.6-mistral-7b-hf
     - OpenGVLab/InternVL3-8B-hf
+    - llava-hf/llava-onevision-qwen2-7b-ov-hf
   quantization: null
   device_map: auto
   attn_implementation: null
@@ -146,7 +147,7 @@ analysis:
   attention_fft_window: none
   significance_level: 0.05
   hypothesis_testing: true
-
+  require_exact_patch_grid: true
 plotting:
   profile: exhaustive
   representative_samples: 10

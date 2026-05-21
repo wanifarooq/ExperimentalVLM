@@ -24,6 +24,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
+matplotlib.rcParams.update(
+    {
+        "figure.dpi": 120,
+        "savefig.dpi": 300,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "font.size": 10,
+        "axes.titlesize": 11,
+        "axes.labelsize": 10,
+        "legend.fontsize": 9,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+    }
+)
+
 
 LEVEL_ORDER = [
     "L1_COARSE",
@@ -61,6 +76,11 @@ DOMAIN_SPECS = {
 SPACE_ORDER = ["radial_first_order", "two_d_first_order"]
 CENTERING_ORDER = ["raw", "delta_centered", "filter_centered", "both_centered"]
 EPS = 1e-12
+
+
+def _save_paper_figure(fig: plt.Figure, out_path: Path) -> None:
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
 
 
 def _parse_csv(value: Optional[str], default: Sequence[str]) -> List[str]:
@@ -304,8 +324,7 @@ def _collect_rows(
     filters_2d_dir = run_dir / "exp2" / filter_dir_name
     if not exp1_path.exists():
         raise FileNotFoundError(f"Missing {exp1_path}")
-    if not filters_2d_dir.exists():
-        raise FileNotFoundError(f"Missing {filters_2d_dir}")
+    has_2d_filters = filters_2d_dir.exists()
 
     radial_filters = _load_filter_bank(run_dir, groups)
     npz_cache: Dict[Tuple[str, str], Optional[np.ndarray]] = {}
@@ -335,10 +354,14 @@ def _collect_rows(
 
                     for group_name in groups:
                         radial_w = radial_filters.get((image_id, level_key, group_name))
-                        w_2d = _load_npz_array(
-                            filters_2d_dir / f"{image_id}_{level_key}_{group_name}.npz",
-                            "W_t_2d",
-                            npz_cache,
+                        w_2d = (
+                            _load_npz_array(
+                                filters_2d_dir / f"{image_id}_{level_key}_{group_name}.npz",
+                                "W_t_2d",
+                                npz_cache,
+                            )
+                            if has_2d_filters
+                            else None
                         )
 
                         if filter_mode == "option_conditioned" and radial_w is not None and radial_delta:
@@ -596,6 +619,86 @@ def _write_outputs(out_dir: Path, summaries: Sequence[Dict[str, Any]]) -> None:
 
 
 def _plot_summary(out_dir: Path, summaries: Sequence[Dict[str, Any]], target_key: str) -> None:
+    raw_rows = [
+        row
+        for row in summaries
+        if row["centering"] == "raw" and row["fe_pearson_r"] is not None
+    ]
+    if raw_rows:
+        groups = [group for group in GROUP_ORDER if any(row["group"] == group for row in raw_rows)]
+        fig, axes = plt.subplots(1, 2, figsize=(15.2, 5.4), sharey=True)
+        for ax, domain in zip(axes, ["image_space", "vision_feature_space"]):
+            domain_rows = [row for row in raw_rows if row["domain"] == domain]
+            available_spaces = [
+                space
+                for space in SPACE_ORDER
+                if any(row["overlap_space"] == space for row in domain_rows)
+            ]
+            width = 0.34 if len(available_spaces) > 1 else 0.56
+            x = np.arange(len(groups), dtype=np.float64)
+            for offset_idx, overlap_space in enumerate(available_spaces):
+                offset = (offset_idx - (len(available_spaces) - 1) / 2.0) * width
+                values: List[float] = []
+                low_errors: List[float] = []
+                high_errors: List[float] = []
+                for group_name in groups:
+                    row = next(
+                        (
+                            item
+                            for item in domain_rows
+                            if item["group"] == group_name and item["overlap_space"] == overlap_space
+                        ),
+                        None,
+                    )
+                    if row is None:
+                        values.append(np.nan)
+                        low_errors.append(0.0)
+                        high_errors.append(0.0)
+                        continue
+                    value = float(row["fe_pearson_r"])
+                    ci_low = row.get("fe_pearson_ci_low")
+                    ci_high = row.get("fe_pearson_ci_high")
+                    values.append(value)
+                    low_errors.append(value - float(ci_low) if ci_low is not None else 0.0)
+                    high_errors.append(float(ci_high) - value if ci_high is not None else 0.0)
+                label = overlap_space.replace("_first_order", "").replace("_", " ")
+                color = "#6b7280" if overlap_space == "radial_first_order" else "#2563eb"
+                ax.bar(x + offset, values, width=width, color=color, alpha=0.86, label=label)
+                if any(np.isfinite(values)):
+                    ax.errorbar(
+                        x + offset,
+                        values,
+                        yerr=np.vstack([low_errors, high_errors]),
+                        fmt="none",
+                        ecolor="#111827",
+                        capsize=3,
+                        linewidth=1.0,
+                    )
+            ax.axhline(0.0, color="#111827", linewidth=0.9)
+            ax.set_xticks(x)
+            ax.set_xticklabels(groups, rotation=20, ha="right")
+            ax.set_title(domain.replace("_", " "))
+            ax.grid(axis="y", alpha=0.25, linewidth=0.7)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            if available_spaces:
+                ax.legend(frameon=False)
+        axes[0].set_ylabel(f"Fixed-effect Pearson r vs {target_key}")
+        fig.suptitle("Matched overlap law across attention depth", fontsize=14)
+        fig.text(
+            0.01,
+            0.01,
+            "Each statistic demeans overlap and target inside image_id x perturbation_name x severity. "
+            "Error bars are bootstrap 95% CIs over matched units; PNG and PDF are both saved.",
+            ha="left",
+            va="bottom",
+            fontsize=8,
+            color="#374151",
+        )
+        fig.tight_layout(rect=(0, 0.08, 1, 0.94))
+        _save_paper_figure(fig, out_dir / "matched_overlap_fixed_effects_raw_by_group.png")
+        plt.close(fig)
+
     rows = [
         row
         for row in summaries
@@ -655,7 +758,7 @@ def _plot_summary(out_dir: Path, summaries: Sequence[Dict[str, Any]], target_key
         color="#374151",
     )
     fig.tight_layout(rect=(0, 0.08, 1, 0.94))
-    fig.savefig(out_dir / "matched_overlap_fixed_effects_late_raw.png", dpi=180)
+    _save_paper_figure(fig, out_dir / "matched_overlap_fixed_effects_late_raw.png")
     plt.close(fig)
 
 

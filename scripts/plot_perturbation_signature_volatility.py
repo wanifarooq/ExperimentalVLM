@@ -22,6 +22,21 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+matplotlib.rcParams.update(
+    {
+        "figure.dpi": 120,
+        "savefig.dpi": 300,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "font.size": 10,
+        "axes.titlesize": 11,
+        "axes.labelsize": 10,
+        "legend.fontsize": 9,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+    }
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -46,6 +61,11 @@ SIGNATURE_COLORS = {
     "broadband": "#8c6bb1",
     "high_freq": "#de2d26",
 }
+
+
+def _save_paper_figure(fig: plt.Figure, out_path: Path) -> None:
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
 
 
 def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -215,7 +235,7 @@ def _bar_plot(
         color="#374151",
     )
     fig.tight_layout(rect=(0, 0.05, 1, 1))
-    fig.savefig(out_path, dpi=180)
+    _save_paper_figure(fig, out_path)
     plt.close(fig)
 
 
@@ -266,7 +286,7 @@ def _heatmap(
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label("Mean log-likelihood volatility")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=180)
+    _save_paper_figure(fig, out_path)
     plt.close(fig)
 
 
