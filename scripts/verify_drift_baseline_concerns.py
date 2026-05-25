@@ -46,9 +46,9 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-DEFAULT_RUN = Path(
-    "/home/farooq/Public/vlm-robustness/"
-    "frequency_alignment_outputs_server_2d_100_20260512_023014"
+DEFAULT_RUN = (
+    Path(__file__).resolve().parent.parent
+    / "frequency_alignment_outputs_server_2d_100_20260512_023014"
 )
 
 LEVEL_PAIRS: List[Tuple[str, str]] = [

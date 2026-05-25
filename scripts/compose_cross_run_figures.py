@@ -35,13 +35,17 @@ import numpy as np
 # ---------------------------------------------------------------------------
 plt.rcParams.update({
     "font.family":        "serif",
-    "font.serif":         ["DejaVu Serif", "Computer Modern", "Times New Roman"],
-    "font.size":          9,
-    "axes.titlesize":     10,
-    "axes.labelsize":     9,
-    "xtick.labelsize":    8,
-    "ytick.labelsize":    8,
-    "legend.fontsize":    7.5,
+    "font.serif":         ["Times New Roman", "Times", "Liberation Serif", "DejaVu Serif"],
+    "mathtext.fontset":   "stix",
+    # Sizes are ~1.7-1.8x typical to survive the down-scaling in ACL single-column
+    # layout (\linewidth=3.2in but figsize=7-8in). Empirically tuned to be
+    # readable in PDF without overlapping layouts.
+    "font.size":          18,
+    "axes.titlesize":     18,
+    "axes.labelsize":     18,
+    "xtick.labelsize":    16,
+    "ytick.labelsize":    16,
+    "legend.fontsize":    16,
     "legend.frameon":     True,
     "legend.framealpha":  0.92,
     "legend.fancybox":    False,
@@ -82,7 +86,7 @@ PALETTE = {
     "within":    "#55a868",
 }
 
-ROOT = Path("/home/farooq/Public/vlm-robustness")
+ROOT = Path(__file__).resolve().parent.parent
 FIG_DIR = ROOT / "paper" / "figures"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -115,7 +119,8 @@ def _save(fig, name: str) -> None:
 # ---------------------------------------------------------------------------
 
 def fig_n1_trajectory() -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(7.4, 5.4), sharey=False)
+    # Slightly taller — gives legend room without overlapping the curves.
+    fig, axes = plt.subplots(2, 2, figsize=(7.4, 6.0), sharey=False)
     # First collect global y-range
     all_y = []
     data: Dict[str, Dict[str, list]] = {}
@@ -147,7 +152,7 @@ def fig_n1_trajectory() -> None:
         ax.annotate(f"peak Δ={gaps[peak]:+.2f}\nlayer {peak}",
                     xy=(peak, d["wordy"][peak]),
                     xytext=(6, -1), textcoords="offset points",
-                    fontsize=7, color="0.2",
+                    fontsize=11.8, color="0.2",
                     bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.7", lw=0.4))
         ax.set_title(f"{label}   (B={d['B']})")
         ax.set_xlabel("decoder layer index")
@@ -155,9 +160,8 @@ def fig_n1_trajectory() -> None:
         ax.set_ylim(y_lo, y_hi)
         ax.set_xlim(-0.5, len(d["layers"]) - 0.5)
         if label == RUN_ORDER[0]:
-            ax.legend(loc="lower right", fontsize=7)
-    fig.suptitle(r"Layer-wise mean $G(t)$ — primary L1–L4 vs wordy L5–L8",
-                 y=1.005, fontsize=10.5)
+            ax.legend(loc="lower right", fontsize=11.8)
+    # Suptitle removed — caption in paper provides this info.
     fig.tight_layout()
     _save(fig, "n1_trajectory_grid")
 
@@ -182,7 +186,9 @@ def fig_n2_signature_matrices() -> None:
     arr = {label: np.array([[matrices[label].get(d, {}).get(w, np.nan) for w in wt_order]
                             for d in delta_order]) for label in RUN_ORDER}
     vmax = max(np.nanmax(arr[label]) for label in RUN_ORDER)
-    fig, axes = plt.subplots(2, 2, figsize=(6.8, 6.6), sharey=True)
+    # Wider + more column spacing so adjacent panels (and their xtick labels)
+    # don't overlap at the larger font size.
+    fig, axes = plt.subplots(2, 2, figsize=(8.0, 6.6), sharey=True)
     for ax, label in zip(axes.flat, RUN_ORDER):
         ax.grid(False)
         im = ax.imshow(arr[label], cmap="magma_r", aspect="auto", vmin=0, vmax=vmax)
@@ -193,7 +199,7 @@ def fig_n2_signature_matrices() -> None:
                     continue
                 colour = "white" if v > vmax * 0.55 else "black"
                 ax.text(j, i, f"{v:.2f}", ha="center", va="center",
-                        color=colour, fontsize=9, weight="bold")
+                        color=colour, fontsize=15.2, weight="bold")
         ax.set_xticks(range(len(wt_order))); ax.set_xticklabels(wt_order)
         ax.set_yticks(range(len(delta_order))); ax.set_yticklabels(delta_order)
         ax.set_xlabel(r"$W_t$ shape")
@@ -202,12 +208,13 @@ def fig_n2_signature_matrices() -> None:
         ax.set_title(label)
         for spine in ("top", "right", "left", "bottom"):
             ax.spines[spine].set_visible(False)
-    fig.suptitle(r"Mean log-likelihood volatility per $(\Delta F,\,W_t)$ cell", y=0.99, fontsize=10.5)
-    fig.subplots_adjust(left=0.08, right=0.86, top=0.93, bottom=0.08, wspace=0.18, hspace=0.30)
+    # Suptitle removed — caption in paper provides this info.
+    # wspace tightened from 0.45 → 0.30 (no need for so much), hspace bumped 0.30 → 0.55 (rows had been crowded).
+    fig.subplots_adjust(left=0.08, right=0.86, top=0.97, bottom=0.08, wspace=0.30, hspace=0.55)
     cbar_ax = fig.add_axes([0.89, 0.18, 0.020, 0.66])
     cbar = fig.colorbar(im, cax=cbar_ax)
-    cbar.set_label("mean log-likelihood volatility", fontsize=8)
-    cbar.ax.tick_params(labelsize=7)
+    cbar.set_label("mean log-likelihood volatility", fontsize=13.5)
+    cbar.ax.tick_params(labelsize=10)
     _save(fig, "n2_signature_matrices_grid")
 
 
@@ -226,20 +233,22 @@ def fig_n3_overlap_law_bars() -> None:
         within_med.append(float(s["within_pearson_median"]))
     x = np.arange(len(RUN_ORDER))
     width = 0.26
-    fig, ax = plt.subplots(figsize=(7.4, 3.6))
-    bars1 = ax.bar(x - width, grouped_r,  width, label="grouped (population)", color=PALETTE["grouped"], edgecolor="white", linewidth=0.5)
-    bars2 = ax.bar(x,         fe_r,       width, label="matched-FE (full demeaned)", color=PALETTE["fe"], edgecolor="white", linewidth=0.5)
+    # Taller + shorter ylabel so the y-axis label is fully visible.
+    fig, ax = plt.subplots(figsize=(7.4, 4.4))
+    bars1 = ax.bar(x - width, grouped_r,  width, label="grouped", color=PALETTE["grouped"], edgecolor="white", linewidth=0.5)
+    bars2 = ax.bar(x,         fe_r,       width, label="matched-FE", color=PALETTE["fe"], edgecolor="white", linewidth=0.5)
     bars3 = ax.bar(x + width, within_med, width, label="within-cell median",  color=PALETTE["within"], edgecolor="white", linewidth=0.5)
     for bars in (bars1, bars2, bars3):
-        ax.bar_label(bars, fmt="%.2f", padding=2, fontsize=7)
+        ax.bar_label(bars, fmt="%.2f", padding=2, fontsize=11.8)
     ax.axhline(0, color="black", lw=0.6)
     ax.set_xticks(x); ax.set_xticklabels(RUN_ORDER)
-    ax.set_ylabel(r"Pearson $r$  (overlap $\langle W_t,\,\Delta F\rangle$ vs volatility)")
-    ax.set_ylim(0, max(grouped_r + fe_r + within_med) * 1.18)
-    ax.legend(loc="upper right", ncol=3, fontsize=7.5,
-              bbox_to_anchor=(1.0, 1.13), frameon=False)
-    ax.set_title("Overlap-law predictive strength across the four 500-sample runs", pad=22)
-    fig.subplots_adjust(left=0.10, right=0.98, top=0.85, bottom=0.12)
+    # Shortened ylabel — full description in paper caption.
+    ax.set_ylabel(r"Pearson $r$  (overlap vs volatility)")
+    ax.set_ylim(0, max(grouped_r + fe_r + within_med) * 1.30)
+    ax.legend(loc="upper right", ncol=3, fontsize=12.6,
+              bbox_to_anchor=(1.0, 1.10), frameon=False)
+    # Title removed — caption in paper provides this info.
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.90, bottom=0.13)
     _save(fig, "n3_overlap_law_bars")
 
 
@@ -278,14 +287,13 @@ def fig_n4_band_mass() -> None:
         ax.axvspan(B - 1.5, B - 0.5, color="#cc4d4d", alpha=0.10, zorder=0)
         ax.set_xticks(range(B))
         ax.set_title(f"{label}   (B={B})")
-        ax.set_xlabel(r"radial band $\omega$  (0 = DC, $B-1$ = highest)")
+        ax.set_xlabel(r"radial band $\omega$")
         ax.set_ylabel(r"$W_t(\omega)$ mass")
         ax.set_ylim(0, y_max)
         ax.yaxis.set_major_formatter(mtick.FormatStrFormatter("%.2f"))
         if label == RUN_ORDER[0]:
-            ax.legend(loc="upper right", fontsize=7, ncol=2)
-    fig.suptitle(r"$W_t^{(\mathrm{last\_2})}$ mass per radial band — the highest band carries only 3–5 % of the mass",
-                 y=1.005, fontsize=10.5)
+            ax.legend(loc="upper right", fontsize=11.8, ncol=2)
+    # Suptitle removed — caption in paper provides this info.
     fig.tight_layout()
     _save(fig, "n4_band_mass")
 
@@ -314,19 +322,21 @@ def fig_n5_designed_vs_actual() -> None:
     vols  = [float(r["mean_loglik_volatility"]) for r in rows]
     dominant = {n: max(sigs.items(), key=lambda kv: kv[1])[0] for n, sigs in by_designed.items()}
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.6, 5.8),
-                             gridspec_kw={"width_ratios": [1.0, 0.85], "wspace": 0.05})
+    # Larger figsize + more wspace so the two panel titles + labels don't collide.
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 6.4),
+                             gridspec_kw={"width_ratios": [1.0, 0.85], "wspace": 0.12})
     ax = axes[0]
     y = np.arange(len(names))
     colours = [PALETTE.get(dominant.get(n, "broadband"), "gray") for n in names]
     ax.barh(y, vols, color=colours, edgecolor="white", linewidth=0.5)
     for yi, v in zip(y, vols):
-        ax.text(v + 0.07, yi, f"{v:.2f}", va="center", fontsize=8)
-    ax.set_yticks(y); ax.set_yticklabels(names, fontsize=8)
-    ax.set_xlabel(r"mean log-likelihood volatility  (GQA-8B)")
+        ax.text(v + 0.07, yi, f"{v:.2f}", va="center", fontsize=13.5)
+    ax.set_yticks(y); ax.set_yticklabels(names, fontsize=13.5)
+    # Shortened xlabel (full description goes in caption).
+    ax.set_xlabel(r"mean volatility (GQA-8B)")
     ax.set_xlim(0, max(vols) * 1.13)
-    ax.set_title("Mean volatility per operator   (bar colour = dominant $\\Delta F$ signature)",
-                 fontsize=9.5, pad=8)
+    # Shortened title — colour explanation moves to caption.
+    ax.set_title("Mean volatility per operator", fontsize=15.5, pad=8)
     ax.grid(axis="x", alpha=0.25)
     ax.grid(axis="y", visible=False)
 
@@ -342,13 +352,13 @@ def fig_n5_designed_vs_actual() -> None:
         left += frac
     ax2.set_yticks(y); ax2.set_yticklabels([])
     ax2.set_xlim(0, 1.0)
-    ax2.set_xlabel(r"fraction of perturbed images with that measured $\Delta F$ signature")
-    ax2.set_title(r"Signature mix per operator", fontsize=9.5, pad=8)
-    ax2.legend(loc="lower right", fontsize=8, frameon=True, ncol=1)
+    # Shortened xlabel — explanation in caption.
+    ax2.set_xlabel(r"fraction with measured $\Delta F$ signature")
+    ax2.set_title(r"Signature mix per operator", fontsize=15.5, pad=8)
+    ax2.legend(loc="lower right", fontsize=13.5, frameon=True, ncol=1)
     ax2.grid(axis="x", alpha=0.25)
     ax2.grid(axis="y", visible=False)
-    fig.suptitle(r"Designed perturbation $\rightarrow$ measured $\Delta F$ signature (GQA-8B)",
-                 y=1.00, fontsize=10.5, weight="bold")
+    # Suptitle removed — caption in paper provides this info.
     fig.tight_layout()
     _save(fig, "n5_designed_vs_actual")
 

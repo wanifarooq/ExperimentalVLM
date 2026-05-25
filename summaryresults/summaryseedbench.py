@@ -6,15 +6,15 @@ import os
 
 # 1. Setup and File Definitions
 # files = {
-#     '2B': '/home/farooq/Downloads/Vlmresults/seedbench/qwen/summaries/seedbench_qwen2B.txt',
-#     '4B': '/home/farooq/Downloads/Vlmresults/seedbench/qwen/summaries/seedbench_qwen4B.txt',
-#     '8B': '/home/farooq/Downloads/Vlmresults/seedbench/qwen/summaries/seedbench_qwen8B.txt',
-#     '32B': '/home/farooq/Downloads/Vlmresults/seedbench/qwen/summaries/seedbench_qwen32B.txt'
+#     '2B': '<DATA_ROOT>/Vlmresults/seedbench/qwen/summaries/seedbench_qwen2B.txt',
+#     '4B': '<DATA_ROOT>/Vlmresults/seedbench/qwen/summaries/seedbench_qwen4B.txt',
+#     '8B': '<DATA_ROOT>/Vlmresults/seedbench/qwen/summaries/seedbench_qwen8B.txt',
+#     '32B': '<DATA_ROOT>/Vlmresults/seedbench/qwen/summaries/seedbench_qwen32B.txt'
 # }
 
 files = {
-    '0.5B': '/home/farooq/Downloads/Vlmresults/seedbench/llava/summaries/seedbench_0p5B.txt',
-    '7B': '/home/farooq/Downloads/Vlmresults/seedbench/llava/summaries/seedbench_7B.txt'
+    '0.5B': '<DATA_ROOT>/Vlmresults/seedbench/llava/summaries/seedbench_0p5B.txt',
+    '7B': '<DATA_ROOT>/Vlmresults/seedbench/llava/summaries/seedbench_7B.txt'
 }
 
 # Lists to store extracted data

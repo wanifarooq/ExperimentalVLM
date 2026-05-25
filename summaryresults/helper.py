@@ -4,8 +4,8 @@ import matplotlib.image as mpimg
 import os
 
 # --- CONFIGURATION ---
-INPUT_FOLDER = '/home/farooq/Downloads/Overleaf Projects (1 items)/VLM Robustness (ARR Jan 5th)/freequencyResults/seedBench/sample_47628'   # Name of folder containing your PNGs
-OUTPUT_FOLDER = '/home/farooq/Downloads/Overleaf Projects (1 items)/VLM Robustness (ARR Jan 5th)/freequencyResults/seedBench/sample_47628/pdf'     # Where PDFs will be saved
+INPUT_FOLDER = '<DATA_ROOT>/freequencyResults/seedBench/sample_47628'   # Name of folder containing your PNGs
+OUTPUT_FOLDER = '<DATA_ROOT>/freequencyResults/seedBench/sample_47628/pdf'     # Where PDFs will be saved
 import img2pdf
 import os
 

@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-ROOT = Path("/home/farooq/Public/vlm-robustness")
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from frequency_alignment.perturbations import build_perturbation_suite

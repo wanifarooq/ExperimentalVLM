@@ -7,8 +7,8 @@ import os
 # 1. SETUP AND FILE DEFINITIONS
 # ==========================================
 files = {
-    '2B': '/home/farooq/Downloads/Vlmresults/pope/qwen/summaries/summary_pope_adversarial_2B.txt',
-    '8B': '/home/farooq/Downloads/Vlmresults/pope/qwen/summaries/summary_pope_adversarial_8B.txt'
+    '2B': '<DATA_ROOT>/Vlmresults/pope/qwen/summaries/summary_pope_adversarial_2B.txt',
+    '8B': '<DATA_ROOT>/Vlmresults/pope/qwen/summaries/summary_pope_adversarial_8B.txt'
 }
 
 # Headers for the 4 specific binary confusion tables

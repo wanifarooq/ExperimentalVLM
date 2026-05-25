@@ -562,11 +562,35 @@ def _extract_attention_for_prompt(
         )
         return None
 
-    # Convert attention tensors to numpy
-    attn_list = []
-    for attn_tensor in internals.cross_attention_weights:
-        if attn_tensor is not None:
-            attn_list.append(attn_tensor.cpu().float().numpy())
+    raw_layer_indices = list(
+        internals.cross_attention_layer_indices
+        or range(len(internals.cross_attention_weights))
+    )
+    if len(raw_layer_indices) != len(internals.cross_attention_weights):
+        raw_layer_indices = list(range(len(internals.cross_attention_weights)))
+
+    # Convert attention tensors to numpy and drop non-finite layers. Some
+    # LLaVA-OneVision checkpoints can emit NaN attention in the final decoder
+    # layer under eager attention; one bad layer would otherwise poison the
+    # overall/late W_t averages while the neighboring layers remain valid.
+    attn_list: List[np.ndarray] = []
+    layer_indices: List[int] = []
+    for layer_index, attn_tensor in zip(raw_layer_indices, internals.cross_attention_weights):
+        if attn_tensor is None:
+            continue
+        attn_np = attn_tensor.cpu().float().numpy()
+        if not np.isfinite(attn_np).all():
+            if extraction_stats is not None:
+                extraction_stats["nonfinite_attention_layers_skipped"] = (
+                    extraction_stats.get("nonfinite_attention_layers_skipped", 0) + 1
+                )
+            logger.warning(
+                "Skipping non-finite attention layer %s for Exp2 FFT filter",
+                layer_index,
+            )
+            continue
+        attn_list.append(attn_np)
+        layer_indices.append(int(layer_index))
 
     if not attn_list:
         if extraction_stats is not None:
@@ -616,7 +640,6 @@ def _extract_attention_for_prompt(
                 ]
         return payload
 
-    layer_indices = list(internals.cross_attention_layer_indices or range(len(attn_list)))
     total_layers = max(1, adapter.num_layers)
     overall = _summarize_group(attn_list, layer_indices)
     per_layer = compute_attention_power_spectrum_by_layer(
@@ -639,16 +662,28 @@ def _extract_attention_for_prompt(
     # Exp 5 can read them for the radial overlap law, regardless of whether
     # the 2D overlap pathway is enabled. (The 2D pathway separately consumes
     # ``power_2d`` from the per-group result when ``store_2d_spectra`` is on.)
-    last_pairs = sorted(
-        zip(layer_indices, attn_list),
-        key=lambda pair: int(pair[0]),
-        reverse=True,
-    )[:LAST_LAYER_MAX_OFFSET]
-    for offset, (layer_index, attn) in enumerate(last_pairs, start=1):
-        group_name = f"last_{offset}"
-        if group_name not in LAST_LAYER_GROUP_ORDER:
+    attn_by_layer = {int(layer_index): attn for layer_index, attn in zip(layer_indices, attn_list)}
+    for group_name in LAST_LAYER_GROUP_ORDER:
+        if not group_name.startswith("last_"):
             continue
-        group_stats[group_name] = _summarize_group([attn], [int(layer_index)])
+        try:
+            offset = int(group_name.split("_", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        target_layer_index = total_layers - offset
+        attn = attn_by_layer.get(target_layer_index)
+        if attn is None:
+            if extraction_stats is not None:
+                extraction_stats["missing_last_layer_groups"] = (
+                    extraction_stats.get("missing_last_layer_groups", 0) + 1
+                )
+            logger.warning(
+                "Cannot emit %s filter: model layer %s was not available after attention filtering",
+                group_name,
+                target_layer_index,
+            )
+            continue
+        group_stats[group_name] = _summarize_group([attn], [int(target_layer_index)])
 
     if extraction_stats is not None:
         extraction_stats["valid"] = extraction_stats.get("valid", 0) + 1

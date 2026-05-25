@@ -7,15 +7,15 @@ import os
 # --- 1. Configuration ---
 # Dictionary mapping model labels to filenames
 # files = {
-#     '2B': '/home/farooq/Downloads/Vlmresults/MMMu/qwen/summaries/mmmu_validation_qwen2B.txt',
-#     '4B': '/home/farooq/Downloads/Vlmresults/MMMu/qwen/summaries/mmmu_validation_qwen4B.txt',
-#     '8B': '/home/farooq/Downloads/Vlmresults/MMMu/qwen/summaries/mmmu_validation_qwen8B.txt',
-#     '32B':'/home/farooq/Downloads/Vlmresults/MMMu/qwen/summaries/mmmu_validation_qwen32B.txt'
+#     '2B': '<DATA_ROOT>/Vlmresults/MMMu/qwen/summaries/mmmu_validation_qwen2B.txt',
+#     '4B': '<DATA_ROOT>/Vlmresults/MMMu/qwen/summaries/mmmu_validation_qwen4B.txt',
+#     '8B': '<DATA_ROOT>/Vlmresults/MMMu/qwen/summaries/mmmu_validation_qwen8B.txt',
+#     '32B':'<DATA_ROOT>/Vlmresults/MMMu/qwen/summaries/mmmu_validation_qwen32B.txt'
 # }
 
 files = {
-    '0p5B': '/home/farooq/Downloads/Vlmresults/MMMu/llava/summaries/mmmu_validation_0p5B.txt',
-    '7B': '/home/farooq/Downloads/Vlmresults/MMMu/llava/summaries/mmmu_validation_7B.txt',
+    '0p5B': '<DATA_ROOT>/Vlmresults/MMMu/llava/summaries/mmmu_validation_0p5B.txt',
+    '7B': '<DATA_ROOT>/Vlmresults/MMMu/llava/summaries/mmmu_validation_7B.txt',
 }
 
 # List of perturbation types to track
