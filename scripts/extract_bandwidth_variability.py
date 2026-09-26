@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-ROOT = Path("/home/farooq/Public/vlm-robustness")
+ROOT = Path(__file__).resolve().parent.parent
 RUNS = {
     "CLEVR-2B": "qwen_clevr_2B/frequency_alignment_outputs_clevr_2B_500_20260516_132931",
     "CLEVR-8B": "qwen_clevr_8B/frequency_alignment_outputs_clevr_8B_500_20260516_131942",

@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-ROOT = Path("/home/farooq/Public/vlm-robustness")
+ROOT = Path(__file__).resolve().parent.parent
 
 PRODUCTION_RUNS = {
     "CLEVR-2B (500)": "qwen_clevr_2B/frequency_alignment_outputs_clevr_2B_500_20260516_132931",

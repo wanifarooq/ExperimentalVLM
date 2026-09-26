@@ -24,7 +24,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-ROOT = Path("/home/farooq/Public/vlm-robustness")
+ROOT = Path(__file__).resolve().parent.parent
 RUNS = {
     "GQA-2B":   "qwen_gpa_2B/frequency_alignment_outputs_gqa_2B_500_20260517_032513",
     "CLEVR-2B": "qwen_clevr_2B/frequency_alignment_outputs_clevr_2B_500_20260516_132931",
